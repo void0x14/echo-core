@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <cassert>
 #include <stdexcept>
+#include <unistd.h>
+#include <sys/mman.h>
 
 #include "types.h"
 #include "config.h"
@@ -11,10 +13,18 @@ class AlignedMemoryPool {
     uint8_t* base_;
     size_t   total_size_;
     size_t   offset_;
+    bool     owns_mmap_;
+    int      alignment_;
+    size_t   page_delta_;   // mmap offset rounded down to page boundary
+
+    // Internal: data pointer = base_ + page_delta_
+    uint8_t* data_ptr() { return base_ + page_delta_; }
+    const uint8_t* data_ptr() const { return base_ + page_delta_; }
 
 public:
     explicit AlignedMemoryPool(size_t total_bytes)
-        : base_(nullptr), total_size_(total_bytes), offset_(0)
+        : base_(nullptr), total_size_(total_bytes), offset_(0),
+          owns_mmap_(false), alignment_(32), page_delta_(0)
     {
         if (total_bytes == 0) return;
         void* ptr = nullptr;
@@ -24,33 +34,93 @@ public:
         base_ = static_cast<uint8_t*>(ptr);
     }
 
+    AlignedMemoryPool(int fd, off_t data_offset, size_t data_size, int alignment = 32)
+        : base_(nullptr), total_size_(data_size), offset_(0),
+          owns_mmap_(true), alignment_(alignment), page_delta_(0)
+    {
+        if (data_size == 0) return;
+        // mmap offset must be page-aligned
+        size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+        off_t aligned_off = static_cast<off_t>(
+            static_cast<size_t>(data_offset) & ~(page_size - 1));
+        page_delta_ = static_cast<size_t>(data_offset - aligned_off);
+        size_t map_size = data_size + page_delta_;
+        void* ptr = ::mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, fd, aligned_off);
+        if (ptr == MAP_FAILED)
+            throw std::runtime_error("AlignedMemoryPool: mmap failed");
+        base_ = static_cast<uint8_t*>(ptr);
+        total_size_ = map_size;  // munmap needs original mapping size
+    }
+
     ~AlignedMemoryPool() {
-        free(base_);
+        if (!base_) return;
+        if (owns_mmap_) {
+            ::munmap(base_, total_size_);
+        } else {
+            std::free(base_);
+        }
     }
 
     template<typename T>
     T* alloc(size_t count) {
-        // Align the current offset to alignof(T) or CACHE_LINE_SIZE, whichever is larger
         constexpr size_t align = (alignof(T) > CACHE_LINE_SIZE) ? alignof(T) : CACHE_LINE_SIZE;
         offset_ = (offset_ + align - 1) & ~(align - 1);
         size_t bytes = count * sizeof(T);
-        assert(offset_ + bytes <= total_size_);
-        T* p = reinterpret_cast<T*>(base_ + offset_);
+        assert(offset_ + bytes + page_delta_ <= total_size_);
+        T* p = reinterpret_cast<T*>(data_ptr() + offset_);
         offset_ += bytes;
         return p;
     }
 
     template<typename T>
     T* at(size_t byte_offset) {
-        assert(byte_offset + sizeof(T) <= total_size_);  // note: element count is caller's concern for array access
-        return reinterpret_cast<T*>(base_ + byte_offset);
+        assert(byte_offset + sizeof(T) + page_delta_ <= total_size_);
+        return reinterpret_cast<T*>(data_ptr() + byte_offset);
+    }
+
+    template<typename T>
+    const T* at(size_t byte_offset) const {
+        assert(byte_offset + sizeof(T) + page_delta_ <= total_size_);
+        return reinterpret_cast<const T*>(data_ptr() + byte_offset);
     }
 
     size_t bytes_used() const { return offset_; }
-    size_t bytes_total() const { return total_size_; }
+    size_t bytes_total() const { return total_size_ - page_delta_; }
+    int alignment() const { return alignment_; }
 
     AlignedMemoryPool(const AlignedMemoryPool&) = delete;
     AlignedMemoryPool& operator=(const AlignedMemoryPool&) = delete;
+
+    AlignedMemoryPool(AlignedMemoryPool&& other) noexcept
+        : base_(other.base_), total_size_(other.total_size_), offset_(other.offset_),
+          owns_mmap_(other.owns_mmap_), alignment_(other.alignment_),
+          page_delta_(other.page_delta_)
+    {
+        other.base_ = nullptr;
+        other.total_size_ = 0;
+        other.owns_mmap_ = false;
+        other.page_delta_ = 0;
+    }
+
+    AlignedMemoryPool& operator=(AlignedMemoryPool&& other) noexcept {
+        if (this != &other) {
+            if (base_) {
+                if (owns_mmap_) ::munmap(base_, total_size_);
+                else std::free(base_);
+            }
+            base_ = other.base_;
+            total_size_ = other.total_size_;
+            offset_ = other.offset_;
+            owns_mmap_ = other.owns_mmap_;
+            alignment_ = other.alignment_;
+            page_delta_ = other.page_delta_;
+            other.base_ = nullptr;
+            other.total_size_ = 0;
+            other.owns_mmap_ = false;
+            other.page_delta_ = 0;
+        }
+        return *this;
+    }
 };
 
 struct WeightLayout {

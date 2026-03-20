@@ -5,6 +5,8 @@
 #include <cassert>
 #include <cmath>
 #include <algorithm>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "kernels/quant.h"
 
@@ -73,17 +75,122 @@ InferenceEngine::~InferenceEngine() {
 }
 
 void InferenceEngine::load_weights(const fp16_t* weights) {
-    std::memcpy(weight_pool_.at<fp16_t>(0), weights, layout_.total_size);
+    std::memcpy(resolve_weight<fp16_t>(0), weights, layout_.total_size);
+}
+
+void InferenceEngine::load_weights_from_gguf(const GGUFReader& reader,
+                                              const std::string& model_path) {
+    int align = reader.alignment();
+    reader.assert_alignment(align);
+
+    int fd = ::open(model_path.c_str(), O_RDONLY);
+    if (fd < 0)
+        throw std::runtime_error("InferenceEngine: cannot open '" + model_path + "'");
+
+    off_t data_off = reader.data_offset();
+    size_t data_size = 0;
+    for (const auto& [name, info] : reader.tensors()) {
+        size_t end = static_cast<size_t>(info.offset) + static_cast<size_t>(info.size);
+        if (end > data_size) data_size = end;
+    }
+
+    weight_pool_ = AlignedMemoryPool(fd, data_off, data_size, align);
+    ::close(fd);
+
+    auto pool_off = [&](const TensorInfo* ti) -> size_t {
+        return static_cast<size_t>(ti->offset);
+    };
+
+    // Search for tensor with blk.{idx}.{suffix} or just {suffix}
+    auto find_layer_tensor = [&](uint32_t idx, const char* suffix) -> const TensorInfo* {
+        std::string prefixed = "blk." + std::to_string(idx) + "." + suffix;
+        const TensorInfo* ti = reader.find_tensor_by_suffix(prefixed);
+        if (!ti) ti = reader.find_tensor_by_suffix(suffix);
+        return ti;
+    };
+
+    // Embedding
+    {
+        const TensorInfo* ti = reader.find_tensor_by_suffix("token_embd.weight");
+        if (ti)
+            gguf_offset_map_[layout_.token_embedding_offset] = pool_off(ti);
+    }
+
+    // Per-layer tensors
+    for (uint32_t l = 0; l < config_.num_layers; ++l) {
+        size_t layer_base = layout_.token_embedding_size
+                          + static_cast<size_t>(l) * layout_.per_layer_size;
+
+        auto try_map = [&](const char* suffix, size_t layout_rel_offset) {
+            const TensorInfo* ti = find_layer_tensor(l, suffix);
+            if (ti)
+                gguf_offset_map_[layer_base + layout_rel_offset] = pool_off(ti);
+        };
+
+        // Norm
+        try_map("attn_norm.weight", layout_.norm_weight_offset);
+
+        // Attention projections — try separate Q/K/V first, then fused QKV
+        const TensorInfo* q = find_layer_tensor(l, "attn_q.weight");
+        const TensorInfo* k = find_layer_tensor(l, "attn_k.weight");
+        const TensorInfo* v = find_layer_tensor(l, "attn_v.weight");
+        const TensorInfo* qkv = find_layer_tensor(l, "attn_qkv.weight");
+
+        if (q && k && v) {
+            gguf_offset_map_[layer_base + layout_.q_proj_offset] = pool_off(q);
+            gguf_offset_map_[layer_base + layout_.k_proj_offset] = pool_off(k);
+            gguf_offset_map_[layer_base + layout_.v_proj_offset] = pool_off(v);
+        } else if (qkv) {
+            // Fused QKV: point Q/K/V to the same tensor (caller must handle splitting)
+            size_t qkv_off = pool_off(qkv);
+            gguf_offset_map_[layer_base + layout_.q_proj_offset] = qkv_off;
+            gguf_offset_map_[layer_base + layout_.k_proj_offset] = qkv_off;
+            gguf_offset_map_[layer_base + layout_.v_proj_offset] = qkv_off;
+        }
+
+        // Output projection (attention output or gate)
+        try_map("attn_output.weight", layout_.o_proj_offset);
+        if (!gguf_offset_map_.count(layer_base + layout_.o_proj_offset))
+            try_map("attn_gate.weight", layout_.o_proj_offset);
+
+        // FFN
+        switch (config_.ffn_type) {
+            case ModelConfig::FFNType::Dense:
+                try_map("ffn_up.weight",   layout_.ffn_weight1_offset);
+                try_map("ffn_down.weight", layout_.ffn_weight2_offset);
+                break;
+            case ModelConfig::FFNType::GatedSwiGLU:
+            case ModelConfig::FFNType::GatedGeLU:
+                try_map("ffn_gate.weight", layout_.ffn_weight1_offset);
+                try_map("ffn_up.weight",   layout_.ffn_weight2_offset);
+                try_map("ffn_down.weight", layout_.ffn_weight3_offset);
+                break;
+        }
+    }
+
+    // Final norm + output projection
+    {
+        const TensorInfo* ti = reader.find_tensor_by_suffix("output_norm.weight");
+        if (ti)
+            gguf_offset_map_[layout_.final_norm_offset] = pool_off(ti);
+    }
+    {
+        const TensorInfo* ti = reader.find_tensor_by_suffix("output.weight");
+        if (ti)
+            gguf_offset_map_[layout_.output_proj_offset] = pool_off(ti);
+    }
 }
 
 void InferenceEngine::forward(const uint32_t* tokens, uint32_t seq_len, float* logits) {
     const uint32_t hidden = config_.hidden_dim;
     const uint32_t vocab  = config_.vocab_size;
 
-    // Token embedding lookup: convert FP16 row of last token to FP32
-    const fp16_t* emb_row = weight_pool_.at<fp16_t>(
-        layout_.token_embedding_offset) + static_cast<size_t>(tokens[seq_len - 1]) * hidden;
-    fp16_to_fp32_row(emb_row, hidden_state_, hidden);
+    // Token embedding lookup
+    if (has_weight(layout_.token_embedding_offset)) {
+        const fp16_t* emb_row = resolve_weight<fp16_t>(
+            layout_.token_embedding_offset) + static_cast<size_t>(tokens[seq_len - 1]) * hidden;
+        fp16_to_fp32_row(emb_row, hidden_state_, hidden);
+    }
 
     // Run through each transformer layer
     for (uint32_t l = 0; l < config_.num_layers; ++l) {
@@ -91,13 +198,17 @@ void InferenceEngine::forward(const uint32_t* tokens, uint32_t seq_len, float* l
     }
 
     // Final normalization
-    const fp16_t* final_norm = weight_pool_.at<fp16_t>(layout_.final_norm_offset);
-    norm(hidden_state_, hidden_state_, final_norm);
+    if (has_weight(layout_.final_norm_offset)) {
+        const fp16_t* final_norm = resolve_weight<fp16_t>(layout_.final_norm_offset);
+        norm(hidden_state_, hidden_state_, final_norm);
+    }
 
     // Output projection: hidden -> vocab
-    const fp16_t* out_w = weight_pool_.at<fp16_t>(layout_.output_proj_offset);
-    std::memset(logits, 0, vocab * sizeof(float));
-    matvec(hidden_state_, logits, out_w, vocab, hidden);
+    if (has_weight(layout_.output_proj_offset)) {
+        const fp16_t* out_w = resolve_weight<fp16_t>(layout_.output_proj_offset);
+        std::memset(logits, 0, vocab * sizeof(float));
+        matvec(hidden_state_, logits, out_w, vocab, hidden);
+    }
 }
 
 void InferenceEngine::layer_forward(uint32_t layer_idx, float* input, float* output) {
@@ -109,14 +220,15 @@ void InferenceEngine::layer_forward(uint32_t layer_idx, float* input, float* out
     current_layer_base_ = layer_base;
 
     // Get norm weight for this layer
-    const fp16_t* layer_norm = weight_pool_.at<fp16_t>(
+    const fp16_t* layer_norm = resolve_weight<fp16_t>(
         layer_base + layout_.norm_weight_offset);
 
     // 1. residual = input (skip connection)
     std::memcpy(residual_, input, hidden * sizeof(float));
 
     // 2. norm(input, normed, layer_norm_weight)
-    norm(input, output, layer_norm);
+    if (layer_norm)
+        norm(input, output, layer_norm);
 
     // 3. attention(layer_idx, normed, attn_out)
     attention(layer_idx, output, attn_out_);
@@ -130,8 +242,8 @@ void InferenceEngine::layer_forward(uint32_t layer_idx, float* input, float* out
     std::memcpy(residual_, output, hidden * sizeof(float));
 
     // 6. norm(hidden, normed, ffn_norm_weight)
-    //    For simplicity: use the SAME norm weight for both pre-attn and pre-ffn norm
-    norm(output, output, layer_norm);
+    if (layer_norm)
+        norm(output, output, layer_norm);
 
     // 7. ffn(normed, ffn_out)
     ffn(output, ffn_out_);
@@ -154,13 +266,15 @@ void InferenceEngine::attention(uint32_t layer_idx, const float* input, float* o
                       + static_cast<size_t>(layer_idx) * layout_.per_layer_size;
 
     // Q, K, V projections
-    const fp16_t* W_q = weight_pool_.at<fp16_t>(layer_base + layout_.q_proj_offset);
-    const fp16_t* W_k = weight_pool_.at<fp16_t>(layer_base + layout_.k_proj_offset);
-    const fp16_t* W_v = weight_pool_.at<fp16_t>(layer_base + layout_.v_proj_offset);
+    const fp16_t* W_q = resolve_weight<fp16_t>(layer_base + layout_.q_proj_offset);
+    const fp16_t* W_k = resolve_weight<fp16_t>(layer_base + layout_.k_proj_offset);
+    const fp16_t* W_v = resolve_weight<fp16_t>(layer_base + layout_.v_proj_offset);
 
-    matvec(input, q_proj_, W_q, hidden, hidden);
-    matvec(input, k_proj_, W_k, kv_dim,  hidden);
-    matvec(input, v_proj_, W_v, kv_dim,  hidden);
+    if (W_q && W_k && W_v) {
+        matvec(input, q_proj_, W_q, hidden, hidden);
+        matvec(input, k_proj_, W_k, kv_dim,  hidden);
+        matvec(input, v_proj_, W_v, kv_dim,  hidden);
+    }
 
     // Scale Q by 1/sqrt(head_dim) for numerical stability
     const float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
@@ -250,9 +364,10 @@ void InferenceEngine::attention(uint32_t layer_idx, const float* input, float* o
     }
 
     // O projection: attn_out_ -> output [hidden]
-    const fp16_t* W_o = weight_pool_.at<fp16_t>(layer_base + layout_.o_proj_offset);
+    const fp16_t* W_o = resolve_weight<fp16_t>(layer_base + layout_.o_proj_offset);
     std::memset(output, 0, hidden * sizeof(float));
-    matvec(attn_out_, output, W_o, hidden, hidden);
+    if (W_o)
+        matvec(attn_out_, output, W_o, hidden, hidden);
 
     // KV cache append
     kv_cache_->append(layer_idx, k_proj_, v_proj_);
@@ -262,8 +377,10 @@ void InferenceEngine::ffn(const float* input, float* output) {
     const uint32_t hidden = config_.hidden_dim;
     const uint32_t ffn_h  = config_.ffn_hidden_dim;
 
-    const fp16_t* W1 = weight_pool_.at<fp16_t>(current_layer_base_ + layout_.ffn_weight1_offset);
-    const fp16_t* W2 = weight_pool_.at<fp16_t>(current_layer_base_ + layout_.ffn_weight2_offset);
+    const fp16_t* W1 = resolve_weight<fp16_t>(current_layer_base_ + layout_.ffn_weight1_offset);
+    const fp16_t* W2 = resolve_weight<fp16_t>(current_layer_base_ + layout_.ffn_weight2_offset);
+
+    if (!W1 || !W2) return;
 
     switch (config_.ffn_type) {
         case ModelConfig::FFNType::Dense:
@@ -281,8 +398,9 @@ void InferenceEngine::ffn(const float* input, float* output) {
             // y = W3 * (swish(W1_gate * x) * W2_up * x)
             const fp16_t* W_gate = W1;
             const fp16_t* W_up   = W2;
-            const fp16_t* W_down = weight_pool_.at<fp16_t>(
+            const fp16_t* W_down = resolve_weight<fp16_t>(
                 current_layer_base_ + layout_.ffn_weight3_offset);
+            if (!W_down) break;
 
             std::memset(ffn_gate_buf_, 0, ffn_h * sizeof(float));
             std::memset(ffn_up_buf_, 0, ffn_h * sizeof(float));
@@ -305,8 +423,9 @@ void InferenceEngine::ffn(const float* input, float* output) {
             // y = W3 * (gelu(W1_gate * x) * W2_up * x)
             const fp16_t* W_gate = W1;
             const fp16_t* W_up   = W2;
-            const fp16_t* W_down = weight_pool_.at<fp16_t>(
+            const fp16_t* W_down = resolve_weight<fp16_t>(
                 current_layer_base_ + layout_.ffn_weight3_offset);
+            if (!W_down) break;
 
             std::memset(ffn_gate_buf_, 0, ffn_h * sizeof(float));
             std::memset(ffn_up_buf_, 0, ffn_h * sizeof(float));

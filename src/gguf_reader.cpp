@@ -438,6 +438,41 @@ GGUFReader::~GGUFReader() {
 }
 
 // ===========================================================================
+// Alignment access and validation
+// ===========================================================================
+
+int GGUFReader::alignment() const {
+    auto it = metadata_.find("general.alignment");
+    if (it != metadata_.end()) {
+        if (auto* p = std::get_if<uint64_t>(&it->second))
+            return static_cast<int>(*p);
+        if (auto* p = std::get_if<int64_t>(&it->second))
+            return static_cast<int>(*p);
+    }
+    return 32;
+}
+
+const TensorInfo* GGUFReader::find_tensor_by_suffix(const std::string& suffix) const {
+    for (const auto& [name, info] : tensors_) {
+        if (name.size() >= suffix.size() &&
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            return &info;
+        }
+    }
+    return nullptr;
+}
+
+void GGUFReader::assert_alignment(int align) const {
+    for (const auto& [name, info] : tensors_) {
+        if (info.offset % static_cast<uint64_t>(align) != 0) {
+            throw std::runtime_error(
+                "GGUF: tensor '" + name + "' offset " + std::to_string(info.offset) +
+                " is not aligned to " + std::to_string(align) + " bytes — file is corrupt");
+        }
+    }
+}
+
+// ===========================================================================
 // Lazy tensor load
 // ===========================================================================
 

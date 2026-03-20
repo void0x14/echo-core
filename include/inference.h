@@ -7,6 +7,8 @@
 #include "memory.h"
 #include "kv_cache.h"
 #include "kernels/matvec.h"
+#include <unordered_map>
+#include "gguf_reader.h"
 
 class InferenceEngine {
     ModelConfig config_;
@@ -32,6 +34,39 @@ class InferenceEngine {
 
     size_t current_layer_base_; // byte offset of current layer's weights (set by layer_forward)
 
+    std::unordered_map<size_t, size_t> gguf_offset_map_;
+
+    template<typename T>
+    const T* resolve_weight(size_t layout_offset) const {
+        auto it = gguf_offset_map_.find(layout_offset);
+        size_t pool_offset = (it != gguf_offset_map_.end()) ? it->second : layout_offset;
+        if (!gguf_offset_map_.empty() && it == gguf_offset_map_.end())
+            return nullptr;
+        if (pool_offset + sizeof(T) > weight_pool_.bytes_total())
+            throw std::runtime_error(
+                "resolve_weight: offset " + std::to_string(pool_offset) +
+                " out of bounds (" + std::to_string(weight_pool_.bytes_total()) + ")");
+        return weight_pool_.at<T>(pool_offset);
+    }
+
+    template<typename T>
+    T* resolve_weight(size_t layout_offset) {
+        auto it = gguf_offset_map_.find(layout_offset);
+        size_t pool_offset = (it != gguf_offset_map_.end()) ? it->second : layout_offset;
+        if (!gguf_offset_map_.empty() && it == gguf_offset_map_.end())
+            return nullptr;
+        if (pool_offset + sizeof(T) > weight_pool_.bytes_total())
+            throw std::runtime_error(
+                "resolve_weight: offset " + std::to_string(pool_offset) +
+                " out of bounds (" + std::to_string(weight_pool_.bytes_total()) + ")");
+        return weight_pool_.at<T>(pool_offset);
+    }
+
+    bool has_weight(size_t layout_offset) const {
+        if (gguf_offset_map_.empty()) return true;  // synthetic path
+        return gguf_offset_map_.count(layout_offset) > 0;
+    }
+
 public:
     InferenceEngine(const ModelConfig& config);
     ~InferenceEngine();
@@ -39,6 +74,8 @@ public:
     // Load weights from a contiguous FP16 buffer into the weight pool
     // weights: pointer to [total_elements] FP16 values laid out per WeightLayout
     void load_weights(const fp16_t* weights);
+
+    void load_weights_from_gguf(const GGUFReader& reader, const std::string& model_path);
 
     // Generate logits for a sequence of token IDs
     // tokens: [seq_len] input token IDs

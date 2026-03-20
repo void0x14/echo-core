@@ -83,6 +83,19 @@ public:
     // Raw metadata access
     const std::unordered_map<std::string, GGUFValue>& metadata() const { return metadata_; }
 
+    // Alignment from "general.alignment" metadata (default 32 per GGUF spec)
+    int alignment() const;
+
+    // File offset where tensor data begins
+    off_t data_offset() const { return data_offset_; }
+
+    // Find tensor by suffix (e.g. "attn_q.weight")
+    const TensorInfo* find_tensor_by_suffix(const std::string& suffix) const;
+
+    // Validate all tensor offsets are aligned to `align` bytes
+    // Throws std::runtime_error if any offset is misaligned
+    void assert_alignment(int align = 32) const;
+
 private:
     // Low-level reads
     void read_exact(void* buf, size_t n);

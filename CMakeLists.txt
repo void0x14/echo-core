@@ -23,6 +23,7 @@ target_include_directories(echo_core PRIVATE ${CMAKE_SOURCE_DIR}/include)
 # --- Inference smoke test ---
 add_executable(inference_test
     src/inference.cpp
+    src/gguf_reader.cpp
     src/kv_cache.cpp
     src/kernels/matvec.cpp
     src/kernels/quant.cpp
