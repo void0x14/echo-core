@@ -143,7 +143,168 @@ void fused_dequant_dot_int8(
     }
 }
 
+// Fused dequantization + dot product for GGUF Q8_0 blocks.
+// Block layout (34 bytes): { uint16_t d (FP16 scale), int8_t qs[32] }
+// Dequant formula: weight[i] = fp16_to_fp32(d) * qs[i]
+// FP32 values are never written to memory — all accumulation in AVX registers.
+float fused_dequant_dot_q8_0(const block_q8_0* blocks, uint32_t n_blocks,
+                              const float* query_fp32) {
+    __m256 acc = _mm256_setzero_ps();
+
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        float scale = _cvtsh_ss(blocks[b].d);
+        __m256 scale_vec = _mm256_set1_ps(scale);
+
+        const int8_t* qs = blocks[b].qs;
+
+        // Chunk 0: qs[0..7]
+        __m128i chunk0 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(qs + 0));
+        __m256i i32_0 = _mm256_cvtepi8_epi32(chunk0);
+        __m256 f32_0 = _mm256_cvtepi32_ps(i32_0);
+        f32_0 = _mm256_mul_ps(f32_0, scale_vec);
+        __m256 q0 = _mm256_loadu_ps(query_fp32 + b * 32 + 0);
+        acc = _mm256_fmadd_ps(f32_0, q0, acc);
+
+        // Chunk 1: qs[8..15]
+        __m128i chunk1 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(qs + 8));
+        __m256i i32_1 = _mm256_cvtepi8_epi32(chunk1);
+        __m256 f32_1 = _mm256_cvtepi32_ps(i32_1);
+        f32_1 = _mm256_mul_ps(f32_1, scale_vec);
+        __m256 q1 = _mm256_loadu_ps(query_fp32 + b * 32 + 8);
+        acc = _mm256_fmadd_ps(f32_1, q1, acc);
+
+        // Chunk 2: qs[16..23]
+        __m128i chunk2 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(qs + 16));
+        __m256i i32_2 = _mm256_cvtepi8_epi32(chunk2);
+        __m256 f32_2 = _mm256_cvtepi32_ps(i32_2);
+        f32_2 = _mm256_mul_ps(f32_2, scale_vec);
+        __m256 q2 = _mm256_loadu_ps(query_fp32 + b * 32 + 16);
+        acc = _mm256_fmadd_ps(f32_2, q2, acc);
+
+        // Chunk 3: qs[24..31]
+        __m128i chunk3 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(qs + 24));
+        __m256i i32_3 = _mm256_cvtepi8_epi32(chunk3);
+        __m256 f32_3 = _mm256_cvtepi32_ps(i32_3);
+        f32_3 = _mm256_mul_ps(f32_3, scale_vec);
+        __m256 q3 = _mm256_loadu_ps(query_fp32 + b * 32 + 24);
+        acc = _mm256_fmadd_ps(f32_3, q3, acc);
+    }
+
+    return hsum256_ps(acc);
+}
+
+// Fused dequantization + dot product for GGUF Q4_K blocks.
+// Block layout (144 bytes, 256 weights = 4 blocks x 64):
+//   { uint16_t d (FP16 super-scale), uint16_t dmin (FP16 super-minimum),
+//     uint8_t scales[12] (bit-packed 6-bit scale+min per canonical get_scale_min_k4),
+//     uint8_t qs[128] (nibble-packed per canonical llama.cpp) }
+//
+// Canonical nibble packing (per 64-weight block, 32 bytes qs):
+//   qs[0..15]:   low nibbles  -> weights 0..15   (scale/min pair 0)
+//   qs[16..31]:  low nibbles  -> weights 16..31  (scale/min pair 1)
+//   qs[0..15]:   high nibbles -> weights 32..47  (scale/min pair 0)
+//   qs[16..31]:  high nibbles -> weights 48..63  (scale/min pair 1)
+//
+// Dequant formula (canonical): weight = real_scale * q - real_min
+// FP32 values are never written to memory -- all accumulation in AVX registers.
+float fused_dequant_dot_q4_K(const block_q4_K* blocks, uint32_t n_blocks,
+                              const float* query_fp32) {
+    __m256 acc = _mm256_setzero_ps();
+
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        float d_f32    = _cvtsh_ss(blocks[b].d);
+        float dmin_f32 = _cvtsh_ss(blocks[b].dmin);
+
+        const uint8_t* scales = blocks[b].scales;
+        const uint8_t* qs     = blocks[b].qs;
+
+        // Process 4 blocks of 64 weights each
+        for (int blk = 0; blk < 4; ++blk) {
+            int js = blk * 2;
+            uint8_t sc0, mn0, sc1, mn1;
+
+            // Scale/min pair 0
+            if (js < 4) {
+                sc0 = scales[js]     & 63;
+                mn0 = scales[js + 4] & 63;
+            } else {
+                sc0 = (scales[js + 4] & 0x0F) | ((scales[js - 4] >> 6) << 4);
+                mn0 = (scales[js + 4] >>    4) | ((scales[js] >> 6) << 4);
+            }
+
+            // Scale/min pair 1
+            if (js + 1 < 4) {
+                sc1 = scales[js + 1]     & 63;
+                mn1 = scales[js + 1 + 4] & 63;
+            } else {
+                sc1 = (scales[js + 1 + 4] & 0x0F) | ((scales[js + 1 - 4] >> 6) << 4);
+                mn1 = (scales[js + 1 + 4] >>    4) | ((scales[js + 1] >> 6) << 4);
+            }
+
+            float rs0 = d_f32 * static_cast<float>(sc0);
+            float rm0 = dmin_f32 * static_cast<float>(mn0);
+            float rs1 = d_f32 * static_cast<float>(sc1);
+            float rm1 = dmin_f32 * static_cast<float>(mn1);
+
+            __m256 scale0 = _mm256_set1_ps(rs0);
+            __m256 scale1 = _mm256_set1_ps(rs1);
+            __m256 neg_min0 = _mm256_set1_ps(-rm0);
+            __m256 neg_min1 = _mm256_set1_ps(-rm1);
+
+            int qoff = blk * 32;
+            int woff = blk * 64;
+
+            // Load the 32 bytes for this 64-weight block
+            __m128i raw0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(qs + qoff));
+            __m128i raw1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(qs + qoff + 16));
+
+            // Chunk 0: raw0 low nibbles -> weights 0-15 (scale/min pair 0)
+            __m128i lo0 = _mm_and_si128(raw0, _mm_set1_epi8(0x0F));
+            __m256i i32_0 = _mm256_cvtepu8_epi32(lo0);
+            __m256 f32_0 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i32_0), scale0, neg_min0);
+            acc = _mm256_fmadd_ps(f32_0, _mm256_loadu_ps(query_fp32 + b * 256 + woff), acc);
+
+            __m256i i32_1 = _mm256_cvtepu8_epi32(_mm_srli_si128(lo0, 8));
+            __m256 f32_1 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i32_1), scale0, neg_min0);
+            acc = _mm256_fmadd_ps(f32_1, _mm256_loadu_ps(query_fp32 + b * 256 + woff + 8), acc);
+
+            // Chunk 1: raw1 low nibbles -> weights 16-31 (scale/min pair 1)
+            __m128i lo1 = _mm_and_si128(raw1, _mm_set1_epi8(0x0F));
+            __m256i i32_2 = _mm256_cvtepu8_epi32(lo1);
+            __m256 f32_2 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i32_2), scale1, neg_min1);
+            acc = _mm256_fmadd_ps(f32_2, _mm256_loadu_ps(query_fp32 + b * 256 + woff + 16), acc);
+
+            __m256i i32_3 = _mm256_cvtepu8_epi32(_mm_srli_si128(lo1, 8));
+            __m256 f32_3 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i32_3), scale1, neg_min1);
+            acc = _mm256_fmadd_ps(f32_3, _mm256_loadu_ps(query_fp32 + b * 256 + woff + 24), acc);
+
+            // Chunk 2: raw0 high nibbles -> weights 32-47 (scale/min pair 0)
+            __m128i hi0 = _mm_and_si128(_mm_srli_epi16(raw0, 4), _mm_set1_epi8(0x0F));
+            __m256i i32_4 = _mm256_cvtepu8_epi32(hi0);
+            __m256 f32_4 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i32_4), scale0, neg_min0);
+            acc = _mm256_fmadd_ps(f32_4, _mm256_loadu_ps(query_fp32 + b * 256 + woff + 32), acc);
+
+            __m256i i32_5 = _mm256_cvtepu8_epi32(_mm_srli_si128(hi0, 8));
+            __m256 f32_5 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i32_5), scale0, neg_min0);
+            acc = _mm256_fmadd_ps(f32_5, _mm256_loadu_ps(query_fp32 + b * 256 + woff + 40), acc);
+
+            // Chunk 3: raw1 high nibbles -> weights 48-63 (scale/min pair 1)
+            __m128i hi1 = _mm_and_si128(_mm_srli_epi16(raw1, 4), _mm_set1_epi8(0x0F));
+            __m256i i32_6 = _mm256_cvtepu8_epi32(hi1);
+            __m256 f32_6 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i32_6), scale1, neg_min1);
+            acc = _mm256_fmadd_ps(f32_6, _mm256_loadu_ps(query_fp32 + b * 256 + woff + 48), acc);
+
+            __m256i i32_7 = _mm256_cvtepu8_epi32(_mm_srli_si128(hi1, 8));
+            __m256 f32_7 = _mm256_fmadd_ps(_mm256_cvtepi32_ps(i32_7), scale1, neg_min1);
+            acc = _mm256_fmadd_ps(f32_7, _mm256_loadu_ps(query_fp32 + b * 256 + woff + 56), acc);
+        }
+    }
+
+    return hsum256_ps(acc);
+}
+
 #ifdef QUANT_TEST_MAIN
+#include "types.h"
 int main() {
     bool all_pass = true;
 
@@ -265,6 +426,139 @@ int main() {
                    pos, scores[pos], exact, err, ok ? "OK" : "FAIL");
             if (!ok) all_pass = false;
         }
+    }
+
+    // ---- Test 4: fused_dequant_dot_q8_0 ----
+    printf("\n=== Test 4: fused_dequant_dot_q8_0 ===\n");
+    {
+        const uint32_t n_blocks = 2;
+        const uint32_t total_weights = n_blocks * 32;
+
+        float query[64];
+        for (uint32_t i = 0; i < total_weights; ++i)
+            query[i] = static_cast<float>((i % 7) + 1) * 0.1f;
+
+        block_q8_0 blocks[2];
+        blocks[0].d = fp32_to_fp16(0.5f);
+        for (int i = 0; i < 32; ++i)
+            blocks[0].qs[i] = static_cast<int8_t>(i - 16);
+        blocks[1].d = fp32_to_fp16(1.0f);
+        for (int i = 0; i < 32; ++i)
+            blocks[1].qs[i] = static_cast<int8_t>((i % 32) - 16);
+
+        float fused = fused_dequant_dot_q8_0(blocks, n_blocks, query);
+
+        float expected = 0.0f;
+        for (uint32_t b = 0; b < n_blocks; ++b) {
+            float scale = fp16_to_fp32(blocks[b].d);
+            for (uint32_t i = 0; i < 32; ++i)
+                expected += scale * static_cast<float>(blocks[b].qs[i]) * query[b * 32 + i];
+        }
+
+        float err = std::fabs(fused - expected);
+        bool ok = err < 1e-2f;  // tolerance for floating-point accumulate order differences
+        printf("  fused=%.6f expected=%.6f err=%.2e %s\n",
+               fused, expected, err, ok ? "OK" : "FAIL");
+        if (!ok) all_pass = false;
+    }
+
+    // ---- Test 5: fused_dequant_dot_q4_K ----
+    printf("\n=== Test 5: fused_dequant_dot_q4_K ===\n");
+    {
+        const uint32_t n_blocks = 1;
+        const uint32_t total_weights = 256;
+
+        float query[256];
+        for (uint32_t i = 0; i < total_weights; ++i)
+            query[i] = static_cast<float>((i % 11) + 1) * 0.01f;
+
+        block_q4_K block{};
+        block.d    = fp32_to_fp16(63.0f);   // super-scale
+        block.dmin = fp32_to_fp16(63.0f);   // super-minimum
+
+        // Set scales: for sb=0..3, scales[sb]=sb+1, scales[sb+4]=sb
+        //             for sb=4..7, use bit-packing via scales[sb+4] and upper bits
+        for (int j = 0; j < 4; ++j) {
+            block.scales[j]     = static_cast<uint8_t>(j + 1);  // scale for sb=j
+            block.scales[j + 4] = static_cast<uint8_t>(j);      // min for sb=j
+        }
+        // For sb=4..7: sc = (scales[sb+4] & 0xF) | ((scales[sb-4] >> 6) << 4)
+        //              mn = (scales[sb+4] >> 4) | ((scales[sb-0] >> 6) << 4)
+        // Set upper 2 bits of scales[0..3] for sb=4..7 scale extraction
+        block.scales[0] |= (1 << 6);  // sc for sb=4: upper bits = 1
+        block.scales[1] |= (1 << 6);  // sc for sb=5
+        block.scales[2] |= (1 << 6);  // sc for sb=6
+        block.scales[3] |= (1 << 6);  // sc for sb=7
+        block.scales[8]  = 0x10 | 0x02;  // sb=4: sc low bits=2, mn low bits=1 (high nibble)
+        block.scales[9]  = 0x20 | 0x03;  // sb=5: sc=3, mn=2
+        block.scales[10] = 0x30 | 0x04;  // sb=6: sc=4, mn=3
+        block.scales[11] = 0x40 | 0x05;  // sb=7: sc=5, mn=4
+
+        // Set quantized weights: each nibble = 5 (for simplicity)
+        for (int i = 0; i < 128; ++i)
+            block.qs[i] = 0x55;  // both nibbles = 5
+
+        float fused = fused_dequant_dot_q4_K(&block, n_blocks, query);
+
+                // Compute expected using canonical 4 blocks x 64 weights
+        float d_f32    = fp16_to_fp32(block.d);
+        float dmin_f32 = fp16_to_fp32(block.dmin);
+        float expected = 0.0f;
+
+        for (int blk = 0; blk < 4; ++blk) {
+            int js = blk * 2;
+            uint8_t sc0, mn0, sc1, mn1;
+
+            if (js < 4) {
+                sc0 = block.scales[js]     & 63;
+                mn0 = block.scales[js + 4] & 63;
+            } else {
+                sc0 = (block.scales[js + 4] & 0x0F) | ((block.scales[js - 4] >> 6) << 4);
+                mn0 = (block.scales[js + 4] >>    4) | ((block.scales[js] >> 6) << 4);
+            }
+            if (js + 1 < 4) {
+                sc1 = block.scales[js + 1]     & 63;
+                mn1 = block.scales[js + 1 + 4] & 63;
+            } else {
+                sc1 = (block.scales[js + 1 + 4] & 0x0F) | ((block.scales[js + 1 - 4] >> 6) << 4);
+                mn1 = (block.scales[js + 1 + 4] >>    4) | ((block.scales[js + 1] >> 6) << 4);
+            }
+
+            float rs0 = d_f32 * static_cast<float>(sc0);
+            float rm0 = dmin_f32 * static_cast<float>(mn0);
+            float rs1 = d_f32 * static_cast<float>(sc1);
+            float rm1 = dmin_f32 * static_cast<float>(mn1);
+
+            int qoff = blk * 32;
+            int woff = blk * 64;
+
+            // qs[qoff..qoff+15] low nibbles -> weights woff..woff+15 (pair 0)
+            for (int j = 0; j < 16; ++j) {
+                float w = rs0 * static_cast<float>(block.qs[qoff + j] & 0x0F) - rm0;
+                expected += w * query[woff + j];
+            }
+            // qs[qoff+16..qoff+31] low nibbles -> weights woff+16..woff+31 (pair 1)
+            for (int j = 0; j < 16; ++j) {
+                float w = rs1 * static_cast<float>(block.qs[qoff + 16 + j] & 0x0F) - rm1;
+                expected += w * query[woff + 16 + j];
+            }
+            // qs[qoff..qoff+15] high nibbles -> weights woff+32..woff+47 (pair 0)
+            for (int j = 0; j < 16; ++j) {
+                float w = rs0 * static_cast<float>(block.qs[qoff + j] >> 4) - rm0;
+                expected += w * query[woff + 32 + j];
+            }
+            // qs[qoff+16..qoff+31] high nibbles -> weights woff+48..woff+63 (pair 1)
+            for (int j = 0; j < 16; ++j) {
+                float w = rs1 * static_cast<float>(block.qs[qoff + 16 + j] >> 4) - rm1;
+                expected += w * query[woff + 48 + j];
+            }
+        }
+
+        float err = std::fabs(fused - expected);
+        bool ok = err < 1e-2f;
+        printf("  fused=%.6f expected=%.6f err=%.2e %s\n",
+               fused, expected, err, ok ? "OK" : "FAIL");
+        if (!ok) all_pass = false;
     }
 
     printf("\n%s\n", all_pass ? "ALL TESTS PASSED" : "SOME TESTS FAILED");

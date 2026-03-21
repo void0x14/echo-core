@@ -23,3 +23,34 @@ void fused_dequant_dot_int8(
     uint32_t dim,
     uint32_t seq_len
 );
+
+// --- GGUF Q8_0 block format ---
+// 34 bytes per block, 32 weights per block
+// Dequant: weight[i] = fp16_to_fp32(d) * qs[i]
+struct block_q8_0 {
+    uint16_t d;      // FP16 scale (little-endian)
+    int8_t   qs[32]; // 32 signed INT8 quantized weights
+};
+
+// Fused dequantization + dot product for Q8_0 GGUF blocks.
+// Computes dot(query, dequant(blocks)) without materializing FP32 weights.
+// n_blocks = total_weights / 32
+float fused_dequant_dot_q8_0(const block_q8_0* blocks, uint32_t n_blocks,
+                              const float* query_fp32);
+
+// --- GGUF Q4_K block format ---
+// 144 bytes per block, 256 weights per block (4 blocks x 64 weights)
+// Dequant: weight = real_scale * q - real_min
+// where q is unsigned 4-bit (0-15), nibble-packed in qs[128]
+struct block_q4_K {
+    uint16_t d;           // FP16 super-scale
+    uint16_t dmin;        // FP16 super-minimum
+    uint8_t  scales[12];  // 6-bit packed scale+min (canonical get_scale_min_k4)
+    uint8_t  qs[128];     // 256 unsigned 4-bit weights, nibble-packed
+};
+
+// Fused dequantization + dot product for Q4_K GGUF blocks.
+// Computes dot(query, dequant(blocks)) without materializing FP32 weights.
+// n_blocks = total_weights / 256
+float fused_dequant_dot_q4_K(const block_q4_K* blocks, uint32_t n_blocks,
+                              const float* query_fp32);
