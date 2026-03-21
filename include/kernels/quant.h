@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstddef>
 
 // Per-token symmetric quantization: FP32 → INT8
 // For each row, finds max(abs(row)), computes scale = max_abs / 127.0,
@@ -54,3 +55,15 @@ struct block_q4_K {
 // n_blocks = total_weights / 256
 float fused_dequant_dot_q4_K(const block_q4_K* blocks, uint32_t n_blocks,
                               const float* query_fp32);
+
+// Dequantize Q8_0 blocks to FP16 array.
+// src: pointer to Q8_0 blocks (34 bytes each, 32 weights per block)
+// dst: output FP16 array (n_weights elements)
+// n_weights: total number of weights (must be multiple of 32)
+void dequantize_q8_0_to_fp16(const void* src, uint16_t* dst, size_t n_weights);
+
+// Dequantize Q4_K blocks to FP16 array.
+void dequantize_q4_K_to_fp16(const void* src, uint16_t* dst, size_t n_weights);
+
+// Dequantize Q2_K blocks to FP16 array.
+void dequantize_q2_K_to_fp16(const void* src, uint16_t* dst, size_t n_weights);

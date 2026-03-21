@@ -5,10 +5,15 @@
 #include <cassert>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 #include <fcntl.h>
 #include <unistd.h>
 
 #include "kernels/quant.h"
+
+void InferenceEngine::reset() {
+    if (kv_cache_) kv_cache_->reset();
+}
 
 static float* alloc_floats(size_t count) {
     void* ptr = nullptr;
@@ -179,6 +184,32 @@ void InferenceEngine::load_weights_from_gguf(const GGUFReader& reader,
         if (ti)
             gguf_offset_map_[layout_.output_proj_offset] = pool_off(ti);
     }
+
+    // --- Dequantize all weights to FP16 ---
+    std::unordered_map<size_t, const TensorInfo*> gguf_to_info;
+    for (const auto& [name, info] : reader.tensors()) {
+        gguf_to_info[static_cast<size_t>(info.offset)] = &info;
+    }
+    AlignedMemoryPool fp16_pool(layout_.total_size);
+    for (const auto& [layout_off, gguf_off] : gguf_offset_map_) {
+        auto it = gguf_to_info.find(gguf_off);
+        if (it == gguf_to_info.end()) continue;
+        const TensorInfo* ti = it->second;
+        size_t n_elements = 1;
+        for (auto d : ti->shape) n_elements *= d;
+        const void* src = weight_pool_.at<void>(gguf_off);
+        fp16_t* dst = fp16_pool.at<fp16_t>(layout_off);
+        switch (ti->dtype) {
+            case GGMLType::Q8_0: dequantize_q8_0_to_fp16(src, dst, n_elements); break;
+            case GGMLType::Q4_K: dequantize_q4_K_to_fp16(src, dst, n_elements); break;
+            case GGMLType::Q2_K: dequantize_q2_K_to_fp16(src, dst, n_elements); break;
+            case GGMLType::F16: std::memcpy(dst, src, n_elements * sizeof(fp16_t)); break;
+            case GGMLType::F32: { fp32_to_fp16_row(static_cast<const float*>(src), dst, n_elements); break; }
+            default: break;
+        }
+    }
+    weight_pool_ = std::move(fp16_pool);
+    gguf_offset_map_.clear();
 }
 
 void InferenceEngine::forward(const uint32_t* tokens, uint32_t seq_len, float* logits) {

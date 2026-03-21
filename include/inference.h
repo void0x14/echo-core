@@ -35,6 +35,7 @@ class InferenceEngine {
     size_t current_layer_base_; // byte offset of current layer's weights (set by layer_forward)
 
     std::unordered_map<size_t, size_t> gguf_offset_map_;
+    std::unordered_map<size_t, uint32_t> weight_dtype_; // layout_offset → GGMLType enum value
 
     template<typename T>
     const T* resolve_weight(size_t layout_offset) const {
@@ -83,6 +84,9 @@ public:
     // logits: [vocab_size] output — unnormalized log probabilities
     void forward(const uint32_t* tokens, uint32_t seq_len, float* logits);
 
+    // Reset KV cache for a new sequence
+    void reset();
+
     const ModelConfig& config() const { return config_; }
 
 private:
@@ -98,7 +102,11 @@ private:
     // Normalization: RMSNorm or LayerNorm based on config
     void norm(const float* input, float* output, const fp16_t* norm_weight);
 
-    // Matrix-vector multiply using tiled AVX2 kernel
+    // Matrix-vector multiply — dispatches based on weight dtype
     void matvec(const float* input, float* output,
                 const fp16_t* weight, uint32_t rows, uint32_t cols);
+
+    // Dtype-aware matvec: looks up dtype and uses fused dequant+dot if quantized
+    void matvec_d(const float* input, float* output,
+                  size_t layout_offset, uint32_t rows, uint32_t cols);
 };

@@ -12,6 +12,7 @@ set(ECHO_AVX2_FLAGS -mavx2 -mfma -mf16c)
 add_executable(echo_core
     src/main.cpp
     src/gguf_reader.cpp
+    src/tokenizer.cpp
     src/kernels/matvec.cpp
     src/kernels/quant.cpp
     src/kv_cache.cpp

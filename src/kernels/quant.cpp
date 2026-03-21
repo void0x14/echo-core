@@ -303,6 +303,98 @@ float fused_dequant_dot_q4_K(const block_q4_K* blocks, uint32_t n_blocks,
     return hsum256_ps(acc);
 }
 
+#include "types.h"
+
+void dequantize_q8_0_to_fp16(const void* src, uint16_t* dst, size_t n_weights) {
+    const uint8_t* p = static_cast<const uint8_t*>(src);
+    size_t n_blocks = n_weights / 32;
+    for (size_t b = 0; b < n_blocks; ++b) {
+        const block_q8_0* block = reinterpret_cast<const block_q8_0*>(p + b * sizeof(block_q8_0));
+        float d = fp16_to_fp32(block->d);
+        for (int j = 0; j < 32; ++j) {
+            float val = d * static_cast<float>(block->qs[j]);
+            dst[b * 32 + j] = fp32_to_fp16(val);
+        }
+    }
+}
+
+void dequantize_q4_K_to_fp16(const void* src, uint16_t* dst, size_t n_weights) {
+    const uint8_t* p = static_cast<const uint8_t*>(src);
+    size_t n_blocks = n_weights / 256;
+    for (size_t b = 0; b < n_blocks; ++b) {
+        const block_q4_K* block = reinterpret_cast<const block_q4_K*>(p + b * sizeof(block_q4_K));
+        float d_f32 = fp16_to_fp32(block->d);
+        float dmin_f32 = fp16_to_fp32(block->dmin);
+
+        for (int blk = 0; blk < 4; ++blk) {
+            int js = blk * 2;
+            const uint8_t* scales = block->scales;
+            uint8_t sc0, mn0, sc1, mn1;
+            if (js < 4) {
+                sc0 = scales[js] & 63;
+                mn0 = scales[js + 4] & 63;
+            } else {
+                sc0 = (scales[js + 4] & 0x0F) | ((scales[js - 4] >> 6) << 4);
+                mn0 = (scales[js + 4] >> 4)    | ((scales[js] >> 6) << 4);
+            }
+            if (js + 1 < 4) {
+                sc1 = scales[js + 1] & 63;
+                mn1 = scales[js + 1 + 4] & 63;
+            } else {
+                sc1 = (scales[js + 1 + 4] & 0x0F) | ((scales[js + 1 - 4] >> 6) << 4);
+                mn1 = (scales[js + 1 + 4] >> 4)    | ((scales[js + 1] >> 6) << 4);
+            }
+            float rs0 = d_f32 * sc0, rm0 = dmin_f32 * mn0;
+            float rs1 = d_f32 * sc1, rm1 = dmin_f32 * mn1;
+
+            int qoff = blk * 32;
+            int woff = blk * 64;
+            for (int j = 0; j < 16; ++j) {
+                dst[b*256 + woff + j]      = fp32_to_fp16(rs0 * (block->qs[qoff+j] & 0x0F) - rm0);
+                dst[b*256 + woff + 16 + j] = fp32_to_fp16(rs1 * (block->qs[qoff+16+j] & 0x0F) - rm1);
+                dst[b*256 + woff + 32 + j] = fp32_to_fp16(rs0 * (block->qs[qoff+j] >> 4) - rm0);
+                dst[b*256 + woff + 48 + j] = fp32_to_fp16(rs1 * (block->qs[qoff+16+j] >> 4) - rm1);
+            }
+        }
+    }
+}
+
+void dequantize_q2_K_to_fp16(const void* src, uint16_t* dst, size_t n_weights) {
+    const uint8_t* p = static_cast<const uint8_t*>(src);
+    // Q2_K: 86 bytes per block, 256 weights per block
+    // d (FP16), dmin (FP16), scales[16], qs[64]
+    struct block_q2_k_local {
+        uint16_t d, dmin;
+        uint8_t scales[16];
+        uint8_t qs[64];
+    };
+    size_t n_blocks = n_weights / 256;
+    for (size_t b = 0; b < n_blocks; ++b) {
+        const block_q2_k_local* block =
+            reinterpret_cast<const block_q2_k_local*>(p + b * 86);
+        float d_all = fp16_to_fp32(block->d);
+        float m_all = fp16_to_fp32(block->dmin);
+
+        for (int j = 0; j < 256; ++j) {
+            int sb = j / 8;           // sub-block index (0..31)
+            int idx = j % 8;          // position within sub-block
+            int s = sb / 2;
+            float scale, min_val;
+            if (sb % 2 == 0) {
+                scale = d_all * (block->scales[s] & 0x0F);
+                min_val = m_all * (block->scales[s] >> 4);
+            } else {
+                scale = d_all * (block->scales[s + 8] & 0x0F);
+                min_val = m_all * (block->scales[s + 8] >> 4);
+            }
+            int byte_idx = j / 4;
+            int bit_off = (j % 4) * 2;
+            int q = (block->qs[byte_idx] >> bit_off) & 0x03;
+            dst[b * 256 + j] = fp32_to_fp16(scale * q - min_val);
+        }
+    }
+}
+
 #ifdef QUANT_TEST_MAIN
 #include "types.h"
 int main() {

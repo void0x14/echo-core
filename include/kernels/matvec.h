@@ -13,3 +13,15 @@ void matvec_fp16_fp32(const fp16_t* W, const float* x, float* y, uint32_t M, uin
 // Convenience overload that dispatches to the correct tile config
 void matvec_dispatch(const fp16_t* W, const float* x, float* y,
                      uint32_t M, uint32_t K, const ModelConfig& config);
+
+// Fused dequant+matvec for Q8_0 blocks (avoids FP16 dequantization)
+void matvec_q8_0(const void* blocks, const float* x, float* y,
+                 uint32_t M, uint32_t K);
+
+// Fused dequant+matvec for Q4_K blocks
+void matvec_q4_K(const void* blocks, const float* x, float* y,
+                 uint32_t M, uint32_t K);
+
+// Fused dequant+matvec for Q2_K blocks
+void matvec_q2_K(const void* blocks, const float* x, float* y,
+                 uint32_t M, uint32_t K);

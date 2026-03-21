@@ -7,3 +7,4 @@ echo_core
 *_test
 compile_commands.json
 .cache/
+*.gguf

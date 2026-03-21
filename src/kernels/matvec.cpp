@@ -64,9 +64,134 @@ template void matvec_fp16_fp32<2048, 1024>(const fp16_t*, const float*, float*, 
 void matvec_dispatch(const fp16_t* W, const float* x, float* y,
                      uint32_t M, uint32_t K, const ModelConfig& config) {
     (void)config;
-    // Default to Intel tiles; use AMD tiles if K or M suggest larger working set
-    // and the user compiled with AMD tile instantiation available.
     matvec_fp16_fp32<Intel13500H_Tiles::TILE_K, Intel13500H_Tiles::TILE_M>(W, x, y, M, K);
+}
+
+// --- Fused dequant + matvec for Q8_0 ---
+// block_q8_0: 2 bytes d (FP16 scale) + 32 bytes qs (INT8 weights) = 34 bytes
+// Each block covers 32 columns of one row
+// Row of K columns uses K/32 blocks = K*34/32 bytes
+void matvec_q8_0(const void* blocks, const float* x, float* y,
+                 uint32_t M, uint32_t K) {
+    const uint8_t* base = static_cast<const uint8_t*>(blocks);
+    const uint32_t blocks_per_row = K / 32;
+    const size_t block_stride = 34; // sizeof(block_q8_0)
+
+    for (uint32_t m = 0; m < M; ++m) {
+        float sum = 0.0f;
+        const uint8_t* row_ptr = base + static_cast<size_t>(m) * blocks_per_row * block_stride;
+
+        for (uint32_t b = 0; b < blocks_per_row; ++b) {
+            const uint8_t* bp = row_ptr + b * block_stride;
+            float d = fp16_to_fp32(*reinterpret_cast<const uint16_t*>(bp));
+            const int8_t* qs = reinterpret_cast<const int8_t*>(bp + 2);
+            const float* x_blk = x + b * 32;
+
+            // Accumulate dot product for this 32-element block
+            float block_sum = 0.0f;
+            for (int j = 0; j < 32; ++j) {
+                block_sum += static_cast<float>(qs[j]) * x_blk[j];
+            }
+            sum += d * block_sum;
+        }
+        y[m] += sum;
+    }
+}
+
+// --- Fused dequant + matvec for Q4_K ---
+// block_q4_K: d(FP16) + dmin(FP16) + scales[12] + qs[128] = 144 bytes
+// Each block covers 256 columns of one row
+void matvec_q4_K(const void* blocks, const float* x, float* y,
+                 uint32_t M, uint32_t K) {
+    const uint8_t* base = static_cast<const uint8_t*>(blocks);
+    const uint32_t blocks_per_row = K / 256;
+    const size_t block_stride = 144;
+
+    for (uint32_t m = 0; m < M; ++m) {
+        float sum = 0.0f;
+        const uint8_t* row_ptr = base + static_cast<size_t>(m) * blocks_per_row * block_stride;
+
+        for (uint32_t b = 0; b < blocks_per_row; ++b) {
+            const uint8_t* bp = row_ptr + b * block_stride;
+            float d = fp16_to_fp32(*reinterpret_cast<const uint16_t*>(bp));
+            float dmin = fp16_to_fp32(*reinterpret_cast<const uint16_t*>(bp + 2));
+            const uint8_t* scales = bp + 4;
+            const uint8_t* qs = bp + 16;
+            const float* x_blk = x + b * 256;
+
+            for (int blk = 0; blk < 4; ++blk) {
+                int js = blk * 2;
+                uint8_t sc0, mn0, sc1, mn1;
+                if (js < 4) {
+                    sc0 = scales[js] & 63;
+                    mn0 = scales[js + 4] & 63;
+                } else {
+                    sc0 = (scales[js + 4] & 0x0F) | ((scales[js - 4] >> 6) << 4);
+                    mn0 = (scales[js + 4] >> 4)    | ((scales[js] >> 6) << 4);
+                }
+                if (js + 1 < 4) {
+                    sc1 = scales[js + 1] & 63;
+                    mn1 = scales[js + 1 + 4] & 63;
+                } else {
+                    sc1 = (scales[js + 1 + 4] & 0x0F) | ((scales[js + 1 - 4] >> 6) << 4);
+                    mn1 = (scales[js + 1 + 4] >> 4)    | ((scales[js + 1] >> 6) << 4);
+                }
+                float rs0 = d * sc0, rm0 = dmin * mn0;
+                float rs1 = d * sc1, rm1 = dmin * mn1;
+
+                int qoff = blk * 32;
+                int woff = blk * 64;
+                for (int j = 0; j < 16; ++j) {
+                    sum += (rs0 * (qs[qoff+j] & 0x0F) - rm0) * x_blk[woff + j];
+                    sum += (rs1 * (qs[qoff+16+j] & 0x0F) - rm1) * x_blk[woff + 16 + j];
+                    sum += (rs0 * (qs[qoff+j] >> 4) - rm0) * x_blk[woff + 32 + j];
+                    sum += (rs1 * (qs[qoff+16+j] >> 4) - rm1) * x_blk[woff + 48 + j];
+                }
+            }
+        }
+        y[m] += sum;
+    }
+}
+
+// --- Fused dequant + matvec for Q2_K ---
+// 86 bytes per block, 256 weights per block
+void matvec_q2_K(const void* blocks, const float* x, float* y,
+                 uint32_t M, uint32_t K) {
+    const uint8_t* base = static_cast<const uint8_t*>(blocks);
+    const uint32_t blocks_per_row = K / 256;
+    const size_t block_stride = 86;
+
+    for (uint32_t m = 0; m < M; ++m) {
+        float sum = 0.0f;
+        const uint8_t* row_ptr = base + static_cast<size_t>(m) * blocks_per_row * block_stride;
+
+        for (uint32_t b = 0; b < blocks_per_row; ++b) {
+            const uint8_t* bp = row_ptr + b * block_stride;
+            float d_all = fp16_to_fp32(*reinterpret_cast<const uint16_t*>(bp));
+            float m_all = fp16_to_fp32(*reinterpret_cast<const uint16_t*>(bp + 2));
+            const uint8_t* scales = bp + 4;
+            const uint8_t* qs = bp + 20;
+            const float* x_blk = x + b * 256;
+
+            for (int j = 0; j < 256; ++j) {
+                int sb = j / 8;
+                int s = sb / 2;
+                float scale, min_val;
+                if (sb % 2 == 0) {
+                    scale = d_all * (scales[s] & 0x0F);
+                    min_val = m_all * (scales[s] >> 4);
+                } else {
+                    scale = d_all * (scales[s + 8] & 0x0F);
+                    min_val = m_all * (scales[s + 8] >> 4);
+                }
+                int byte_idx = j / 4;
+                int bit_off = (j % 4) * 2;
+                int q = (qs[byte_idx] >> bit_off) & 0x03;
+                sum += (scale * q - min_val) * x_blk[j];
+            }
+        }
+        y[m] += sum;
+    }
 }
 
 #ifdef MATVEC_TEST_MAIN
