@@ -32,6 +32,7 @@ add_executable(inference_test
 target_compile_definitions(inference_test PRIVATE INFERENCE_TEST_MAIN)
 target_compile_options(inference_test PRIVATE ${ECHO_AVX2_FLAGS} -O2)
 target_include_directories(inference_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(inference_test PRIVATE m)
 
 # --- Quant kernel unit tests ---
 add_executable(quant_test src/kernels/quant.cpp)

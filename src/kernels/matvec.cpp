@@ -17,40 +17,30 @@ inline float hsum256_ps(__m256 v) {
 
 template <uint32_t TILE_K, uint32_t TILE_M>
 void matvec_fp16_fp32(const fp16_t* W, const float* x, float* y, uint32_t M, uint32_t K) {
-    for (uint32_t m_tile = 0; m_tile < M; m_tile += TILE_M) {
-        uint32_t m_end = std::min(m_tile + TILE_M, M);
+    // Loop order: for m → for k (NOT for k → for m)
+    // Bu sıra input vector x'in L1 cache'te kalmasını sağlar.
+    // K=2560 × 4 bytes = 10KB, L1 = 48KB → x tamamen L1'de kalır.
+    for (uint32_t m = 0; m < M; ++m) {
+        const fp16_t* W_row = W + static_cast<size_t>(m) * K;
 
-        for (uint32_t k_tile = 0; k_tile < K; k_tile += TILE_K) {
-            uint32_t k_end = std::min(k_tile + TILE_K, K);
+        __m256 acc_vec = _mm256_setzero_ps();
+        float acc_scalar = 0.0f;
 
-            for (uint32_t m = m_tile; m < m_end; ++m) {
-                const fp16_t* W_row = W + static_cast<size_t>(m) * K + k_tile;
-                const float* x_row = x + k_tile;
-
-                uint32_t k_len = k_end - k_tile;
-                uint32_t k = 0;
-
-                __m256 acc = _mm256_setzero_ps();
-
-                // Main vectorized loop: process 8 elements at a time
-                for (; k + 8 <= k_len; k += 8) {
-                    __m128i w16 = _mm_loadu_si128(
-                        reinterpret_cast<const __m128i*>(W_row + k));
-                    __m256 w32 = _mm256_cvtph_ps(w16);
-                    __m256 xv  = _mm256_loadu_ps(x_row + k);
-                    acc = _mm256_fmadd_ps(w32, xv, acc);
-                }
-
-                // Horizontal sum of the accumulator
-                float partial = hsum256_ps(acc);
-                y[m] += partial;
-
-                // Scalar tail for remaining elements
-                for (; k < k_len; ++k) {
-                    y[m] += fp16_to_fp32(W_row[k]) * x_row[k];
-                }
-            }
+        uint32_t k = 0;
+        for (; k + 8 <= K; k += 8) {
+            __m128i w16 = _mm_loadu_si128(
+                reinterpret_cast<const __m128i*>(W_row + k));
+            __m256 w32 = _mm256_cvtph_ps(w16);
+            __m256 xv  = _mm256_loadu_ps(x + k);
+            acc_vec = _mm256_fmadd_ps(w32, xv, acc_vec);
         }
+
+        // Scalar tail for remaining elements
+        for (; k < K; ++k) {
+            acc_scalar += fp16_to_fp32(W_row[k]) * x[k];
+        }
+
+        y[m] += hsum256_ps(acc_vec) + acc_scalar;
     }
 }
 
@@ -59,8 +49,6 @@ template void matvec_fp16_fp32<1024, 512>(const fp16_t*, const float*, float*, u
 template void matvec_fp16_fp32<2048, 1024>(const fp16_t*, const float*, float*, uint32_t, uint32_t);
 
 // Dispatch: pick tile config based on which platform preset we want.
-// Since ModelConfig doesn't carry platform info, we default to Intel13500H_Tiles.
-// The caller can also call the template directly if they know the platform.
 void matvec_dispatch(const fp16_t* W, const float* x, float* y,
                      uint32_t M, uint32_t K, const ModelConfig& config) {
     (void)config;
