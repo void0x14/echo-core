@@ -142,12 +142,12 @@ void matvec_q4_K(const void* blocks, const float* x, float* y,
 }
 
 // --- Fused dequant + matvec for Q2_K ---
-// 86 bytes per block, 256 weights per block
+// 84 bytes per block, 256 weights per block
 void matvec_q2_K(const void* blocks, const float* x, float* y,
                  uint32_t M, uint32_t K) {
     const uint8_t* base = static_cast<const uint8_t*>(blocks);
     const uint32_t blocks_per_row = K / 256;
-    const size_t block_stride = 86;
+    const size_t block_stride = 84;
 
     for (uint32_t m = 0; m < M; ++m) {
         float sum = 0.0f;

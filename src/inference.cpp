@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cmath>
 #include <algorithm>
+#include <vector>
 #include <chrono>
 #include <fcntl.h>
 #include <unistd.h>
@@ -81,6 +82,30 @@ InferenceEngine::~InferenceEngine() {
 
 void InferenceEngine::load_weights(const fp16_t* weights) {
     std::memcpy(resolve_weight<fp16_t>(0), weights, layout_.total_size);
+
+    // Populate weight_dtype_ and weight_ptr_map_ for matvec_d() dispatch
+    auto reg = [&](size_t off) {
+        weight_dtype_[off]   = static_cast<uint32_t>(GGMLType::F16);
+        weight_ptr_map_[off] = weight_pool_.at<void>(off);
+    };
+
+    reg(layout_.token_embedding_offset);
+    reg(layout_.final_norm_offset);
+    reg(layout_.output_proj_offset);
+
+    for (uint32_t l = 0; l < config_.num_layers; ++l) {
+        size_t lb = layout_.token_embedding_size
+                   + static_cast<size_t>(l) * layout_.per_layer_size;
+        reg(lb + layout_.norm_weight_offset);
+        reg(lb + layout_.q_proj_offset);
+        reg(lb + layout_.k_proj_offset);
+        reg(lb + layout_.v_proj_offset);
+        reg(lb + layout_.o_proj_offset);
+        reg(lb + layout_.ffn_weight1_offset);
+        reg(lb + layout_.ffn_weight2_offset);
+        if (layout_.ffn_weight3_offset != 0)
+            reg(lb + layout_.ffn_weight3_offset);
+    }
 }
 
 void InferenceEngine::load_weights_from_gguf(const GGUFReader& reader,
@@ -185,31 +210,20 @@ void InferenceEngine::load_weights_from_gguf(const GGUFReader& reader,
             gguf_offset_map_[layout_.output_proj_offset] = pool_off(ti);
     }
 
-    // --- Dequantize all weights to FP16 ---
-    std::unordered_map<size_t, const TensorInfo*> gguf_to_info;
+    // Populate weight_dtype_ and weight_ptr_map_ (layout_offset keys)
+    std::unordered_map<size_t, uint32_t> gguf_off_to_dtype;
     for (const auto& [name, info] : reader.tensors()) {
-        gguf_to_info[static_cast<size_t>(info.offset)] = &info;
+        gguf_off_to_dtype[static_cast<size_t>(info.offset)] =
+            static_cast<uint32_t>(info.dtype);
     }
-    AlignedMemoryPool fp16_pool(layout_.total_size);
     for (const auto& [layout_off, gguf_off] : gguf_offset_map_) {
-        auto it = gguf_to_info.find(gguf_off);
-        if (it == gguf_to_info.end()) continue;
-        const TensorInfo* ti = it->second;
-        size_t n_elements = 1;
-        for (auto d : ti->shape) n_elements *= d;
-        const void* src = weight_pool_.at<void>(gguf_off);
-        fp16_t* dst = fp16_pool.at<fp16_t>(layout_off);
-        switch (ti->dtype) {
-            case GGMLType::Q8_0: dequantize_q8_0_to_fp16(src, dst, n_elements); break;
-            case GGMLType::Q4_K: dequantize_q4_K_to_fp16(src, dst, n_elements); break;
-            case GGMLType::Q2_K: dequantize_q2_K_to_fp16(src, dst, n_elements); break;
-            case GGMLType::F16: std::memcpy(dst, src, n_elements * sizeof(fp16_t)); break;
-            case GGMLType::F32: { fp32_to_fp16_row(static_cast<const float*>(src), dst, n_elements); break; }
-            default: break;
-        }
+        auto it = gguf_off_to_dtype.find(gguf_off);
+        if (it == gguf_off_to_dtype.end())
+            throw std::runtime_error("load_weights: dtype not found for gguf_off="
+                                     + std::to_string(gguf_off));
+        weight_dtype_[layout_off]   = it->second;
+        weight_ptr_map_[layout_off] = weight_pool_.at<void>(gguf_off);
     }
-    weight_pool_ = std::move(fp16_pool);
-    gguf_offset_map_.clear();
 }
 
 void InferenceEngine::forward(const uint32_t* tokens, uint32_t seq_len, float* logits) {
@@ -236,9 +250,8 @@ void InferenceEngine::forward(const uint32_t* tokens, uint32_t seq_len, float* l
 
     // Output projection: hidden -> vocab
     if (has_weight(layout_.output_proj_offset)) {
-        const fp16_t* out_w = resolve_weight<fp16_t>(layout_.output_proj_offset);
         std::memset(logits, 0, vocab * sizeof(float));
-        matvec(hidden_state_, logits, out_w, vocab, hidden);
+        matvec_d(hidden_state_, logits, layout_.output_proj_offset, vocab, hidden);
     }
 }
 
@@ -297,14 +310,12 @@ void InferenceEngine::attention(uint32_t layer_idx, const float* input, float* o
                       + static_cast<size_t>(layer_idx) * layout_.per_layer_size;
 
     // Q, K, V projections
-    const fp16_t* W_q = resolve_weight<fp16_t>(layer_base + layout_.q_proj_offset);
-    const fp16_t* W_k = resolve_weight<fp16_t>(layer_base + layout_.k_proj_offset);
-    const fp16_t* W_v = resolve_weight<fp16_t>(layer_base + layout_.v_proj_offset);
-
-    if (W_q && W_k && W_v) {
-        matvec(input, q_proj_, W_q, hidden, hidden);
-        matvec(input, k_proj_, W_k, kv_dim,  hidden);
-        matvec(input, v_proj_, W_v, kv_dim,  hidden);
+    if (has_weight(layer_base + layout_.q_proj_offset) &&
+        has_weight(layer_base + layout_.k_proj_offset) &&
+        has_weight(layer_base + layout_.v_proj_offset)) {
+        matvec_d(input, q_proj_, layer_base + layout_.q_proj_offset, hidden, hidden);
+        matvec_d(input, k_proj_, layer_base + layout_.k_proj_offset, kv_dim,  hidden);
+        matvec_d(input, v_proj_, layer_base + layout_.v_proj_offset, kv_dim,  hidden);
     }
 
     // Scale Q by 1/sqrt(head_dim) for numerical stability
@@ -395,10 +406,9 @@ void InferenceEngine::attention(uint32_t layer_idx, const float* input, float* o
     }
 
     // O projection: attn_out_ -> output [hidden]
-    const fp16_t* W_o = resolve_weight<fp16_t>(layer_base + layout_.o_proj_offset);
     std::memset(output, 0, hidden * sizeof(float));
-    if (W_o)
-        matvec(attn_out_, output, W_o, hidden, hidden);
+    if (has_weight(layer_base + layout_.o_proj_offset))
+        matvec_d(attn_out_, output, layer_base + layout_.o_proj_offset, hidden, hidden);
 
     // KV cache append
     kv_cache_->append(layer_idx, k_proj_, v_proj_);
@@ -408,35 +418,27 @@ void InferenceEngine::ffn(const float* input, float* output) {
     const uint32_t hidden = config_.hidden_dim;
     const uint32_t ffn_h  = config_.ffn_hidden_dim;
 
-    const fp16_t* W1 = resolve_weight<fp16_t>(current_layer_base_ + layout_.ffn_weight1_offset);
-    const fp16_t* W2 = resolve_weight<fp16_t>(current_layer_base_ + layout_.ffn_weight2_offset);
-
-    if (!W1 || !W2) return;
+    if (!has_weight(current_layer_base_ + layout_.ffn_weight1_offset) ||
+        !has_weight(current_layer_base_ + layout_.ffn_weight2_offset)) return;
 
     switch (config_.ffn_type) {
         case ModelConfig::FFNType::Dense:
-            // y = W2 * relu(W1 * x)
             std::memset(ffn_scratch_, 0, ffn_h * sizeof(float));
-            matvec(input, ffn_scratch_, W1, ffn_h, hidden);
+            matvec_d(input, ffn_scratch_, current_layer_base_ + layout_.ffn_weight1_offset, ffn_h, hidden);
             for (uint32_t i = 0; i < ffn_h; ++i) {
-                ffn_scratch_[i] = (ffn_scratch_[i] > 0.0f) ? ffn_scratch_[i] : 0.0f; // ReLU
+                ffn_scratch_[i] = (ffn_scratch_[i] > 0.0f) ? ffn_scratch_[i] : 0.0f;
             }
             std::memset(output, 0, hidden * sizeof(float));
-            matvec(ffn_scratch_, output, W2, hidden, ffn_h);
+            matvec_d(ffn_scratch_, output, current_layer_base_ + layout_.ffn_weight2_offset, hidden, ffn_h);
             break;
 
         case ModelConfig::FFNType::GatedSwiGLU: {
-            // y = W3 * (swish(W1_gate * x) * W2_up * x)
-            const fp16_t* W_gate = W1;
-            const fp16_t* W_up   = W2;
-            const fp16_t* W_down = resolve_weight<fp16_t>(
-                current_layer_base_ + layout_.ffn_weight3_offset);
-            if (!W_down) break;
+            if (!has_weight(current_layer_base_ + layout_.ffn_weight3_offset)) break;
 
             std::memset(ffn_gate_buf_, 0, ffn_h * sizeof(float));
             std::memset(ffn_up_buf_, 0, ffn_h * sizeof(float));
-            matvec(input, ffn_gate_buf_, W_gate, ffn_h, hidden);
-            matvec(input, ffn_up_buf_, W_up, ffn_h, hidden);
+            matvec_d(input, ffn_gate_buf_, current_layer_base_ + layout_.ffn_weight1_offset, ffn_h, hidden);
+            matvec_d(input, ffn_up_buf_, current_layer_base_ + layout_.ffn_weight2_offset, ffn_h, hidden);
 
             // swish(gate) * up
             for (uint32_t i = 0; i < ffn_h; ++i) {
@@ -446,22 +448,17 @@ void InferenceEngine::ffn(const float* input, float* output) {
             }
 
             std::memset(output, 0, hidden * sizeof(float));
-            matvec(ffn_gate_buf_, output, W_down, hidden, ffn_h);
+            matvec_d(ffn_gate_buf_, output, current_layer_base_ + layout_.ffn_weight3_offset, hidden, ffn_h);
             break;
         }
 
         case ModelConfig::FFNType::GatedGeLU: {
-            // y = W3 * (gelu(W1_gate * x) * W2_up * x)
-            const fp16_t* W_gate = W1;
-            const fp16_t* W_up   = W2;
-            const fp16_t* W_down = resolve_weight<fp16_t>(
-                current_layer_base_ + layout_.ffn_weight3_offset);
-            if (!W_down) break;
+            if (!has_weight(current_layer_base_ + layout_.ffn_weight3_offset)) break;
 
             std::memset(ffn_gate_buf_, 0, ffn_h * sizeof(float));
             std::memset(ffn_up_buf_, 0, ffn_h * sizeof(float));
-            matvec(input, ffn_gate_buf_, W_gate, ffn_h, hidden);
-            matvec(input, ffn_up_buf_, W_up, ffn_h, hidden);
+            matvec_d(input, ffn_gate_buf_, current_layer_base_ + layout_.ffn_weight1_offset, ffn_h, hidden);
+            matvec_d(input, ffn_up_buf_, current_layer_base_ + layout_.ffn_weight2_offset, ffn_h, hidden);
 
             // gelu(gate) * up
             const float sqrt_2_over_pi = std::sqrt(2.0f / M_PI);
@@ -473,7 +470,7 @@ void InferenceEngine::ffn(const float* input, float* output) {
             }
 
             std::memset(output, 0, hidden * sizeof(float));
-            matvec(ffn_gate_buf_, output, W_down, hidden, ffn_h);
+            matvec_d(ffn_gate_buf_, output, current_layer_base_ + layout_.ffn_weight3_offset, hidden, ffn_h);
             break;
         }
     }
@@ -483,8 +480,8 @@ void InferenceEngine::norm(const float* input, float* output, const fp16_t* norm
     const uint32_t hidden = config_.hidden_dim;
 
     // Convert norm weight from FP16 to FP32
-    float scale_buf[hidden];
-    fp16_to_fp32_row(norm_weight, scale_buf, hidden);
+    std::vector<float> scale_buf(hidden);
+    fp16_to_fp32_row(norm_weight, scale_buf.data(), hidden);
 
     if (config_.norm_type == ModelConfig::NormType::RMSNorm) {
         // RMSNorm: output = (input / rms(input)) * scale
@@ -524,6 +521,27 @@ void InferenceEngine::matvec(const float* input, float* output,
                               const fp16_t* weight, uint32_t rows, uint32_t cols) {
     // matvec_fp16_fp32 accumulates, so caller must zero output first
     matvec_dispatch(weight, input, output, rows, cols, config_);
+}
+
+void InferenceEngine::matvec_d(const float* input, float* output,
+                                size_t layout_offset, uint32_t rows, uint32_t cols) {
+    auto it = weight_dtype_.find(layout_offset);
+    if (it == weight_dtype_.end()) [[unlikely]]
+        throw std::runtime_error("matvec_d: no dtype for offset " +
+                                 std::to_string(layout_offset));
+    const void* w = resolve_weight_ptr(layout_offset);
+    switch (static_cast<GGMLType>(it->second)) {
+        case GGMLType::Q8_0: matvec_q8_0(w, input, output, rows, cols); break;
+        case GGMLType::Q4_K: matvec_q4_K(w, input, output, rows, cols); break;
+        case GGMLType::Q2_K: matvec_q2_K(w, input, output, rows, cols); break;
+        case GGMLType::F16:
+            matvec_dispatch(static_cast<const fp16_t*>(w),
+                            input, output, rows, cols, config_);
+            break;
+        default:
+            throw std::runtime_error("matvec_d: unsupported dtype " +
+                                     std::to_string(it->second));
+    }
 }
 
 #ifdef INFERENCE_TEST_MAIN

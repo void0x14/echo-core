@@ -361,7 +361,7 @@ void dequantize_q4_K_to_fp16(const void* src, uint16_t* dst, size_t n_weights) {
 
 void dequantize_q2_K_to_fp16(const void* src, uint16_t* dst, size_t n_weights) {
     const uint8_t* p = static_cast<const uint8_t*>(src);
-    // Q2_K: 86 bytes per block, 256 weights per block
+    // Q2_K: 84 bytes per block, 256 weights per block
     // d (FP16), dmin (FP16), scales[16], qs[64]
     struct block_q2_k_local {
         uint16_t d, dmin;
@@ -371,7 +371,7 @@ void dequantize_q2_K_to_fp16(const void* src, uint16_t* dst, size_t n_weights) {
     size_t n_blocks = n_weights / 256;
     for (size_t b = 0; b < n_blocks; ++b) {
         const block_q2_k_local* block =
-            reinterpret_cast<const block_q2_k_local*>(p + b * 86);
+            reinterpret_cast<const block_q2_k_local*>(p + b * 84);
         float d_all = fp16_to_fp32(block->d);
         float m_all = fp16_to_fp32(block->dmin);
 

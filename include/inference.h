@@ -36,6 +36,7 @@ class InferenceEngine {
 
     std::unordered_map<size_t, size_t> gguf_offset_map_;
     std::unordered_map<size_t, uint32_t> weight_dtype_; // layout_offset → GGMLType enum value
+    std::unordered_map<size_t, const void*> weight_ptr_map_; // layout_offset → mmap raw ptr
 
     template<typename T>
     const T* resolve_weight(size_t layout_offset) const {
@@ -66,6 +67,14 @@ class InferenceEngine {
     bool has_weight(size_t layout_offset) const {
         if (gguf_offset_map_.empty()) return true;  // synthetic path
         return gguf_offset_map_.count(layout_offset) > 0;
+    }
+
+    const void* resolve_weight_ptr(size_t layout_offset) const {
+        auto it = weight_ptr_map_.find(layout_offset);
+        if (it != weight_ptr_map_.end()) return it->second;
+        throw std::runtime_error(
+            "resolve_weight_ptr: no weight at offset " +
+            std::to_string(layout_offset));
     }
 
 public:
