@@ -63,7 +63,7 @@ test "exp basic" {
 
 test "gelu basic" {
     const result = gelu(1.0);
-    try std.testing.expect(result > 0.7 and result < 0.8);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.841192), result, 0.001);
 }
 
 test "relu basic" {

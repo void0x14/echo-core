@@ -3,6 +3,8 @@ const types = @import("types.zig");
 
 pub const AlignedMemoryPool = struct {
     base: [*]u8,
+    heap_bytes: ?[]align(types.CACHE_LINE_SIZE) u8,
+    mmap_bytes: ?[]align(std.heap.page_size_min) u8,
     total_size: usize,
     offset: usize,
     owns_mmap: bool,
@@ -13,6 +15,8 @@ pub const AlignedMemoryPool = struct {
         if (total_bytes == 0) {
             return AlignedMemoryPool{
                 .base = undefined,
+                .heap_bytes = null,
+                .mmap_bytes = null,
                 .total_size = 0,
                 .offset = 0,
                 .owns_mmap = false,
@@ -20,9 +24,15 @@ pub const AlignedMemoryPool = struct {
                 .page_delta = 0,
             };
         }
-        const ptr = try std.heap.page_allocator.alignedAlloc(u8, types.CACHE_LINE_SIZE, total_bytes);
+        const bytes = try std.heap.page_allocator.alignedAlloc(
+            u8,
+            std.mem.Alignment.fromByteUnits(types.CACHE_LINE_SIZE),
+            total_bytes,
+        );
         return AlignedMemoryPool{
-            .base = ptr,
+            .base = bytes.ptr,
+            .heap_bytes = bytes,
+            .mmap_bytes = null,
             .total_size = total_bytes,
             .offset = 0,
             .owns_mmap = false,
@@ -35,6 +45,8 @@ pub const AlignedMemoryPool = struct {
         if (data_size == 0) {
             return AlignedMemoryPool{
                 .base = undefined,
+                .heap_bytes = null,
+                .mmap_bytes = null,
                 .total_size = 0,
                 .offset = 0,
                 .owns_mmap = false,
@@ -42,13 +54,15 @@ pub const AlignedMemoryPool = struct {
                 .page_delta = 0,
             };
         }
-        const page_size = std.mem.page_size;
+        const page_size = std.heap.pageSize();
         const aligned_off = data_offset & ~(page_size - 1);
         const page_delta = data_offset - aligned_off;
         const map_size = data_size + page_delta;
-        const ptr = std.posix.mmap(null, map_size, std.posix.PROT.READ, .{ .type = .PRIVATE }, fd.handle, aligned_off);
+        const ptr = try std.posix.mmap(null, map_size, std.posix.PROT.READ, .{ .TYPE = .PRIVATE }, fd.handle, aligned_off);
         return AlignedMemoryPool{
-            .base = @as([*]u8, @ptrCast(ptr)),
+            .base = ptr.ptr,
+            .heap_bytes = null,
+            .mmap_bytes = ptr,
             .total_size = map_size,
             .offset = 0,
             .owns_mmap = true,
@@ -58,13 +72,15 @@ pub const AlignedMemoryPool = struct {
     }
 
     pub fn deinit(self: *AlignedMemoryPool) void {
-        if (self.base == undefined) return;
+        if (self.total_size == 0) return;
         if (self.owns_mmap) {
-            _ = std.posix.munmap(self.base[0..self.total_size]);
-        } else if (self.total_size > 0) {
-            std.heap.c_allocator.free(self.base[0..self.total_size]);
+            if (self.mmap_bytes) |bytes| std.posix.munmap(bytes);
+        } else if (self.heap_bytes) |bytes| {
+            std.heap.page_allocator.free(bytes);
         }
         self.base = undefined;
+        self.heap_bytes = null;
+        self.mmap_bytes = null;
         self.total_size = 0;
     }
 
@@ -72,24 +88,24 @@ pub const AlignedMemoryPool = struct {
         return self.base + self.page_delta;
     }
 
-    pub fn alloc(self: *AlignedMemoryPool, comptime T: type, count: usize) *[*:0]T {
+    pub fn alloc(self: *AlignedMemoryPool, comptime T: type, count: usize) [*]T {
         const align_bytes: usize = if (@alignOf(T) > types.CACHE_LINE_SIZE) @alignOf(T) else types.CACHE_LINE_SIZE;
         self.offset = (self.offset + align_bytes - 1) & ~(align_bytes - 1);
         const bytes = count * @sizeOf(T);
         std.debug.assert(self.offset + bytes + self.page_delta <= self.total_size);
-        const ptr: [*]T = @ptrCast(self.dataPtr() + self.offset);
+        const ptr: [*]T = @ptrCast(@alignCast(self.dataPtr() + self.offset));
         self.offset += bytes;
-        return ptr[0..count];
+        return ptr;
     }
 
     pub fn at(self: *const AlignedMemoryPool, comptime T: type, byte_offset: usize) *const T {
         std.debug.assert(byte_offset + @sizeOf(T) + self.page_delta <= self.total_size);
-        return @ptrCast(self.dataPtr() + byte_offset);
+        return @ptrCast(@alignCast(self.dataPtr() + byte_offset));
     }
 
     pub fn atMut(self: *AlignedMemoryPool, comptime T: type, byte_offset: usize) *T {
         std.debug.assert(byte_offset + @sizeOf(T) + self.page_delta <= self.total_size);
-        return @ptrCast(self.dataPtr() + byte_offset);
+        return @ptrCast(@alignCast(self.dataPtr() + byte_offset));
     }
 
     pub fn bytesUsed(self: *const AlignedMemoryPool) usize {
@@ -180,7 +196,7 @@ test "AlignedMemoryPool basic alloc" {
     defer pool.deinit();
     const arr = pool.alloc(f32, 256);
     try std.testing.expect(pool.bytesUsed() == 256 * 4);
-    _ = arr;
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(arr) % types.CACHE_LINE_SIZE);
 }
 
 test "WeightLayout compute" {
