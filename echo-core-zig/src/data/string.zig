@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const String = struct {
-    data: []u8,
+    data: []const u8,
 
     pub fn fromBytes(bytes: []const u8) String {
         return .{ .data = bytes };
@@ -37,7 +37,7 @@ pub const String = struct {
     }
 
     pub fn substring(s: String, start: usize, end: usize) String {
-        if (start >= s.len()) return .{ .data = &.{} };
+        if (start >= s.len() or end <= start) return .{ .data = &.{} };
         const real_end = if (end > s.len()) s.len() else end;
         return .{ .data = s.data[start..real_end] };
     }
@@ -66,4 +66,10 @@ test "String startsWith/endsWith" {
     try std.testing.expect(!String.startsWith(s, String.fromBytes("world")));
     try std.testing.expect(String.endsWith(s, String.fromBytes("world")));
     try std.testing.expect(!String.endsWith(s, String.fromBytes("hello")));
+}
+
+test "String substring with reversed bounds is empty" {
+    const s = String.fromBytes("hello");
+    const sub = String.substring(s, 4, 2);
+    try std.testing.expectEqual(@as(usize, 0), sub.len());
 }

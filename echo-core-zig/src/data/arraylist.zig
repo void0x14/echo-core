@@ -41,7 +41,7 @@ pub fn ArrayList(comptime T: type) type {
             return self.items[self.len];
         }
 
-        pub fn get(self: *const @This(), index: usize) ?*T {
+        pub fn get(self: *const @This(), index: usize) ?*const T {
             if (index >= self.len) return null;
             return &self.items[index];
         }
@@ -63,4 +63,14 @@ test "ArrayList basic" {
     try std.testing.expectEqual(list.len, 3);
     try std.testing.expectEqual(list.pop(), 3);
     try std.testing.expectEqual(list.len, 2);
+}
+
+test "ArrayList const get returns const pointer" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(123);
+
+    const const_list = list;
+    try std.testing.expectEqual(*const i32, @TypeOf(const_list.get(0).?));
 }

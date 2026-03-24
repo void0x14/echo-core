@@ -12,7 +12,7 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
         };
 
         pub fn init(allocator: std.mem.Allocator, capacity: usize) !@This() {
-            const size = nextPowerOfTwo(capacity);
+            const size = nextPowerOfTwo(if (capacity < 8) 8 else capacity);
             const entries = try allocator.alloc(?Entry, size);
             @memset(entries, null);
             return .{
@@ -28,6 +28,7 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
         }
 
         fn nextPowerOfTwo(n: usize) usize {
+            if (n <= 1) return 1;
             var v = n;
             v -= 1;
             v |= v >> 1;
@@ -39,109 +40,104 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
             return v + 1;
         }
 
+        fn keyBytes(key: K) []const u8 {
+            return switch (@typeInfo(K)) {
+                .pointer => |ptr| if (ptr.size == .slice and ptr.child == u8)
+                    key
+                else
+                    std.mem.asBytes(&key),
+                else => std.mem.asBytes(&key),
+            };
+        }
+
+        fn keysEqual(a: K, b: K) bool {
+            return std.mem.eql(u8, keyBytes(a), keyBytes(b));
+        }
+
         fn hash(key: K) usize {
             var h: usize = 2166136261;
-            const bytes = std.mem.asBytes(&key);
+            const bytes = keyBytes(key);
             for (bytes) |byte| {
                 h ^= byte;
-                h *= 16777619;
+                h *%= 16777619;
             }
             return h;
         }
 
-        pub fn get(self: *const @This(), key: K) ?*V {
-            const idx = hash(key) & (self.entries.len - 1);
-            var i = idx;
-            while (i < self.entries.len) : (i += 1) {
+        fn putAssumeCapacity(self: *@This(), key: K, value: V) void {
+            const mask = self.entries.len - 1;
+            var i = hash(key) & mask;
+            while (true) : (i = (i + 1) & mask) {
+                if (self.entries[i] == null) {
+                    self.entries[i] = .{ .key = key, .value = value };
+                    self.count += 1;
+                    return;
+                }
+                if (keysEqual(self.entries[i].?.key, key)) {
+                    self.entries[i].?.value = value;
+                    return;
+                }
+            }
+        }
+
+        pub fn get(self: *const @This(), key: K) ?*const V {
+            const mask = self.entries.len - 1;
+            var i = hash(key) & mask;
+            while (true) : (i = (i + 1) & mask) {
                 if (self.entries[i] == null) return null;
-                if (std.mem.eql(u8, std.mem.asBytes(&self.entries[i].?.key), std.mem.asBytes(&key))) {
+                if (keysEqual(self.entries[i].?.key, key)) {
                     return &self.entries[i].?.value;
                 }
             }
-            i = 0;
-            while (i < idx) : (i += 1) {
-                if (self.entries[i] == null) return null;
-                if (std.mem.eql(u8, std.mem.asBytes(&self.entries[i].?.key), std.mem.asBytes(&key))) {
-                    return &self.entries[i].?.value;
-                }
-            }
-            return null;
         }
 
         pub fn put(self: *@This(), key: K, value: V) !void {
             if (self.count >= self.entries.len * 3 / 4) {
                 try self.resize();
             }
-            const idx = hash(key) & (self.entries.len - 1);
-            var i = idx;
-            while (i < self.entries.len) : (i += 1) {
-                if (self.entries[i] == null) {
-                    self.entries[i] = .{ .key = key, .value = value };
-                    self.count += 1;
-                    return;
-                }
-                if (std.mem.eql(u8, std.mem.asBytes(&self.entries[i].?.key), std.mem.asBytes(&key))) {
-                    self.entries[i].?.value = value;
-                    return;
-                }
-            }
-            i = 0;
-            while (i < idx) : (i += 1) {
-                if (self.entries[i] == null) {
-                    self.entries[i] = .{ .key = key, .value = value };
-                    self.count += 1;
-                    return;
-                }
-                if (std.mem.eql(u8, std.mem.asBytes(&self.entries[i].?.key), std.mem.asBytes(&key))) {
-                    self.entries[i].?.value = value;
-                    return;
-                }
-            }
+            self.putAssumeCapacity(key, value);
         }
 
         fn resize(self: *@This()) !void {
-            const new_size = self.entries.len * 2;
+            const old_entries = self.entries;
+            const new_size = old_entries.len * 2;
             const new_entries = try self.allocator.alloc(?Entry, new_size);
             @memset(new_entries, null);
 
-            for (self.entries) |entry| {
+            self.entries = new_entries;
+            self.count = 0;
+
+            for (old_entries) |entry| {
                 if (entry) |e| {
-                    const idx = hash(e.key) & (new_size - 1);
-                    var i = idx;
-                    while (i < new_size) : (i += 1) {
-                        if (new_entries[i] == null) {
-                            new_entries[i] = e;
-                            break;
-                        }
-                    }
+                    self.putAssumeCapacity(e.key, e.value);
                 }
             }
 
-            self.allocator.free(self.entries);
-            self.entries = new_entries;
+            self.allocator.free(old_entries);
+        }
+
+        fn reinsertCluster(self: *@This(), start_idx: usize) void {
+            const mask = self.entries.len - 1;
+            var i = (start_idx + 1) & mask;
+            while (self.entries[i]) |entry| : (i = (i + 1) & mask) {
+                self.entries[i] = null;
+                self.count -= 1;
+                self.putAssumeCapacity(entry.key, entry.value);
+            }
         }
 
         pub fn remove(self: *@This(), key: K) bool {
-            const idx = hash(key) & (self.entries.len - 1);
-            var i = idx;
-            while (i < self.entries.len) : (i += 1) {
+            const mask = self.entries.len - 1;
+            var i = hash(key) & mask;
+            while (true) : (i = (i + 1) & mask) {
                 if (self.entries[i] == null) return false;
-                if (std.mem.eql(u8, std.mem.asBytes(&self.entries[i].?.key), std.mem.asBytes(&key))) {
+                if (keysEqual(self.entries[i].?.key, key)) {
                     self.entries[i] = null;
                     self.count -= 1;
+                    self.reinsertCluster(i);
                     return true;
                 }
             }
-            i = 0;
-            while (i < idx) : (i += 1) {
-                if (self.entries[i] == null) return false;
-                if (std.mem.eql(u8, std.mem.asBytes(&self.entries[i].?.key), std.mem.asBytes(&key))) {
-                    self.entries[i] = null;
-                    self.count -= 1;
-                    return true;
-                }
-            }
-            return false;
         }
     };
 }
@@ -156,4 +152,40 @@ test "HashMap basic" {
     try std.testing.expectEqual(map.get("answer").?.*, 42);
     try std.testing.expectEqual(map.get("foo").?.*, 100);
     try std.testing.expect(map.get("missing") == null);
+}
+
+test "HashMap string keys compare by contents" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    const heap_key = try std.testing.allocator.dupe(u8, "answer");
+    defer std.testing.allocator.free(heap_key);
+
+    try map.put(heap_key, 42);
+    try std.testing.expectEqual(@as(i32, 42), map.get("answer").?.*);
+}
+
+test "HashMap remove preserves probe chain" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    const candidates = [_][]const u8{ "aa", "ab", "ac", "ad", "ae", "af", "ag", "ah", "ai", "aj" };
+
+    var first: ?[]const u8 = null;
+    var second: ?[]const u8 = null;
+    outer: for (candidates, 0..) |a, i| {
+        for (candidates[(i + 1)..]) |b| {
+            if ((HashMap([]const u8, i32).hash(a) & 7) == (HashMap([]const u8, i32).hash(b) & 7)) {
+                first = a;
+                second = b;
+                break :outer;
+            }
+        }
+    }
+
+    try std.testing.expect(first != null and second != null);
+    try map.put(first.?, 1);
+    try map.put(second.?, 2);
+    try std.testing.expect(map.remove(first.?));
+    try std.testing.expectEqual(@as(i32, 2), map.get(second.?).?.*);
 }
