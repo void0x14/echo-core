@@ -213,6 +213,36 @@ pub fn dequantizeQ4KToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: us
     }
 }
 
+pub fn dequantizeQ2KToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: usize) void {
+    const n_blocks = n_weights / 256;
+    var b: usize = 0;
+    while (b < n_blocks) : (b += 1) {
+        const block = src + b * 84;
+        const d_all = types.fp16_to_fp32(std.mem.readInt(u16, block[0..2], .little));
+        const m_all = types.fp16_to_fp32(std.mem.readInt(u16, block[2..4], .little));
+        const scales = block[4..20];
+        const qs = block[20..84];
+
+        var j: usize = 0;
+        while (j < 256) : (j += 1) {
+            const sb = j / 8;
+            const s = sb / 2;
+            const scale = if (sb % 2 == 0)
+                d_all * @as(f32, @floatFromInt(scales[s] & 0x0F))
+            else
+                d_all * @as(f32, @floatFromInt(scales[s + 8] & 0x0F));
+            const min_val = if (sb % 2 == 0)
+                m_all * @as(f32, @floatFromInt(scales[s] >> 4))
+            else
+                m_all * @as(f32, @floatFromInt(scales[s + 8] >> 4));
+            const byte_idx = j / 4;
+            const bit_off: u3 = @intCast((j % 4) * 2);
+            const q = (qs[byte_idx] >> bit_off) & 0x03;
+            dst[b * 256 + j] = types.fp32_to_fp16(scale * @as(f32, @floatFromInt(q)) - min_val);
+        }
+    }
+}
+
 test "block sizes match C++" {
     try std.testing.expectEqual(@sizeOf(block_q8_0), 34);
     try std.testing.expectEqual(@sizeOf(block_q4_K), 144);
