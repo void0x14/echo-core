@@ -165,21 +165,17 @@ pub const WeightLayout = struct {
         offset += hidden * hidden * sizeof_fp16;
 
         layout.ffn_weight1_offset = offset;
-        switch (config.ffn_type) {
-            .dense => {
-                offset += hidden * ffn_h * sizeof_fp16;
-                layout.ffn_weight2_offset = offset;
-                offset += ffn_h * hidden * sizeof_fp16;
-                layout.ffn_weight3_offset = 0;
-            },
-            .gated_swi_glu, .gated_gelu => {
-                offset += hidden * ffn_h * sizeof_fp16;
-                layout.ffn_weight2_offset = offset;
-                offset += hidden * ffn_h * sizeof_fp16;
-                layout.ffn_weight3_offset = offset;
-                offset += ffn_h * hidden * sizeof_fp16;
-            },
-            else => {},
+        if (config.ffn_type == .dense) {
+            offset += hidden * ffn_h * sizeof_fp16;
+            layout.ffn_weight2_offset = offset;
+            offset += ffn_h * hidden * sizeof_fp16;
+            layout.ffn_weight3_offset = 0;
+        } else {
+            offset += hidden * ffn_h * sizeof_fp16;
+            layout.ffn_weight2_offset = offset;
+            offset += hidden * ffn_h * sizeof_fp16;
+            layout.ffn_weight3_offset = offset;
+            offset += ffn_h * hidden * sizeof_fp16;
         }
 
         layout.per_layer_size = offset;
