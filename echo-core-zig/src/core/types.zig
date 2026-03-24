@@ -7,44 +7,11 @@ pub const CACHE_LINE_SIZE: usize = 64;
 pub const EC_ALIGN: usize = 64;
 
 inline fn fp16ToFp32(h: fp16_t) f32 {
-    const bits: u32 = @intCast(h);
-    const sign = (bits >> 15) & 0x1;
-    const exp = (bits >> 10) & 0x1f;
-    const mantissa = bits & 0x3ff;
-    if (exp == 0) {
-        if (mantissa == 0) {
-            return if (sign == 1) -0.0 else 0.0;
-        }
-        const frac = @as(f32, mantissa) / 1024.0;
-        return if (sign == 1) -frac else frac;
-    }
-    if (exp == 31) {
-        const inf_or_nan = if (mantissa == 0) std.math.inf(f32) else std.math.nan;
-        return if (sign == 1) -inf_or_nan else inf_or_nan;
-    }
-    const significand = @as(f32, mantissa | 0x400) / 1024.0;
-    const e = @as(i32, exp) - 15;
-    const result = significand * std.math.pow(f32, 2.0, @floatFromInt(e));
-    return if (sign == 1) -result else result;
+    return @as(f32, @floatCast(@as(f16, @bitCast(h))));
 }
 
 inline fn fp32ToFp16(f: f32) fp16_t {
-    if (f == 0) return 0;
-    const bits: u32 = @bitCast(f);
-    const sign: u1 = @truncate(bits >> 31);
-    const raw_exp: u8 = @truncate((bits >> 23) & 0xff);
-    const exp: i32 = @as(i32, raw_exp) - 127;
-    const mantissa: u23 = @truncate(bits & 0x7fffff);
-    if (exp < -24) return @truncate(sign << 15);
-    if (exp < -14) {
-        const shift: u6 = @intCast(-exp - 14);
-        const frac = (0x4000 | (mantissa >> shift)) >> shift;
-        return @truncate((sign << 15) | frac);
-    }
-    if (exp > 15) return @truncate((sign << 15) | 0x7c00);
-    const ieee754_mantissa = (mantissa | 0x800000) >> 13;
-    const biased_exp: u5 = @truncate(@as(u16, exp + 15));
-    return @truncate((sign << 15) | (@as(u16, biased_exp) << 10) | ieee754_mantissa);
+    return @as(fp16_t, @bitCast(@as(f16, @floatCast(f))));
 }
 
 inline fn fp16ToFp32Row(src: [*]const fp16_t, dst: [*]f32, n: usize) void {
@@ -106,4 +73,10 @@ test "fp16 conversion roundtrip" {
         const tolerance = @abs(f) * 0.01 + 0.0001;
         try std.testing.expect(diff < tolerance);
     }
+}
+
+test "fp16 subnormal matches IEEE half" {
+    const smallest_subnormal: fp16_t = 0x0001;
+    const expected = @as(f32, @floatCast(@as(f16, @bitCast(smallest_subnormal))));
+    try std.testing.expectEqual(expected, fp16_to_fp32(smallest_subnormal));
 }

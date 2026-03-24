@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const ModelConfig = struct {
+pub const ModelConfig = extern struct {
     vocab_size: u32,
     hidden_dim: u32,
     num_heads: u32,
@@ -14,18 +14,18 @@ pub const ModelConfig = struct {
     pos_encoding: PosEncoding,
     use_kv_quantization: bool,
 
-    pub const FFNType = enum {
+    pub const FFNType = enum(c_int) {
         dense,
         gated_swi_glu,
         gated_gelu,
     };
 
-    pub const NormType = enum {
+    pub const NormType = enum(c_int) {
         layer_norm,
         rms_norm,
     };
 
-    pub const PosEncoding = enum {
+    pub const PosEncoding = enum(c_int) {
         rope,
         learned,
         alibi,
@@ -78,4 +78,14 @@ test "ModelConfig basic creation" {
     };
     try std.testing.expect(config.vocab_size == 32000);
     try std.testing.expect(config.num_layers == 32);
+}
+
+test "ModelConfig enum values and ABI assumptions" {
+    try std.testing.expectEqual(@as(c_int, 0), @intFromEnum(ModelConfig.FFNType.dense));
+    try std.testing.expectEqual(@as(c_int, 1), @intFromEnum(ModelConfig.NormType.rms_norm));
+    try std.testing.expectEqual(@as(c_int, 2), @intFromEnum(ModelConfig.PosEncoding.alibi));
+    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.FFNType));
+    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.NormType));
+    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.PosEncoding));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(ModelConfig));
 }
