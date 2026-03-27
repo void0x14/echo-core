@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
+const iq2_tables = @import("iq2_tables.zig");
 
 pub const block_q8_0 = extern struct {
     d: u16,
@@ -11,6 +12,19 @@ pub const block_q4_K = extern struct {
     dmin: u16,
     scales: [12]u8,
     qs: [128]u8,
+};
+
+pub const block_q6_K = extern struct {
+    ql: [128]u8,
+    qh: [64]u8,
+    scales: [16]i8,
+    d: u16,
+};
+
+pub const block_iq2_xs = extern struct {
+    d: u16,
+    qs: [32]u16,
+    scales: [8]u8,
 };
 
 pub fn quantizePerTokenSymmetric(
@@ -243,9 +257,93 @@ pub fn dequantizeQ2KToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: us
     }
 }
 
+pub fn dequantizeQ6KToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: usize) void {
+    const n_blocks = n_weights / 256;
+    const blocks_bytes: []align(@alignOf(block_q6_K)) const u8 = @alignCast(src[0 .. n_blocks * @sizeOf(block_q6_K)]);
+    const blocks_slice = std.mem.bytesAsSlice(block_q6_K, blocks_bytes);
+
+    var b: usize = 0;
+    while (b < n_blocks) : (b += 1) {
+        const block = blocks_slice[b];
+        const d = types.fp16_to_fp32(block.d);
+
+        var n: usize = 0;
+        while (n < 256) : (n += 128) {
+            var l: usize = 0;
+            while (l < 32) : (l += 1) {
+                const is = l / 16;
+                const qh = block.qh[n / 4 + l];
+                const q1: i8 = @intCast((block.ql[n / 2 + l] & 0x0F) | (((qh >> 0) & 0x03) << 4));
+                const q2: i8 = @intCast((block.ql[n / 2 + 32 + l] & 0x0F) | (((qh >> 2) & 0x03) << 4));
+                const q3: i8 = @intCast((block.ql[n / 2 + l] >> 4) | (((qh >> 4) & 0x03) << 4));
+                const q4: i8 = @intCast((block.ql[n / 2 + 32 + l] >> 4) | (((qh >> 6) & 0x03) << 4));
+
+                dst[b * 256 + n + l + 0] = types.fp32_to_fp16(d * @as(f32, @floatFromInt(block.scales[n / 16 + is + 0])) * @as(f32, @floatFromInt(q1 - 32)));
+                dst[b * 256 + n + l + 32] = types.fp32_to_fp16(d * @as(f32, @floatFromInt(block.scales[n / 16 + is + 2])) * @as(f32, @floatFromInt(q2 - 32)));
+                dst[b * 256 + n + l + 64] = types.fp32_to_fp16(d * @as(f32, @floatFromInt(block.scales[n / 16 + is + 4])) * @as(f32, @floatFromInt(q3 - 32)));
+                dst[b * 256 + n + l + 96] = types.fp32_to_fp16(d * @as(f32, @floatFromInt(block.scales[n / 16 + is + 6])) * @as(f32, @floatFromInt(q4 - 32)));
+            }
+        }
+    }
+}
+
+pub fn dequantizeIQ2XSToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: usize) void {
+    const n_blocks = n_weights / 256;
+    const blocks_bytes: []align(@alignOf(block_iq2_xs)) const u8 = @alignCast(src[0 .. n_blocks * @sizeOf(block_iq2_xs)]);
+    const blocks_slice = std.mem.bytesAsSlice(block_iq2_xs, blocks_bytes);
+
+    var b: usize = 0;
+    while (b < n_blocks) : (b += 1) {
+        const block = blocks_slice[b];
+        const d = types.fp16_to_fp32(block.d);
+
+        var ib32: usize = 0;
+        while (ib32 < 8) : (ib32 += 1) {
+            const db0 = d * (0.5 + @as(f32, @floatFromInt(block.scales[ib32] & 0x0F))) * 0.25;
+            const db1 = d * (0.5 + @as(f32, @floatFromInt(block.scales[ib32] >> 4))) * 0.25;
+
+            var l: usize = 0;
+            while (l < 4) : (l += 1) {
+                const q = block.qs[4 * ib32 + l];
+                const grid = iq2_tables.iq2xs_grid[q & 0x01FF];
+                const signs = iq2_tables.ksigns_iq2xs[q >> 9];
+                const scale = if (l < 2) db0 else db1;
+
+                var j: usize = 0;
+                while (j < 8) : (j += 1) {
+                    const sign: f32 = if ((signs & iq2_tables.kmask_iq2xs[j]) != 0) -1.0 else 1.0;
+                    dst[b * 256 + ib32 * 32 + l * 8 + j] = types.fp32_to_fp16(scale * @as(f32, @floatFromInt(grid[j])) * sign);
+                }
+            }
+        }
+    }
+}
+
 test "block sizes match C++" {
     try std.testing.expectEqual(@sizeOf(block_q8_0), 34);
     try std.testing.expectEqual(@sizeOf(block_q4_K), 144);
+    try std.testing.expectEqual(@as(usize, 210), @sizeOf(block_q6_K));
+    try std.testing.expectEqual(@as(usize, 74), @sizeOf(block_iq2_xs));
+}
+
+test "Q6_K dequant basic shape" {
+    var raw: [210]u8 = [_]u8{0} ** 210;
+    var dst: [256]types.fp16_t = undefined;
+    dequantizeQ6KToFp16(&raw, &dst, dst.len);
+
+    const first = types.fp16_to_fp32(dst[0]);
+    const second = types.fp16_to_fp32(dst[32]);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), first, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), second, 0.001);
+}
+
+test "IQ2_XS dequant basic shape" {
+    var raw: [74]u8 = [_]u8{0} ** 74;
+    var dst: [256]types.fp16_t = undefined;
+    dequantizeIQ2XSToFp16(&raw, &dst, dst.len);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0), types.fp16_to_fp32(dst[0]), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), types.fp16_to_fp32(dst[255]), 0.001);
 }
 
 test "Q4_K dequant matches canonical scale packing" {

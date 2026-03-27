@@ -9,6 +9,11 @@ const quant = @import("../kernels/quant.zig");
 
 const ArrayList = std.array_list.Managed;
 
+const CompatibilityTensor = struct {
+    name: []const u8,
+    dtype: gguf.GGMLType,
+};
+
 pub const ModelLoader = struct {
     config: config.ModelConfig,
     engine_: engine.Engine,
@@ -16,6 +21,12 @@ pub const ModelLoader = struct {
     pub fn load(model_path: []const u8, allocator: std.mem.Allocator) !ModelLoader {
         var reader = try gguf.Reader.openWithAllocator(model_path, allocator);
         defer reader.deinit();
+
+        if (try buildCompatibilityReport(allocator, &reader)) |report| {
+            defer allocator.free(report);
+            std.debug.print("{s}", .{report});
+            return error.ModelIncompatible;
+        }
 
         const cfg = reader.config;
         var eng = try engine.Engine.init(cfg, allocator);
@@ -90,6 +101,171 @@ fn tensorSuffixForLayer(buf: []u8, layer_idx: usize, suffix: []const u8) ![]cons
     return std.fmt.bufPrint(buf, "blk.{d}.{s}", .{ layer_idx, suffix });
 }
 
+fn findTensorNameBySuffix(reader: *const gguf.Reader, suffix: []const u8) ?[]const u8 {
+    var it = reader.tensors.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.endsWith(u8, entry.key_ptr.*, suffix)) return entry.key_ptr.*;
+    }
+    return null;
+}
+
+fn isSupportedTensorType(dtype: gguf.GGMLType) bool {
+    return switch (dtype) {
+        .f16, .f32, .q8_0, .q6_k, .q4_k, .q2_k, .iq2_xs => true,
+        else => false,
+    };
+}
+
+fn hasTensorSuffix(tensors: []const CompatibilityTensor, suffix: []const u8) bool {
+    for (tensors) |tensor| {
+        if (std.mem.endsWith(u8, tensor.name, suffix)) return true;
+    }
+    return false;
+}
+
+fn dtypeForSuffix(tensors: []const CompatibilityTensor, suffix: []const u8) ?gguf.GGMLType {
+    for (tensors) |tensor| {
+        if (std.mem.endsWith(u8, tensor.name, suffix)) return tensor.dtype;
+    }
+    return null;
+}
+
+fn appendCompatibilityIssue(report: *ArrayList(u8), issue: []const u8) !void {
+    if (report.items.len == 0) {
+        try report.appendSlice("Model compatibility check FAILED.\n");
+    }
+    try report.appendSlice("  - ");
+    try report.appendSlice(issue);
+    try report.append('\n');
+}
+
+fn buildCompatibilityReportFromSummary(
+    allocator: std.mem.Allocator,
+    architecture: []const u8,
+    has_hybrid_attention: bool,
+    tensors: []const CompatibilityTensor,
+) !?[]u8 {
+    if (tensors.len == 0) return null;
+
+    var report = ArrayList(u8).init(allocator);
+    errdefer report.deinit();
+
+    if (architecture.len > 0 and
+        !std.mem.eql(u8, architecture, "llama") and
+        !std.mem.eql(u8, architecture, "qwen2") and
+        !std.mem.eql(u8, architecture, "qwen3"))
+    {
+        var buf: [160]u8 = undefined;
+        const msg = try std.fmt.bufPrint(
+            &buf,
+            "general.architecture=\"{s}\"; engine sadece llama/qwen2/qwen3 benzeri klasik transformer akisini destekliyor",
+            .{architecture},
+        );
+        try appendCompatibilityIssue(&report, msg);
+    }
+
+    if (has_hybrid_attention) {
+        try appendCompatibilityIssue(&report, "model metadata attention+SSM hybrid akis gosteriyor; Zig engine SSM dalini hic uygulamiyor");
+    }
+
+    for (tensors) |tensor| {
+        if (std.mem.indexOf(u8, tensor.name, ".ssm_") != null) {
+            var buf: [192]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "SSM tensoru bulundu: {s}", .{tensor.name});
+            try appendCompatibilityIssue(&report, msg);
+            break;
+        }
+    }
+
+    if (hasTensorSuffix(tensors, "attn_qkv.weight") and
+        !(hasTensorSuffix(tensors, "attn_q.weight") and
+            hasTensorSuffix(tensors, "attn_k.weight") and
+            hasTensorSuffix(tensors, "attn_v.weight")))
+    {
+        try appendCompatibilityIssue(&report, "fused attn_qkv.weight var ama ayri Q/K/V tensorlari yok; Zig engine fused QKV ayirmiyor");
+    }
+
+    if (!hasTensorSuffix(tensors, "attn_output.weight") and hasTensorSuffix(tensors, "attn_gate.weight")) {
+        try appendCompatibilityIssue(&report, "attn_output.weight yok, attn_gate.weight var; Zig engine attention output icin gate tensorunu kullanmiyor");
+    }
+
+    if (!hasTensorSuffix(tensors, "output.weight") and !hasTensorSuffix(tensors, "token_embd.weight")) {
+        try appendCompatibilityIssue(&report, "ne output.weight ne de token_embd.weight bulundu; logits projection kurulamaz");
+    }
+
+    if (dtypeForSuffix(tensors, "token_embd.weight")) |dtype| {
+        if (!isSupportedTensorType(dtype)) {
+            var buf: [128]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "token_embd.weight unsupported dtype: {s}", .{@tagName(dtype)});
+            try appendCompatibilityIssue(&report, msg);
+        }
+    }
+
+    if (dtypeForSuffix(tensors, "output_norm.weight")) |dtype| {
+        if (!isSupportedTensorType(dtype)) {
+            var buf: [128]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "output_norm.weight unsupported dtype: {s}", .{@tagName(dtype)});
+            try appendCompatibilityIssue(&report, msg);
+        }
+    }
+
+    for (tensors) |tensor| {
+        if (!isSupportedTensorType(tensor.dtype)) {
+            var buf: [192]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&buf, "unsupported tensor dtype {s} at {s}", .{ @tagName(tensor.dtype), tensor.name });
+            try appendCompatibilityIssue(&report, msg);
+            break;
+        }
+    }
+
+    if (report.items.len == 0) return null;
+    try report.appendSlice("Engine yuklemeyi durdurdu; once model uyumlulugu cozulmeli.\n");
+    return try report.toOwnedSlice();
+}
+
+fn metadataString(reader: *const gguf.Reader, key: []const u8) []const u8 {
+    if (reader.metadata.get(key)) |value| {
+        return switch (value) {
+            .string => |text| text,
+            else => "",
+        };
+    }
+    return "";
+}
+
+fn buildCompatibilityReport(allocator: std.mem.Allocator, reader: *const gguf.Reader) !?[]u8 {
+    var it = reader.tensors.iterator();
+    var count: usize = 0;
+    while (it.next()) |_| count += 1;
+    if (count == 0) return null;
+
+    const tensors = try allocator.alloc(CompatibilityTensor, count);
+    defer allocator.free(tensors);
+
+    var idx: usize = 0;
+    var tensor_it = reader.tensors.iterator();
+    while (tensor_it.next()) |entry| : (idx += 1) {
+        tensors[idx] = .{
+            .name = entry.key_ptr.*,
+            .dtype = entry.value_ptr.dtype,
+        };
+    }
+
+    const architecture = metadataString(reader, "general.architecture");
+    var key_buf: [96]u8 = undefined;
+    const hybrid_key = if (architecture.len > 0)
+        try std.fmt.bufPrint(&key_buf, "{s}.full_attention_interval", .{architecture})
+    else
+        "";
+
+    return try buildCompatibilityReportFromSummary(
+        allocator,
+        architecture,
+        hybrid_key.len > 0 and reader.metadata.get(hybrid_key) != null,
+        tensors,
+    );
+}
+
 fn copyTensorToFp16(dst: []types.fp16_t, dtype: gguf.GGMLType, raw: []const u8) !void {
     switch (dtype) {
         .f16 => {
@@ -106,15 +282,18 @@ fn copyTensorToFp16(dst: []types.fp16_t, dtype: gguf.GGMLType, raw: []const u8) 
             }
         },
         .q8_0 => quant.dequantizeQ80ToFp16(raw.ptr, dst.ptr, dst.len),
+        .q6_k => quant.dequantizeQ6KToFp16(raw.ptr, dst.ptr, dst.len),
         .q4_k => quant.dequantizeQ4KToFp16(raw.ptr, dst.ptr, dst.len),
         .q2_k => quant.dequantizeQ2KToFp16(raw.ptr, dst.ptr, dst.len),
+        .iq2_xs => quant.dequantizeIQ2XSToFp16(raw.ptr, dst.ptr, dst.len),
         else => return error.UnsupportedTensorType,
     }
 }
 
 fn loadTensorIfPresent(reader: *const gguf.Reader, suffix: []const u8, dst: []types.fp16_t, allocator: std.mem.Allocator) !void {
-    if (reader.findTensorBySuffix(suffix)) |info| {
-        const raw = try reader.loadTensor(suffix);
+    if (findTensorNameBySuffix(reader, suffix)) |tensor_name| {
+        const info = reader.findTensorBySuffix(suffix).?;
+        const raw = try reader.loadTensor(tensor_name);
         defer allocator.free(raw);
         try copyTensorToFp16(dst, info.dtype, raw);
     }
@@ -134,7 +313,14 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
     try loadTensorIfPresent(reader, "output_norm.weight", eng.weight_pool[final_norm_off .. final_norm_off + hidden], allocator);
 
     const output_off = layout.output_proj_offset / @sizeOf(types.fp16_t);
-    try loadTensorIfPresent(reader, "output.weight", eng.weight_pool[output_off .. output_off + hidden * cfg.vocab_size], allocator);
+    if (reader.findTensorBySuffix("output.weight") != null) {
+        try loadTensorIfPresent(reader, "output.weight", eng.weight_pool[output_off .. output_off + hidden * cfg.vocab_size], allocator);
+    } else {
+        @memcpy(
+            eng.weight_pool[output_off .. output_off + hidden * cfg.vocab_size],
+            eng.weight_pool[token_embd_off .. token_embd_off + hidden * cfg.vocab_size],
+        );
+    }
 
     var name_buf: [96]u8 = undefined;
     for (0..cfg.num_layers) |layer_idx| {
@@ -154,6 +340,12 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
 
         const o_off = (layer_base + layout.o_proj_offset) / @sizeOf(types.fp16_t);
         try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_output.weight"), eng.weight_pool[o_off .. o_off + hidden * hidden], allocator);
+
+        const ffn_norm_off = (layer_base + layout.ffn_norm_offset) / @sizeOf(types.fp16_t);
+        try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_norm.weight"), eng.weight_pool[ffn_norm_off .. ffn_norm_off + hidden], allocator);
+        if (std.mem.allEqual(types.fp16_t, eng.weight_pool[ffn_norm_off .. ffn_norm_off + hidden], types.fp32_to_fp16(0))) {
+            try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "post_attention_norm.weight"), eng.weight_pool[ffn_norm_off .. ffn_norm_off + hidden], allocator);
+        }
 
         const w1_off = (layer_base + layout.ffn_weight1_offset) / @sizeOf(types.fp16_t);
         const w2_off = (layer_base + layout.ffn_weight2_offset) / @sizeOf(types.fp16_t);
@@ -284,4 +476,103 @@ test "InferencePort init loads GGUF config and tokenizer" {
     try std.testing.expectEqual(@as(u32, 4), port.vocabSize());
     try std.testing.expectEqual(@as(u32, 8), port.getConfig().hidden_dim);
     try std.testing.expectEqual(@as(usize, 4), port.tokenizer_.vocabSize());
+}
+
+test "compatibility report accepts classic transformer summary" {
+    const tensors = [_]CompatibilityTensor{
+        .{ .name = "token_embd.weight", .dtype = .q8_0 },
+        .{ .name = "output_norm.weight", .dtype = .f32 },
+        .{ .name = "output.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.attn_q.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_k.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_v.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_output.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.ffn_gate.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.ffn_up.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.ffn_down.weight", .dtype = .q4_k },
+    };
+
+    const report = try buildCompatibilityReportFromSummary(std.testing.allocator, "qwen2", false, &tensors);
+    defer if (report) |text| std.testing.allocator.free(text);
+    try std.testing.expect(report == null);
+}
+
+test "findTensorNameBySuffix returns exact tensor key" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const data = try gguf.buildSyntheticGgufForTests(std.testing.allocator);
+    defer std.testing.allocator.free(data);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sample.gguf", .data = data });
+
+    var path_buf: [256]u8 = undefined;
+    const rel_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/sample.gguf", .{tmp.sub_path[0..]});
+
+    var reader = try gguf.Reader.openWithAllocator(rel_path, std.testing.allocator);
+    defer reader.deinit();
+
+    try std.testing.expectEqualStrings("blk.0.attn_q.weight", findTensorNameBySuffix(&reader, "attn_q.weight").?);
+}
+
+test "compatibility report rejects hybrid qwen35 style tensors" {
+    const tensors = [_]CompatibilityTensor{
+        .{ .name = "token_embd.weight", .dtype = .q8_0 },
+        .{ .name = "output_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.attn_qkv.weight", .dtype = .q8_0 },
+        .{ .name = "blk.0.attn_gate.weight", .dtype = .q8_0 },
+        .{ .name = "blk.0.post_attention_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.ssm_out.weight", .dtype = .q8_0 },
+    };
+
+    const report = (try buildCompatibilityReportFromSummary(std.testing.allocator, "qwen35", true, &tensors)).?;
+    defer std.testing.allocator.free(report);
+
+    try std.testing.expect(std.mem.indexOf(u8, report, "qwen35") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, "attn_qkv") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, "SSM") != null);
+}
+
+test "compatibility report rejects unsupported tensor dtype" {
+    const tensors = [_]CompatibilityTensor{
+        .{ .name = "token_embd.weight", .dtype = .iq4_xs },
+        .{ .name = "output_norm.weight", .dtype = .f32 },
+        .{ .name = "output.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.attn_q.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_k.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_v.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_output.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.ffn_gate.weight", .dtype = .iq4_xs },
+        .{ .name = "blk.0.ffn_up.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.ffn_down.weight", .dtype = .q4_k },
+    };
+
+    const report = (try buildCompatibilityReportFromSummary(std.testing.allocator, "llama", false, &tensors)).?;
+    defer std.testing.allocator.free(report);
+    try std.testing.expect(std.mem.indexOf(u8, report, "iq4_xs") != null);
+}
+
+test "compatibility report accepts qwen3 classic transformer summary" {
+    const tensors = [_]CompatibilityTensor{
+        .{ .name = "token_embd.weight", .dtype = .q6_k },
+        .{ .name = "output_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.attn_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.attn_q.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_k.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_v.weight", .dtype = .iq2_xs },
+        .{ .name = "blk.0.attn_output.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_q_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.attn_k_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.ffn_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.ffn_gate.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.ffn_up.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.ffn_down.weight", .dtype = .q6_k },
+    };
+
+    const report = try buildCompatibilityReportFromSummary(std.testing.allocator, "qwen3", false, &tensors);
+    defer if (report) |text| std.testing.allocator.free(text);
+    try std.testing.expect(report == null);
 }

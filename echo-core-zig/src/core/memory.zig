@@ -129,6 +129,7 @@ pub const WeightLayout = struct {
     k_proj_offset: usize,
     v_proj_offset: usize,
     o_proj_offset: usize,
+    ffn_norm_offset: usize,
     ffn_weight1_offset: usize,
     ffn_weight2_offset: usize,
     ffn_weight3_offset: usize,
@@ -163,6 +164,9 @@ pub const WeightLayout = struct {
 
         layout.o_proj_offset = offset;
         offset += hidden * hidden * sizeof_fp16;
+
+        layout.ffn_norm_offset = offset;
+        offset += hidden * sizeof_fp16;
 
         layout.ffn_weight1_offset = offset;
         if (config.ffn_type == .dense) {

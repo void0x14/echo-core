@@ -177,6 +177,8 @@ pub const Engine = struct {
 
         const layer_norm_offset = (layer_base + self.weight_layout.norm_weight_offset) / @sizeOf(types.fp16_t);
         const layer_norm = self.weight_pool[layer_norm_offset..][0..hidden];
+        const ffn_norm_offset = (layer_base + self.weight_layout.ffn_norm_offset) / @sizeOf(types.fp16_t);
+        const ffn_norm = self.weight_pool[ffn_norm_offset..][0..hidden];
 
         @memcpy(self.residual, input);
         self.norm(input, output, layer_norm);
@@ -184,7 +186,7 @@ pub const Engine = struct {
         for (0..hidden) |i| output[i] = self.residual[i] + self.attn_proj[i];
 
         @memcpy(self.residual, output);
-        self.norm(output, output, layer_norm);
+        self.norm(output, output, ffn_norm);
         self.ffn(output, self.ffn_out);
         for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
     }

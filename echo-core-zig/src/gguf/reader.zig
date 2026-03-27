@@ -564,7 +564,7 @@ fn appendString(list: *ArrayList(u8), value: []const u8) !void {
     try list.appendSlice(value);
 }
 
-fn buildSyntheticGguf(allocator: Allocator) ![]u8 {
+pub fn buildSyntheticGgufForTests(allocator: Allocator) ![]u8 {
     var bytes = ArrayList(u8).init(allocator);
     errdefer bytes.deinit();
 
@@ -637,7 +637,7 @@ test "GGMLType count" {
 test "Reader parses synthetic GGUF v3 file" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
 
-    const data = try buildSyntheticGguf(std.testing.allocator);
+    const data = try buildSyntheticGgufForTests(std.testing.allocator);
     defer std.testing.allocator.free(data);
 
     var tmp = std.testing.tmpDir(.{});
