@@ -23,6 +23,7 @@ pub const Engine = struct {
     q_proj: []f32,
     k_proj: []f32,
     v_proj: []f32,
+    attn_accum: []f32,
     scores: []f32,
     head_q: []f32,
     head_out: []f32,
@@ -31,11 +32,13 @@ pub const Engine = struct {
     ffn_up_buf: []f32,
     logits: []f32,
     current_layer_base: usize,
+    seq_pos: u32,
 
     pub fn init(cfg: config.ModelConfig, allocator: std.mem.Allocator) !Engine {
         const layout = memory.WeightLayout.compute(cfg);
         const total_weights = layout.total_size / @sizeOf(types.fp16_t);
         const kv_dim = cfg.num_kv_heads * cfg.head_dim;
+        const q_dim = cfg.num_heads * cfg.head_dim;
 
         const weight_pool = try allocator.alloc(types.fp16_t, total_weights);
         errdefer allocator.free(weight_pool);
@@ -56,12 +59,15 @@ pub const Engine = struct {
         errdefer allocator.free(attn_proj);
         const ffn_out = try allocator.alloc(f32, cfg.hidden_dim);
         errdefer allocator.free(ffn_out);
-        const q_proj = try allocator.alloc(f32, cfg.hidden_dim);
+        const q_proj = try allocator.alloc(f32, q_dim);
         errdefer allocator.free(q_proj);
         const k_proj = try allocator.alloc(f32, kv_dim);
         errdefer allocator.free(k_proj);
         const v_proj = try allocator.alloc(f32, kv_dim);
         errdefer allocator.free(v_proj);
+        // attention accumulates into attn_accum before projecting
+        const attn_accum = try allocator.alloc(f32, q_dim);
+        errdefer allocator.free(attn_accum);
         const scores = try allocator.alloc(f32, if (cfg.max_seq_len > 0) cfg.max_seq_len else 1);
         errdefer allocator.free(scores);
         const head_q = try allocator.alloc(f32, if (cfg.head_dim > 0) cfg.head_dim else 1);
@@ -85,6 +91,7 @@ pub const Engine = struct {
         @memset(q_proj, 0);
         @memset(k_proj, 0);
         @memset(v_proj, 0);
+        @memset(attn_accum, 0);
         @memset(scores, 0);
         @memset(head_q, 0);
         @memset(head_out, 0);
@@ -107,6 +114,7 @@ pub const Engine = struct {
             .q_proj = q_proj,
             .k_proj = k_proj,
             .v_proj = v_proj,
+            .attn_accum = attn_accum,
             .scores = scores,
             .head_q = head_q,
             .head_out = head_out,
@@ -115,6 +123,7 @@ pub const Engine = struct {
             .ffn_up_buf = ffn_up_buf,
             .logits = logits,
             .current_layer_base = 0,
+            .seq_pos = 0,
         };
     }
 
@@ -129,6 +138,7 @@ pub const Engine = struct {
         allocator.free(self.q_proj);
         allocator.free(self.k_proj);
         allocator.free(self.v_proj);
+        allocator.free(self.attn_accum);
         allocator.free(self.scores);
         allocator.free(self.head_q);
         allocator.free(self.head_out);
@@ -140,6 +150,7 @@ pub const Engine = struct {
 
     pub fn reset(self: *Engine) void {
         if (self.kv_cache) |*cache| cache.reset();
+        self.seq_pos = 0;
     }
 
     pub fn loadWeights(self: *Engine, weights: []const types.fp16_t) !void {
@@ -147,12 +158,10 @@ pub const Engine = struct {
         @memcpy(self.weight_pool, weights);
     }
 
-    pub fn forward(self: *Engine, input_ids: []const u32) ![]f32 {
-        if (input_ids.len == 0) return error.EmptyInput;
-
+    /// Process a single token at self.seq_pos, return logits.
+    pub fn forwardToken(self: *Engine, token_id: u32) ![]f32 {
         const hidden = self.config.hidden_dim;
         const vocab = self.config.vocab_size;
-        const token_id = input_ids[input_ids.len - 1];
         const embed_offset = self.weight_layout.token_embedding_offset / @sizeOf(types.fp16_t);
         const emb_row = self.weight_pool[embed_offset + @as(usize, token_id) * hidden ..][0..hidden];
         types.fp16_to_fp32_row(emb_row.ptr, self.hidden_state.ptr, hidden);
@@ -167,7 +176,15 @@ pub const Engine = struct {
         @memset(self.logits, 0);
         const output_proj_offset = self.weight_layout.output_proj_offset / @sizeOf(types.fp16_t);
         matvec.matvecDispatch(self.weight_pool[output_proj_offset..].ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, self.config);
+
+        self.seq_pos += 1;
         return self.logits;
+    }
+
+    /// Legacy: process last token from list (for backward compat with tests).
+    pub fn forward(self: *Engine, input_ids: []const u32) ![]f32 {
+        if (input_ids.len == 0) return error.EmptyInput;
+        return self.forwardToken(input_ids[input_ids.len - 1]);
     }
 
     fn layerForward(self: *Engine, layer_idx: u32, input: []const f32, output: []f32) void {
@@ -191,11 +208,67 @@ pub const Engine = struct {
         for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
     }
 
+    /// Apply RoPE to Q and K projections in-place.
+    fn applyRoPE(self: *Engine) void {
+        const head_dim = self.config.head_dim;
+        const num_heads = self.config.num_heads;
+        const num_kv_heads = self.config.num_kv_heads;
+        const pos = self.seq_pos;
+        const rope_base: f32 = 10000.0;
+
+        // Apply to Q heads
+        for (0..num_heads) |h| {
+            const offset = h * head_dim;
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_val = @cos(angle);
+                const sin_val = @sin(angle);
+                const q0 = self.q_proj[offset + i];
+                const q1 = self.q_proj[offset + i + 1];
+                self.q_proj[offset + i] = q0 * cos_val - q1 * sin_val;
+                self.q_proj[offset + i + 1] = q0 * sin_val + q1 * cos_val;
+            }
+        }
+
+        // Apply to K heads
+        for (0..num_kv_heads) |h| {
+            const offset = h * head_dim;
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_val = @cos(angle);
+                const sin_val = @sin(angle);
+                const k0 = self.k_proj[offset + i];
+                const k1 = self.k_proj[offset + i + 1];
+                self.k_proj[offset + i] = k0 * cos_val - k1 * sin_val;
+                self.k_proj[offset + i + 1] = k0 * sin_val + k1 * cos_val;
+            }
+        }
+    }
+
+    /// Apply per-head RMS norm using weight stored at given offset (head_dim elements).
+    fn applyHeadNorm(proj: []f32, num_heads_for_proj: u32, head_dim: u32, norm_weight: []const types.fp16_t) void {
+        for (0..num_heads_for_proj) |h| {
+            const offset = h * head_dim;
+            var rms: f32 = 0;
+            for (0..head_dim) |i| rms += proj[offset + i] * proj[offset + i];
+            rms = @sqrt(rms / @as(f32, @floatFromInt(head_dim)) + 1e-6);
+            const inv_rms = 1.0 / rms;
+            for (0..head_dim) |i| {
+                proj[offset + i] = proj[offset + i] * inv_rms * types.fp16_to_fp32(norm_weight[i]);
+            }
+        }
+    }
+
     fn attention(self: *Engine, layer_idx: u32, input: []const f32, output: []f32) void {
         const hidden = self.config.hidden_dim;
         const num_heads = self.config.num_heads;
         const num_kv_heads = self.config.num_kv_heads;
         const head_dim = self.config.head_dim;
+        const q_dim = num_heads * head_dim;
         const kv_dim = num_kv_heads * head_dim;
         const layer_base = self.weight_layout.token_embedding_size + @as(usize, layer_idx) * self.weight_layout.per_layer_size;
 
@@ -207,14 +280,33 @@ pub const Engine = struct {
         @memset(self.q_proj, 0);
         @memset(self.k_proj, 0);
         @memset(self.v_proj, 0);
-        matvec.matvecDispatch(self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, hidden, hidden, self.config);
+        matvec.matvecDispatch(self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, q_dim, hidden, self.config);
         matvec.matvecDispatch(self.weight_pool[k_proj_offset..].ptr, input.ptr, self.k_proj.ptr, kv_dim, hidden, self.config);
         matvec.matvecDispatch(self.weight_pool[v_proj_offset..].ptr, input.ptr, self.v_proj.ptr, kv_dim, hidden, self.config);
 
-        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
-        for (self.q_proj) |*q| q.* *= scale;
+        // Apply Q/K head norms if weights are non-zero
+        const q_norm_offset = (layer_base + self.weight_layout.attn_q_norm_offset) / @sizeOf(types.fp16_t);
+        const k_norm_offset = (layer_base + self.weight_layout.attn_k_norm_offset) / @sizeOf(types.fp16_t);
+        const q_norm_w = self.weight_pool[q_norm_offset..][0..head_dim];
+        const k_norm_w = self.weight_pool[k_norm_offset..][0..head_dim];
+        if (!std.mem.allEqual(types.fp16_t, q_norm_w, 0)) {
+            applyHeadNorm(self.q_proj, num_heads, head_dim, q_norm_w);
+        }
+        if (!std.mem.allEqual(types.fp16_t, k_norm_w, 0)) {
+            applyHeadNorm(self.k_proj[0..kv_dim], num_kv_heads, head_dim, k_norm_w);
+        }
 
-        @memset(output, 0);
+        // Apply RoPE
+        if (self.config.pos_encoding == .rope) {
+            self.applyRoPE();
+        }
+
+        // Append K/V to cache BEFORE attention so current token attends to itself
+        if (self.kv_cache) |*cache| cache.append(layer_idx, self.k_proj.ptr, self.v_proj.ptr);
+
+        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+
+        @memset(self.attn_accum, 0);
 
         const cache_len = if (self.kv_cache) |cache| cache.seqLen() else 0;
         if (cache_len > 0 and self.kv_cache != null) {
@@ -231,7 +323,7 @@ pub const Engine = struct {
                         const key_head = cache_layer.keys_int8.? + @as(usize, pos) * kv_dim + @as(usize, kv_head) * head_dim;
                         const k_scale = cache_layer.key_scales.?[@as(usize, pos) * num_kv_heads + kv_head];
                         for (0..head_dim) |d| score += self.head_q[d] * @as(f32, @floatFromInt(key_head[d])) * k_scale;
-                        self.scores[pos] = score;
+                        self.scores[pos] = score * scale;
                     }
                 } else {
                     for (0..cache_len) |pos_index| {
@@ -239,7 +331,7 @@ pub const Engine = struct {
                         var score: f32 = 0;
                         const key_head = cache_layer.keys_fp32.? + @as(usize, pos) * kv_dim + @as(usize, kv_head) * head_dim;
                         for (0..head_dim) |d| score += self.head_q[d] * key_head[d];
-                        self.scores[pos] = score;
+                        self.scores[pos] = score * scale;
                     }
                 }
 
@@ -263,15 +355,13 @@ pub const Engine = struct {
                     }
                 }
 
-                @memcpy(output[@as(usize, h) * head_dim ..][0..head_dim], self.head_out[0..head_dim]);
+                @memcpy(self.attn_accum[@as(usize, h) * head_dim ..][0..head_dim], self.head_out[0..head_dim]);
             }
         }
 
         @memset(self.attn_out, 0);
-        matvec.matvecDispatch(self.weight_pool[o_proj_offset..].ptr, output.ptr, self.attn_out.ptr, hidden, hidden, self.config);
+        matvec.matvecDispatch(self.weight_pool[o_proj_offset..].ptr, self.attn_accum.ptr, self.attn_out.ptr, hidden, q_dim, self.config);
         @memcpy(output, self.attn_out);
-
-        if (self.kv_cache) |*cache| cache.append(layer_idx, self.k_proj.ptr, self.v_proj.ptr);
     }
 
     fn ffn(self: *Engine, input: []const f32, output: []f32) void {
@@ -341,31 +431,64 @@ pub const Engine = struct {
         var ids = try tokenizer_.encode(prompt);
         defer ids.deinit();
 
+        if (ids.items.len == 0) return error.EmptyInput;
+
         var all_ids = ArrayList(u32).init(self.allocator);
         defer all_ids.deinit();
         try all_ids.appendSlice(ids.items);
 
-        while (all_ids.items.len < max_tokens) {
-            const logits = try self.forward(all_ids.items);
-            const next_id = self.sampleTopK(logits, 1);
+        // Prefill: process all prompt tokens through the KV cache.
+        // After this loop, self.logits holds the prediction for the first generated token.
+        for (ids.items) |tok_id| {
+            _ = try self.forwardToken(tok_id);
+        }
+
+        // Decode: sample from prefill logits, then forward each new token.
+        var generated: u32 = 0;
+        while (generated < max_tokens) : (generated += 1) {
+            const next_id = self.sampleGreedy(self.logits);
             if (next_id == tokenizer_.eos()) break;
             try all_ids.append(next_id);
             if (self.kv_cache) |cache| {
                 if (cache.seqLen() >= self.config.max_seq_len) break;
             }
+            _ = try self.forwardToken(next_id);
         }
 
         return tokenizer_.decode(all_ids.items);
     }
 
-    fn sampleTopK(self: *const Engine, logits: []const f32, k: u32) u32 {
+    /// Prefill prompt tokens into KV cache, return logits of last token.
+    pub fn prefill(self: *Engine, token_ids: []const u32) ![]f32 {
+        var logits: []f32 = self.logits;
+        for (token_ids) |tok_id| {
+            logits = try self.forwardToken(tok_id);
+        }
+        return logits;
+    }
+
+    /// Decode one step: process token_id, return logits.
+    pub fn decodeStep(self: *Engine, token_id: u32) ![]f32 {
+        return self.forwardToken(token_id);
+    }
+
+    pub fn greedyNextToken(self: *const Engine) u32 {
+        return self.sampleGreedy(self.logits);
+    }
+
+    fn sampleGreedy(self: *const Engine, logits: []const f32) u32 {
         _ = self;
-        _ = k;
         var max_idx: u32 = 0;
         for (1..logits.len) |i| {
             if (logits[i] > logits[max_idx]) max_idx = @intCast(i);
         }
         return max_idx;
+    }
+
+    /// Legacy alias
+    fn sampleTopK(self: *const Engine, logits: []const f32, k: u32) u32 {
+        _ = k;
+        return self.sampleGreedy(logits);
     }
 };
 
@@ -387,36 +510,36 @@ fn makeTinyConfig(num_layers: u32, max_seq_len: u32) config.ModelConfig {
 }
 
 test "Engine init" {
-    var engine = try Engine.init(makeTinyConfig(1, 8), std.testing.allocator);
-    defer engine.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 4), engine.config.hidden_dim);
-    try std.testing.expectEqual(@as(usize, 4), engine.logits.len);
+    var eng = try Engine.init(makeTinyConfig(1, 8), std.testing.allocator);
+    defer eng.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 4), eng.config.hidden_dim);
+    try std.testing.expectEqual(@as(usize, 4), eng.logits.len);
 }
 
 test "Engine forward returns vocab logits and uses last token embedding" {
     const cfg = makeTinyConfig(0, 0);
-    var engine = try Engine.init(cfg, std.testing.allocator);
-    defer engine.deinit(std.testing.allocator);
+    var eng = try Engine.init(cfg, std.testing.allocator);
+    defer eng.deinit(std.testing.allocator);
 
-    @memset(engine.weight_pool, types.fp32_to_fp16(0));
+    @memset(eng.weight_pool, types.fp32_to_fp16(0));
 
-    const embed_offset = engine.weight_layout.token_embedding_offset / @sizeOf(types.fp16_t);
-    const final_norm_offset = engine.weight_layout.final_norm_offset / @sizeOf(types.fp16_t);
-    const output_offset = engine.weight_layout.output_proj_offset / @sizeOf(types.fp16_t);
+    const embed_offset = eng.weight_layout.token_embedding_offset / @sizeOf(types.fp16_t);
+    const final_norm_offset = eng.weight_layout.final_norm_offset / @sizeOf(types.fp16_t);
+    const output_offset = eng.weight_layout.output_proj_offset / @sizeOf(types.fp16_t);
 
     for (0..cfg.vocab_size) |tok| {
         for (0..cfg.hidden_dim) |i| {
-            engine.weight_pool[embed_offset + tok * cfg.hidden_dim + i] = types.fp32_to_fp16(if (tok == i) 1 else 0);
+            eng.weight_pool[embed_offset + tok * cfg.hidden_dim + i] = types.fp32_to_fp16(if (tok == i) 1 else 0);
         }
     }
     for (0..cfg.hidden_dim) |i| {
-        engine.weight_pool[final_norm_offset + i] = types.fp32_to_fp16(1);
+        eng.weight_pool[final_norm_offset + i] = types.fp32_to_fp16(1);
         for (0..cfg.hidden_dim) |j| {
-            engine.weight_pool[output_offset + i * cfg.hidden_dim + j] = types.fp32_to_fp16(if (i == j) 1 else 0);
+            eng.weight_pool[output_offset + i * cfg.hidden_dim + j] = types.fp32_to_fp16(if (i == j) 1 else 0);
         }
     }
 
-    const logits = try engine.forward(&.{3});
+    const logits = try eng.forward(&.{3});
     try std.testing.expectEqual(@as(usize, cfg.vocab_size), logits.len);
 
     var best: usize = 0;
@@ -428,15 +551,15 @@ test "Engine forward returns vocab logits and uses last token embedding" {
 
 test "Engine forward advances kv cache across calls" {
     const cfg = makeTinyConfig(1, 8);
-    var engine = try Engine.init(cfg, std.testing.allocator);
-    defer engine.deinit(std.testing.allocator);
+    var eng = try Engine.init(cfg, std.testing.allocator);
+    defer eng.deinit(std.testing.allocator);
 
-    @memset(engine.weight_pool, types.fp32_to_fp16(0.1));
+    @memset(eng.weight_pool, types.fp32_to_fp16(0.1));
 
-    _ = try engine.forward(&.{0});
-    try std.testing.expect(engine.kv_cache != null);
-    try std.testing.expectEqual(@as(u32, 1), engine.kv_cache.?.seqLen());
+    _ = try eng.forward(&.{0});
+    try std.testing.expect(eng.kv_cache != null);
+    try std.testing.expectEqual(@as(u32, 1), eng.kv_cache.?.seqLen());
 
-    _ = try engine.forward(&.{ 0, 1 });
-    try std.testing.expectEqual(@as(u32, 2), engine.kv_cache.?.seqLen());
+    _ = try eng.forward(&.{ 0, 1 });
+    try std.testing.expectEqual(@as(u32, 2), eng.kv_cache.?.seqLen());
 }

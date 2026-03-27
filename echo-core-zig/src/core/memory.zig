@@ -133,6 +133,8 @@ pub const WeightLayout = struct {
     ffn_weight1_offset: usize,
     ffn_weight2_offset: usize,
     ffn_weight3_offset: usize,
+    attn_q_norm_offset: usize,
+    attn_k_norm_offset: usize,
     per_layer_size: usize,
     final_norm_offset: usize,
     output_proj_offset: usize,
@@ -154,16 +156,16 @@ pub const WeightLayout = struct {
         offset += hidden * sizeof_fp16;
 
         layout.q_proj_offset = offset;
-        offset += hidden * hidden * sizeof_fp16;
+        offset += (config.num_heads * config.head_dim) * hidden * sizeof_fp16;
 
         layout.k_proj_offset = offset;
-        offset += hidden * kv_dim * sizeof_fp16;
+        offset += kv_dim * hidden * sizeof_fp16;
 
         layout.v_proj_offset = offset;
-        offset += hidden * kv_dim * sizeof_fp16;
+        offset += kv_dim * hidden * sizeof_fp16;
 
         layout.o_proj_offset = offset;
-        offset += hidden * hidden * sizeof_fp16;
+        offset += hidden * (config.num_heads * config.head_dim) * sizeof_fp16;
 
         layout.ffn_norm_offset = offset;
         offset += hidden * sizeof_fp16;
@@ -181,6 +183,11 @@ pub const WeightLayout = struct {
             layout.ffn_weight3_offset = offset;
             offset += ffn_h * hidden * sizeof_fp16;
         }
+
+        layout.attn_q_norm_offset = offset;
+        offset += config.head_dim * sizeof_fp16;
+        layout.attn_k_norm_offset = offset;
+        offset += config.head_dim * sizeof_fp16;
 
         layout.per_layer_size = offset;
         layout.final_norm_offset = layout.token_embedding_size + layout.per_layer_size * config.num_layers;
@@ -203,6 +210,7 @@ test "WeightLayout compute" {
     const config = .{
         .vocab_size = 32000,
         .hidden_dim = 4096,
+        .num_heads = 32,
         .num_kv_heads = 32,
         .head_dim = 128,
         .num_layers = 32,

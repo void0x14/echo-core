@@ -29,31 +29,37 @@ pub const GGMLType = enum(u32) {
     f16 = 1,
     q4_0 = 2,
     q4_1 = 3,
-    q5_0 = 4,
-    q5_1 = 5,
-    q8_0 = 6,
-    q8_1 = 7,
-    q2_k = 8,
-    q3_k = 9,
-    q4_k = 10,
-    q5_k = 11,
-    q6_k = 12,
-    iq2_xxs = 13,
-    iq2_xs = 14,
-    i16 = 15,
-    f64 = 16,
-    iq1_s = 17,
-    iq4_nl = 18,
-    iq4_xs = 19,
-    i8 = 20,
-    i32 = 21,
+    // q4_2 = 4,
+    // q4_3 = 5,
+    q5_0 = 6,
+    q5_1 = 7,
+    q8_0 = 8,
+    q8_1 = 9,
+    q2_k = 10,
+    q3_k = 11,
+    q4_k = 12,
+    q5_k = 13,
+    q6_k = 14,
+    q8_k = 15,
+    iq2_xxs = 16,
+    iq2_xs = 17,
+    iq3_xxs = 18,
+    iq1_s = 19,
+    iq4_nl = 20,
+    iq3_s = 21,
     iq2_s = 22,
-    iq3_xxs = 23,
-    bf16 = 24,
-    q4_0_4_4 = 25,
-    q4_0_4_8 = 26,
-    q4_0_8_8 = 27,
-    count = 28,
+    iq4_xs = 23,
+    i8 = 24,
+    i16 = 25,
+    i32 = 26,
+    i64 = 27,
+    f64 = 28,
+    iq1_m = 29,
+    bf16 = 30,
+    tq1_0 = 34,
+    tq2_0 = 35,
+    mxfp4 = 39,
+    count = 40,
 };
 
 pub const TensorInfo = struct {
@@ -244,6 +250,12 @@ pub const Reader = struct {
         if (self.config.num_kv_heads == 0) self.config.num_kv_heads = self.config.num_heads;
         if (self.config.num_heads != 0) self.config.head_dim = self.config.hidden_dim / self.config.num_heads;
 
+        // Models with GQA (like Qwen3, Llama 3) often specify an explicit key_length (head_dim)
+        // that isn't just hidden_dim / num_heads.
+        if (self.prefixedLookup("attention.key_length")) |value| {
+            if (self.numericAsU64(value)) |v| self.config.head_dim = @intCast(v);
+        }
+
         if (self.prefixedLookup("vocab_size")) |value| {
             if (self.numericAsU64(value)) |v| self.config.vocab_size = @intCast(v);
         }
@@ -252,6 +264,9 @@ pub const Reader = struct {
         self.config.norm_type = .rms_norm;
         self.config.pos_encoding = .rope;
         self.config.use_kv_quantization = false;
+
+        // Cap max_seq_len to prevent OOM from models with huge context_length
+        if (self.config.max_seq_len > 4096) self.config.max_seq_len = 4096;
     }
 
     fn populateTokens(self: *Reader) !void {
@@ -428,7 +443,9 @@ pub const Reader = struct {
     pub fn findTensorBySuffix(self: *const Reader, suffix: []const u8) ?TensorInfo {
         var it = self.tensors.iterator();
         while (it.next()) |entry| {
-            if (entry.key_ptr.*.len >= suffix.len and std.mem.endsWith(u8, entry.key_ptr.*, suffix)) {
+            const name = entry.key_ptr.*;
+            if (std.mem.eql(u8, name, suffix)) return entry.value_ptr.*;
+            if (name.len > suffix.len + 1 and name[name.len - suffix.len - 1] == '.' and std.mem.endsWith(u8, name, suffix)) {
                 return entry.value_ptr.*;
             }
         }
@@ -496,15 +513,32 @@ fn blockSizeBytes(dtype: GGMLType) u64 {
         .q4_k => 144,
         .q5_k => 176,
         .q6_k => 210,
+        .q8_k => 34,
         .iq2_xxs => 66,
-        .iq2_xs => 70,
-        .iq2_s => 74,
+        .iq2_xs => 74,
         .iq3_xxs => 102,
         .iq1_s => 42,
         .iq4_nl => 144,
+        .iq3_s => 109,
+        .iq2_s => 74,
         .iq4_xs => 136,
-        .q4_0_4_4, .q4_0_4_8, .q4_0_8_8 => 18,
+        .i64 => 8,
+        .iq1_m => 58,
+        .tq1_0 => 34,
+        .tq2_0 => 66,
+        .mxfp4 => 32,
         .count => 0,
+    };
+}
+
+fn blockElements(dtype: GGMLType) u64 {
+    return switch (dtype) {
+        .q4_0, .q4_1, .q5_0, .q5_1, .q8_0, .q8_1 => 32,
+        .q2_k, .q3_k, .q4_k, .q5_k, .q6_k => 256,
+        .q8_k => 32,
+        .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq1_s, .iq4_nl, .iq4_xs, .iq3_s, .iq1_m => 256,
+        .tq1_0, .tq2_0, .mxfp4 => 32,
+        else => 1,
     };
 }
 
@@ -521,8 +555,9 @@ fn computeTensorByteSize(dtype: GGMLType, shape: []const u64) u64 {
         .i32 => n_elements * 4,
         else => blk: {
             const block_bytes = blockSizeBytes(dtype);
-            if (block_bytes == 0) unreachable;
-            const n_blocks = (n_elements + GGML_QUANT_BLOCK_SIZE - 1) / GGML_QUANT_BLOCK_SIZE;
+            const block_elems = blockElements(dtype);
+            if (block_bytes == 0 or block_elems == 0) unreachable;
+            const n_blocks = (n_elements + block_elems - 1) / block_elems;
             break :blk n_blocks * block_bytes;
         },
     };
@@ -631,7 +666,7 @@ pub fn buildSyntheticGgufForTests(allocator: Allocator) ![]u8 {
 }
 
 test "GGMLType count" {
-    try std.testing.expectEqual(@as(u32, 28), @intFromEnum(GGMLType.count));
+    try std.testing.expectEqual(@as(u32, 40), @intFromEnum(GGMLType.count));
 }
 
 test "Reader parses synthetic GGUF v3 file" {
