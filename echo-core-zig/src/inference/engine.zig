@@ -43,11 +43,7 @@ pub const Engine = struct {
         const weight_pool = try allocator.alloc(types.fp16_t, total_weights);
         errdefer allocator.free(weight_pool);
 
-        var cache: ?kv_cache.KVCache = null;
-        if (cfg.max_seq_len > 0 and cfg.num_layers > 0) {
-            cache = try kv_cache.KVCache.init(cfg, allocator);
-        }
-        errdefer if (cache) |*c| c.deinit(allocator);
+        const cache: ?kv_cache.KVCache = null;
 
         const hidden_state = try allocator.alloc(f32, cfg.hidden_dim);
         errdefer allocator.free(hidden_state);
@@ -153,6 +149,12 @@ pub const Engine = struct {
         self.seq_pos = 0;
     }
 
+    fn ensureKvCache(self: *Engine) !void {
+        if (self.kv_cache == null and self.config.max_seq_len > 0 and self.config.num_layers > 0) {
+            self.kv_cache = try kv_cache.KVCache.init(self.config, self.allocator);
+        }
+    }
+
     pub fn loadWeights(self: *Engine, weights: []const types.fp16_t) !void {
         if (weights.len != self.weight_pool.len) return error.InvalidWeights;
         @memcpy(self.weight_pool, weights);
@@ -160,6 +162,8 @@ pub const Engine = struct {
 
     /// Process a single token at self.seq_pos, return logits.
     pub fn forwardToken(self: *Engine, token_id: u32) ![]f32 {
+        try self.ensureKvCache();
+
         const hidden = self.config.hidden_dim;
         const vocab = self.config.vocab_size;
         const embed_offset = self.weight_layout.token_embedding_offset / @sizeOf(types.fp16_t);
@@ -562,4 +566,18 @@ test "Engine forward advances kv cache across calls" {
 
     _ = try eng.forward(&.{ 0, 1 });
     try std.testing.expectEqual(@as(u32, 2), eng.kv_cache.?.seqLen());
+}
+
+test "Engine lazily initializes kv cache on first forward" {
+    const cfg = makeTinyConfig(1, 8);
+    var eng = try Engine.init(cfg, std.testing.allocator);
+    defer eng.deinit(std.testing.allocator);
+
+    try std.testing.expect(eng.kv_cache == null);
+
+    @memset(eng.weight_pool, types.fp32_to_fp16(0.1));
+    _ = try eng.forward(&.{0});
+
+    try std.testing.expect(eng.kv_cache != null);
+    try std.testing.expectEqual(@as(u32, 1), eng.kv_cache.?.seqLen());
 }

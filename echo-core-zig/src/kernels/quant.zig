@@ -21,11 +21,38 @@ pub const block_q6_K = extern struct {
     d: u16,
 };
 
+pub const block_q5_K = extern struct {
+    d: u16,
+    dmin: u16,
+    scales: [12]u8,
+    qh: [32]u8,
+    qs: [128]u8,
+};
+
 pub const block_iq2_xs = extern struct {
     d: u16,
     qs: [32]u16,
     scales: [8]u8,
 };
+
+pub const block_iq4_xs = extern struct {
+    d: u16,
+    scales_h: u16,
+    scales_l: [4]u8,
+    qs: [128]u8,
+};
+
+const kvalues_iq4nl = [16]i8{ -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113 };
+
+fn getScaleMinK4(j: usize, q: [12]u8) struct { sc: u8, m: u8 } {
+    return if (j < 4)
+        .{ .sc = q[j] & 63, .m = q[j + 4] & 63 }
+    else
+        .{
+            .sc = (q[j + 4] & 0x0F) | ((q[j - 4] >> 6) << 4),
+            .m = (q[j + 4] >> 4) | ((q[j] >> 6) << 4),
+        };
+}
 
 pub fn quantizePerTokenSymmetric(
     input: [*]const f32,
@@ -287,6 +314,72 @@ pub fn dequantizeQ6KToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: us
     }
 }
 
+pub fn dequantizeQ5KToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: usize) void {
+    const n_blocks = n_weights / 256;
+    const blocks_bytes: []align(@alignOf(block_q5_K)) const u8 = @alignCast(src[0 .. n_blocks * @sizeOf(block_q5_K)]);
+    const blocks_slice = std.mem.bytesAsSlice(block_q5_K, blocks_bytes);
+
+    for (blocks_slice, 0..) |block, b| {
+        const d = types.fp16_to_fp32(block.d);
+        const min_val = types.fp16_to_fp32(block.dmin);
+
+        var is: usize = 0;
+        var mask1: u8 = 1;
+        var mask2: u8 = 2;
+        var ql_off: usize = 0;
+        var out_off: usize = 0;
+        while (out_off < 256) : (out_off += 64) {
+            const sm0 = getScaleMinK4(is + 0, block.scales);
+            const d1 = d * @as(f32, @floatFromInt(sm0.sc));
+            const m1 = min_val * @as(f32, @floatFromInt(sm0.m));
+            const sm1 = getScaleMinK4(is + 1, block.scales);
+            const d2 = d * @as(f32, @floatFromInt(sm1.sc));
+            const m2 = min_val * @as(f32, @floatFromInt(sm1.m));
+
+            for (0..32) |l| {
+                const q = block.qs[ql_off + l];
+                const hi1: u8 = if ((block.qh[l] & mask1) != 0) 16 else 0;
+                const hi2: u8 = if ((block.qh[l] & mask2) != 0) 16 else 0;
+                dst[b * 256 + out_off + l] = types.fp32_to_fp16(d1 * @as(f32, @floatFromInt((q & 0x0F) + hi1)) - m1);
+                dst[b * 256 + out_off + 32 + l] = types.fp32_to_fp16(d2 * @as(f32, @floatFromInt((q >> 4) + hi2)) - m2);
+            }
+
+            ql_off += 32;
+            is += 2;
+            mask1 <<= 2;
+            mask2 <<= 2;
+        }
+    }
+}
+
+pub fn dequantizeIQ4XSToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: usize) void {
+    const n_blocks = n_weights / 256;
+    const blocks_bytes: []align(@alignOf(block_iq4_xs)) const u8 = @alignCast(src[0 .. n_blocks * @sizeOf(block_iq4_xs)]);
+    const blocks_slice = std.mem.bytesAsSlice(block_iq4_xs, blocks_bytes);
+
+    for (blocks_slice, 0..) |block, b| {
+        const d = types.fp16_to_fp32(block.d);
+        var qs_off: usize = 0;
+        var out_off: usize = 0;
+
+        for (0..8) |ib| {
+            const ls_low = (block.scales_l[ib / 2] >> @as(u3, @intCast(4 * (ib % 2)))) & 0x0F;
+            const ls_high = ((block.scales_h >> @as(u4, @intCast(2 * ib))) & 0x03) << 4;
+            const ls: i32 = @as(i32, ls_low | ls_high);
+            const dl = d * @as(f32, @floatFromInt(ls - 32));
+
+            for (0..16) |j| {
+                const q = block.qs[qs_off + j];
+                dst[b * 256 + out_off + j] = types.fp32_to_fp16(dl * @as(f32, @floatFromInt(kvalues_iq4nl[q & 0x0F])));
+                dst[b * 256 + out_off + 16 + j] = types.fp32_to_fp16(dl * @as(f32, @floatFromInt(kvalues_iq4nl[q >> 4])));
+            }
+
+            qs_off += 16;
+            out_off += 32;
+        }
+    }
+}
+
 pub fn dequantizeIQ2XSToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: usize) void {
     const n_blocks = n_weights / 256;
     const blocks_bytes: []align(@alignOf(block_iq2_xs)) const u8 = @alignCast(src[0 .. n_blocks * @sizeOf(block_iq2_xs)]);
@@ -322,8 +415,10 @@ pub fn dequantizeIQ2XSToFp16(src: [*]const u8, dst: [*]types.fp16_t, n_weights: 
 test "block sizes match C++" {
     try std.testing.expectEqual(@sizeOf(block_q8_0), 34);
     try std.testing.expectEqual(@sizeOf(block_q4_K), 144);
+    try std.testing.expectEqual(@as(usize, 176), @sizeOf(block_q5_K));
     try std.testing.expectEqual(@as(usize, 210), @sizeOf(block_q6_K));
     try std.testing.expectEqual(@as(usize, 74), @sizeOf(block_iq2_xs));
+    try std.testing.expectEqual(@as(usize, 136), @sizeOf(block_iq4_xs));
 }
 
 test "Q6_K dequant basic shape" {
@@ -341,6 +436,24 @@ test "IQ2_XS dequant basic shape" {
     var raw: [74]u8 = [_]u8{0} ** 74;
     var dst: [256]types.fp16_t = undefined;
     dequantizeIQ2XSToFp16(&raw, &dst, dst.len);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0), types.fp16_to_fp32(dst[0]), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), types.fp16_to_fp32(dst[255]), 0.001);
+}
+
+test "Q5_K dequant basic shape" {
+    var raw: [176]u8 = [_]u8{0} ** 176;
+    var dst: [256]types.fp16_t = undefined;
+    dequantizeQ5KToFp16(&raw, &dst, dst.len);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0), types.fp16_to_fp32(dst[0]), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), types.fp16_to_fp32(dst[255]), 0.001);
+}
+
+test "IQ4_XS dequant basic shape" {
+    var raw: [136]u8 = [_]u8{0} ** 136;
+    var dst: [256]types.fp16_t = undefined;
+    dequantizeIQ4XSToFp16(&raw, &dst, dst.len);
 
     try std.testing.expectApproxEqAbs(@as(f32, 0), types.fp16_to_fp32(dst[0]), 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 0), types.fp16_to_fp32(dst[255]), 0.001);

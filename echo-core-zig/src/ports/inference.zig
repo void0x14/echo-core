@@ -162,7 +162,7 @@ fn findTensorNameBySuffix(reader: *const gguf.Reader, suffix: []const u8) ?[]con
 
 fn isSupportedTensorType(dtype: gguf.GGMLType) bool {
     return switch (dtype) {
-        .f16, .f32, .q8_0, .q6_k, .q4_k, .q2_k, .iq2_xs => true,
+        .f16, .f32, .q8_0, .q6_k, .q5_k, .q4_k, .q2_k, .iq2_xs, .iq4_xs => true,
         else => false,
     };
 }
@@ -337,9 +337,11 @@ fn copyTensorToFp16(dst: []types.fp16_t, dtype: gguf.GGMLType, raw: []const u8) 
         },
         .q8_0 => quant.dequantizeQ80ToFp16(raw.ptr, dst.ptr, dst.len),
         .q6_k => quant.dequantizeQ6KToFp16(raw.ptr, dst.ptr, dst.len),
+        .q5_k => quant.dequantizeQ5KToFp16(raw.ptr, dst.ptr, dst.len),
         .q4_k => quant.dequantizeQ4KToFp16(raw.ptr, dst.ptr, dst.len),
         .q2_k => quant.dequantizeQ2KToFp16(raw.ptr, dst.ptr, dst.len),
         .iq2_xs => quant.dequantizeIQ2XSToFp16(raw.ptr, dst.ptr, dst.len),
+        .iq4_xs => quant.dequantizeIQ4XSToFp16(raw.ptr, dst.ptr, dst.len),
         else => return error.UnsupportedTensorType,
     }
 }
@@ -353,13 +355,18 @@ fn loadTensorIfPresent(reader: *const gguf.Reader, suffix: []const u8, dst: []ty
         if (actual_elements != dst.len) {
             std.debug.print("WARN: tensor '{s}' shape has {d} elements but dst expects {d}, using min\n", .{ tensor_name, actual_elements, dst.len });
         }
+        const n_to_copy = @min(dst.len, @as(usize, @intCast(actual_elements)));
+
+        if (info.dtype == .f16 and n_to_copy == dst.len) {
+            try reader.loadTensorInto(tensor_name, std.mem.sliceAsBytes(dst));
+            return;
+        }
+
         const raw = reader.loadTensor(tensor_name) catch |err| {
             std.debug.print("Failed to load tensor '{s}': {}\n", .{ tensor_name, err });
             return err;
         };
         defer allocator.free(raw);
-        // Use the minimum of dst.len and actual tensor elements to avoid overread
-        const n_to_copy = @min(dst.len, @as(usize, @intCast(actual_elements)));
         try copyTensorToFp16(dst[0..n_to_copy], info.dtype, raw);
     }
 }
@@ -610,7 +617,7 @@ test "compatibility report rejects hybrid qwen35 style tensors" {
 
 test "compatibility report rejects unsupported tensor dtype" {
     const tensors = [_]CompatibilityTensor{
-        .{ .name = "token_embd.weight", .dtype = .iq4_xs },
+        .{ .name = "token_embd.weight", .dtype = .iq3_xxs },
         .{ .name = "output_norm.weight", .dtype = .f32 },
         .{ .name = "output.weight", .dtype = .q4_k },
         .{ .name = "blk.0.attn_norm.weight", .dtype = .f32 },
@@ -618,14 +625,14 @@ test "compatibility report rejects unsupported tensor dtype" {
         .{ .name = "blk.0.attn_k.weight", .dtype = .q4_k },
         .{ .name = "blk.0.attn_v.weight", .dtype = .q4_k },
         .{ .name = "blk.0.attn_output.weight", .dtype = .q4_k },
-        .{ .name = "blk.0.ffn_gate.weight", .dtype = .iq4_xs },
+        .{ .name = "blk.0.ffn_gate.weight", .dtype = .iq3_xxs },
         .{ .name = "blk.0.ffn_up.weight", .dtype = .q4_k },
         .{ .name = "blk.0.ffn_down.weight", .dtype = .q4_k },
     };
 
     const report = (try buildCompatibilityReportFromSummary(std.testing.allocator, "llama", false, &tensors)).?;
     defer std.testing.allocator.free(report);
-    try std.testing.expect(std.mem.indexOf(u8, report, "iq4_xs") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report, "iq3_xxs") != null);
 }
 
 test "compatibility report accepts qwen3 classic transformer summary" {
@@ -646,6 +653,26 @@ test "compatibility report accepts qwen3 classic transformer summary" {
     };
 
     const report = try buildCompatibilityReportFromSummary(std.testing.allocator, "qwen3", false, &tensors);
+    defer if (report) |text| std.testing.allocator.free(text);
+    try std.testing.expect(report == null);
+}
+
+test "compatibility report accepts q5_k and iq4_xs tensor dtypes" {
+    const tensors = [_]CompatibilityTensor{
+        .{ .name = "token_embd.weight", .dtype = .q5_k },
+        .{ .name = "output_norm.weight", .dtype = .f32 },
+        .{ .name = "output.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_norm.weight", .dtype = .f32 },
+        .{ .name = "blk.0.attn_q.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_k.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.attn_v.weight", .dtype = .q5_k },
+        .{ .name = "blk.0.attn_output.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.ffn_gate.weight", .dtype = .iq4_xs },
+        .{ .name = "blk.0.ffn_up.weight", .dtype = .q4_k },
+        .{ .name = "blk.0.ffn_down.weight", .dtype = .q4_k },
+    };
+
+    const report = try buildCompatibilityReportFromSummary(std.testing.allocator, "llama", false, &tensors);
     defer if (report) |text| std.testing.allocator.free(text);
     try std.testing.expect(report == null);
 }

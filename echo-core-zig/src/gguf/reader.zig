@@ -440,6 +440,14 @@ pub const Reader = struct {
         return data;
     }
 
+    pub fn loadTensorInto(self: *const Reader, name: []const u8, dst: []u8) !void {
+        const info = self.tensors.get(name) orelse return error.TensorNotFound;
+        if (dst.len != info.size) return error.InvalidTensorSize;
+
+        const n = try self.file.readPositionalAll(runtimeIo(), dst, self.data_offset + info.offset);
+        if (n != dst.len) return error.EndOfStream;
+    }
+
     pub fn findTensorBySuffix(self: *const Reader, suffix: []const u8) ?TensorInfo {
         var it = self.tensors.iterator();
         while (it.next()) |entry| {
@@ -718,4 +726,30 @@ test "Reader parses synthetic GGUF v3 file" {
         },
         else => return error.TestUnexpectedResult,
     }
+}
+
+test "Reader loadTensorInto matches loadTensor bytes" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const data = try buildSyntheticGgufForTests(std.testing.allocator);
+    defer std.testing.allocator.free(data);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sample.gguf", .data = data });
+
+    var path_buf: [256]u8 = undefined;
+    const rel_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/sample.gguf", .{tmp.sub_path[0..]});
+
+    var reader = try Reader.openWithAllocator(rel_path, std.testing.allocator);
+    defer reader.deinit();
+
+    const raw = try reader.loadTensor("blk.0.attn_q.weight");
+    defer std.testing.allocator.free(raw);
+
+    const direct = try std.testing.allocator.alloc(u8, raw.len);
+    defer std.testing.allocator.free(direct);
+    try reader.loadTensorInto("blk.0.attn_q.weight", direct);
+
+    try std.testing.expectEqualSlices(u8, raw, direct);
 }
