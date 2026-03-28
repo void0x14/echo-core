@@ -73,3 +73,25 @@ test "String substring with reversed bounds is empty" {
     const sub = String.substring(s, 4, 2);
     try std.testing.expectEqual(@as(usize, 0), sub.len());
 }
+
+test "String indexOf edge cases" {
+    const s = String.fromBytes("hello");
+
+    // Test empty needle
+    try std.testing.expectEqual(@as(?usize, 0), String.indexOf(s, String.fromBytes("")));
+
+    // Test needle larger than string
+    try std.testing.expectEqual(@as(?usize, null), String.indexOf(s, String.fromBytes("hello world")));
+
+    // Test both empty
+    try std.testing.expectEqual(@as(?usize, 0), String.indexOf(String.fromBytes(""), String.fromBytes("")));
+
+    // Test needle not found
+    try std.testing.expectEqual(@as(?usize, null), String.indexOf(s, String.fromBytes("world")));
+
+    // Test needle equals string
+    try std.testing.expectEqual(@as(?usize, 0), String.indexOf(s, String.fromBytes("hello")));
+
+    // Test needle at the end
+    try std.testing.expectEqual(@as(?usize, 3), String.indexOf(s, String.fromBytes("lo")));
+}
