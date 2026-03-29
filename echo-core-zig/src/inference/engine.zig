@@ -19,8 +19,9 @@ fn fp16SliceFromBytes(bytes: []u8) []types.fp16_t {
 
 /// Get dtype for a layer tensor (Q, K, V, O projections, FFN weights)
 fn dtypeForTensor(weight_dtypes: []const gguf.GGMLType, layer_idx: u32, tensor_idx: u32) gguf.GGMLType {
-    // Slot layout: 0 = token_embedding, 1..(num_layers*11) = layer tensors, last 2 = final_norm, output_proj
-    // Per layer: 0=attn_norm, 1=q_proj, 2=k_proj, 3=v_proj, 4=o_proj, 5=ffn_norm, 6=ffn_w1, 7=ffn_w2, 8=ffn_w3, 9=attn_q_norm, 10=attn_k_norm
+    // Slot layout: 0 = token_embedding, 1..(num_layers*19) = layer tensors, last 2 = final_norm, output_proj
+    // Per layer (11 attention slots): 0=attn_norm, 1=q_proj, 2=k_proj, 3=v_proj, 4=o_proj, 5=ffn_norm, 6=ffn_w1, 7=ffn_w2, 8=ffn_w3, 9=attn_q_norm, 10=attn_k_norm
+    // Per layer (8 SSM slots, if applicable): 11=ssm_out, 12=ssm_x, 13=ssm_dt, 14=ssm_A, 15=ssm_B, 16=ssm_C, 17=ssm_D, 18=ssm_conv1d
     const slot = 1 + layer_idx * 11 + tensor_idx;
     return weight_dtypes[slot];
 }
@@ -79,7 +80,8 @@ pub const Engine = struct {
         @memset(weight_pool, 0);
 
         // Per-tensor dtype tracking (default to fp16)
-        const n_slots = 1 + cfg.num_layers * 11 + 2;
+        // Slot layout: 1 token_embd + num_layers * (11 attention + 8 ssm) + final_norm + output_proj
+        const n_slots = 1 + cfg.num_layers * (11 + 8) + 2;
         const weight_dtypes = try allocator.alloc(gguf.GGMLType, n_slots);
         errdefer allocator.free(weight_dtypes);
         @memset(weight_dtypes, .f16);

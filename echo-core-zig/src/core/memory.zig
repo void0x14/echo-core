@@ -147,6 +147,7 @@ pub const WeightLayout = struct {
     ssm_D_offset: usize,
     ssm_conv1d_offset: usize,
     ssm_conv1d_bias_offset: usize,
+    ssm_region_offset: usize, // Start of SSM weights region (after output projection)
 
     per_layer_size: usize,
     ssm_per_layer_size: usize,
@@ -184,7 +185,15 @@ pub const WeightLayout = struct {
         offset += hidden * sizeof_fp16;
 
         layout.q_proj_offset = offset;
-        offset += (config_.num_heads * config_.head_dim) * hidden * sizeof_fp16;
+        // Hybrid modeller için: q_proj = hidden × q_dim (matmul input×output)
+        // Attention layer: attn_q.weight = [hidden, q_dim] (hidden input, q_dim output)
+        const q_dim = config_.num_heads * config_.head_dim;
+        // per_layer_size hem attention hem SSM layer'ları karşılayacak kadar büyük olmalı
+        // Attention layer: q_proj = hidden × q_dim
+        // SSM layer: ssm_conv1d = ssm_conv_kernel × hidden (ama farklı bir bölgede)
+        // max_slot_size = max(hidden × q_dim, ssm_conv_kernel × hidden)
+        const max_proj_size = hidden * q_dim;
+        offset += max_proj_size * sizeof_fp16;
 
         layout.k_proj_offset = offset;
         offset += kv_dim * hidden * sizeof_fp16;
@@ -193,7 +202,8 @@ pub const WeightLayout = struct {
         offset += kv_dim * hidden * sizeof_fp16;
 
         layout.o_proj_offset = offset;
-        offset += hidden * (config_.num_heads * config_.head_dim) * sizeof_fp16;
+        // o_proj = q_dim × hidden (output projection)
+        offset += q_dim * hidden * sizeof_fp16;
 
         layout.ffn_norm_offset = offset;
         offset += hidden * sizeof_fp16;
@@ -219,46 +229,60 @@ pub const WeightLayout = struct {
 
         layout.per_layer_size = offset;
 
-        // Calculate SSM per-layer size
+        // Calculate SSM per-layer size with 2x conservative safety margin
+        // This handles variations in hybrid models where different layers
+        // may have different SSM weight sizes than config defaults
         const ssm_conv_kernel = config_.ssm_conv_kernel;
         const ssm_inner = config_.ssm_inner_size;
         const dt_rank = config_.ssm_dt_rank;
+        const safety_margin = 2; // 2x multiplier for conservative sizing
+
+        // For ssm_out, use max of ffn_hidden_dim/2 or 2x hidden
+        const ssm_out_hidden_dim = if (config_.ffn_hidden_dim > hidden * 2 and config_.ffn_type != .dense)
+            config_.ffn_hidden_dim / 2
+        else
+            hidden * 2;
 
         var ssm_offset: usize = 0;
         layout.ssm_out_offset = ssm_offset;
-        ssm_offset += hidden * hidden * sizeof_fp16; // ssm_out projection
+        // ssm_out: hidden × ssm_out_hidden_dim with safety margin
+        ssm_offset += hidden * ssm_out_hidden_dim * sizeof_fp16 * safety_margin;
 
         layout.ssm_x_offset = ssm_offset;
-        ssm_offset += hidden * hidden * sizeof_fp16; // ssm_x projection
+        ssm_offset += hidden * hidden * sizeof_fp16 * safety_margin;
 
         layout.ssm_dt_offset = ssm_offset;
-        ssm_offset += hidden * dt_rank * sizeof_fp16; // ssm_dt projection
+        ssm_offset += hidden * dt_rank * sizeof_fp16 * safety_margin;
 
         layout.ssm_A_offset = ssm_offset;
-        ssm_offset += ssm_inner * sizeof_fp16; // A diagonal matrix
+        ssm_offset += ssm_inner * sizeof_fp16 * safety_margin;
 
         layout.ssm_B_offset = ssm_offset;
-        ssm_offset += hidden * ssm_inner * sizeof_fp16; // B matrix
+        ssm_offset += hidden * ssm_inner * sizeof_fp16 * safety_margin;
 
         layout.ssm_C_offset = ssm_offset;
-        ssm_offset += hidden * ssm_inner * sizeof_fp16; // C matrix
+        ssm_offset += hidden * ssm_inner * sizeof_fp16 * safety_margin;
 
         layout.ssm_D_offset = ssm_offset;
-        ssm_offset += hidden * sizeof_fp16; // D skip connection
+        ssm_offset += hidden * sizeof_fp16 * safety_margin;
 
         layout.ssm_conv1d_offset = ssm_offset;
-        ssm_offset += ssm_conv_kernel * hidden * sizeof_fp16; // conv1d weights
+        ssm_offset += ssm_conv_kernel * hidden * sizeof_fp16 * safety_margin;
 
         layout.ssm_conv1d_bias_offset = ssm_offset;
-        ssm_offset += hidden * sizeof_fp16; // conv1d bias
+        ssm_offset += hidden * sizeof_fp16 * safety_margin;
 
         layout.ssm_per_layer_size = ssm_offset;
 
-        // Calculate total size assuming all layers are attention (conservative)
-        // Actual size will depend on mix of attention and SSM layers
+        // Calculate total size including space for SSM weights
+        // SSM weights are placed after output projection, one region per potential SSM layer
         layout.final_norm_offset = layout.token_embedding_size + layout.per_layer_size * config_.num_layers;
         layout.output_proj_offset = layout.final_norm_offset + hidden * sizeof_fp16;
-        layout.total_size = layout.output_proj_offset + hidden * vocab * sizeof_fp16;
+        layout.ssm_region_offset = layout.output_proj_offset + hidden * vocab * sizeof_fp16;
+
+        // Conservative: allocate space for all layers to potentially be SSM
+        const ssm_region_size = layout.ssm_per_layer_size * config_.num_layers;
+        layout.total_size = layout.ssm_region_offset + ssm_region_size;
 
         layout.raw_pool_size = layout.total_size;
 

@@ -265,6 +265,27 @@ pub const Reader = struct {
         self.config.pos_encoding = .rope;
         self.config.use_kv_quantization = false;
 
+        // SSM configuration (for Mamba-2, hybrid models like qwen35)
+        self.config.ssm_conv_kernel = 4; // Default
+        self.config.ssm_inner_size = 16; // Default
+        self.config.ssm_num_groups = 1; // Default
+        self.config.ssm_dt_rank = if (self.config.hidden_dim > 0) self.config.hidden_dim / 16 else 256;
+        self.config.ssm_dt_scale = 1.0; // Default
+
+        // Read SSM metadata if present
+        if (self.prefixedLookup("ssm.conv_kernel")) |value| {
+            if (self.numericAsU64(value)) |v| self.config.ssm_conv_kernel = @intCast(v);
+        }
+        if (self.prefixedLookup("ssm.inner_size")) |value| {
+            if (self.numericAsU64(value)) |v| self.config.ssm_inner_size = @intCast(v);
+        }
+        if (self.prefixedLookup("ssm.num_groups")) |value| {
+            if (self.numericAsU64(value)) |v| self.config.ssm_num_groups = @intCast(v);
+        }
+        if (self.prefixedLookup("ssm.time_step_rank")) |value| {
+            if (self.numericAsU64(value)) |v| self.config.ssm_dt_rank = @intCast(v);
+        }
+
         // Cap max_seq_len to prevent OOM from models with huge context_length
         if (self.config.max_seq_len > 4096) self.config.max_seq_len = 4096;
     }

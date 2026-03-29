@@ -152,6 +152,11 @@ test "KVCache init" {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .ssm_conv_kernel = 4,
+        .ssm_inner_size = 16,
+        .ssm_num_groups = 1,
+        .ssm_dt_rank = 256,
+        .ssm_dt_scale = 1.0,
     };
     var cache = try KVCache.init(cfg, std.testing.allocator);
     defer cache.deinit(std.testing.allocator);
@@ -167,11 +172,16 @@ test "KVCache mode pointers and layer alignment" {
         .head_dim = 8,
         .num_layers = 2,
         .ffn_hidden_dim = 128,
-        .max_seq_len = 16,
-        .ffn_type = .dense,
-        .norm_type = .layer_norm,
+        .max_seq_len = 64,
+        .ffn_type = .gated_swi_glu,
+        .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .ssm_conv_kernel = 4,
+        .ssm_inner_size = 16,
+        .ssm_num_groups = 1,
+        .ssm_dt_rank = 4,
+        .ssm_dt_scale = 1.0,
     };
     var fp32_cache = try KVCache.init(fp32_cfg, std.testing.allocator);
     defer fp32_cache.deinit(std.testing.allocator);
@@ -192,6 +202,11 @@ test "KVCache mode pointers and layer alignment" {
         .norm_type = .layer_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = true,
+        .ssm_conv_kernel = 4,
+        .ssm_inner_size = 16,
+        .ssm_num_groups = 1,
+        .ssm_dt_rank = 4,
+        .ssm_dt_scale = 1.0,
     };
     var int8_cache = try KVCache.init(int8_cfg, std.testing.allocator);
     defer int8_cache.deinit(std.testing.allocator);
@@ -213,6 +228,11 @@ test "KVCache append fp32 stores values and reset clears seq len" {
         .norm_type = .layer_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .ssm_conv_kernel = 4,
+        .ssm_inner_size = 16,
+        .ssm_num_groups = 1,
+        .ssm_dt_rank = 4,
+        .ssm_dt_scale = 1.0,
     };
     var cache = try KVCache.init(cfg, std.testing.allocator);
     defer cache.deinit(std.testing.allocator);
@@ -249,6 +269,11 @@ test "KVCache append quantized stores int8 rows" {
         .norm_type = .layer_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = true,
+        .ssm_conv_kernel = 4,
+        .ssm_inner_size = 16,
+        .ssm_num_groups = 1,
+        .ssm_dt_rank = 4,
+        .ssm_dt_scale = 1.0,
     };
     var cache = try KVCache.init(cfg, std.testing.allocator);
     defer cache.deinit(std.testing.allocator);
