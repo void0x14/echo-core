@@ -42,7 +42,7 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
 
         fn keyBytes(key: K) []const u8 {
             return switch (@typeInfo(K)) {
-                .pointer => |ptr| if (ptr.size == .slice and ptr.child == u8)
+                .Pointer => |ptr| if (ptr.size == .Slice and ptr.child == u8)
                     key
                 else
                     std.mem.asBytes(&key),
@@ -188,4 +188,23 @@ test "HashMap remove preserves probe chain" {
     try map.put(second.?, 2);
     try std.testing.expect(map.remove(first.?));
     try std.testing.expectEqual(@as(i32, 2), map.get(second.?).?.*);
+}
+
+test "HashMap resize" {
+    var map = try HashMap(usize, usize).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        try map.put(i, i * 2);
+    }
+
+    try std.testing.expectEqual(@as(usize, 100), map.count);
+
+    i = 0;
+    while (i < 100) : (i += 1) {
+        const val = map.get(i);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(i * 2, val.?.*);
+    }
 }

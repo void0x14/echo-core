@@ -8,3 +8,5 @@ echo_core
 compile_commands.json
 .cache/
 *.gguf
+zig-linux-x86_64-0.12.0/
+zig-linux-x86_64-0.12.0.tar.xz
