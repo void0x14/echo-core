@@ -11,7 +11,7 @@ compile_commands.json
 
 # Zig
 .zig-cache/
-zig-out/
 *.pyc
 __pycache__/
 *.pyo
+user-documents/
