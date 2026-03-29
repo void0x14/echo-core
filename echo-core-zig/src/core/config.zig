@@ -14,6 +14,13 @@ pub const ModelConfig = extern struct {
     pos_encoding: PosEncoding,
     use_kv_quantization: bool,
 
+    // SSM configuration
+    ssm_conv_kernel: u32,
+    ssm_inner_size: u32,
+    ssm_num_groups: u32,
+    ssm_dt_rank: u32,
+    ssm_dt_scale: f32,
+
     pub const FFNType = enum(c_int) {
         dense,
         gated_swi_glu,
@@ -30,6 +37,11 @@ pub const ModelConfig = extern struct {
         learned,
         alibi,
         none,
+    };
+
+    pub const LayerType = enum(c_int) {
+        attention,
+        ssm,
     };
 };
 
@@ -62,7 +74,7 @@ test "CacheTileConfig compile-time validation" {
 }
 
 test "ModelConfig basic creation" {
-    const config = ModelConfig{
+    const test_config = ModelConfig{
         .vocab_size = 32000,
         .hidden_dim = 4096,
         .num_heads = 32,
@@ -75,17 +87,25 @@ test "ModelConfig basic creation" {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = true,
+        .ssm_conv_kernel = 4,
+        .ssm_inner_size = 16,
+        .ssm_num_groups = 1,
+        .ssm_dt_rank = 256,
+        .ssm_dt_scale = 1.0,
     };
-    try std.testing.expect(config.vocab_size == 32000);
-    try std.testing.expect(config.num_layers == 32);
+    try std.testing.expect(test_config.vocab_size == 32000);
+    try std.testing.expect(test_config.num_layers == 32);
 }
 
 test "ModelConfig enum values and ABI assumptions" {
     try std.testing.expectEqual(@as(c_int, 0), @intFromEnum(ModelConfig.FFNType.dense));
     try std.testing.expectEqual(@as(c_int, 1), @intFromEnum(ModelConfig.NormType.rms_norm));
     try std.testing.expectEqual(@as(c_int, 2), @intFromEnum(ModelConfig.PosEncoding.alibi));
+    try std.testing.expectEqual(@as(c_int, 0), @intFromEnum(ModelConfig.LayerType.attention));
+    try std.testing.expectEqual(@as(c_int, 1), @intFromEnum(ModelConfig.LayerType.ssm));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.FFNType));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.NormType));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.PosEncoding));
-    try std.testing.expectEqual(@as(usize, 48), @sizeOf(ModelConfig));
+    try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.LayerType));
+    try std.testing.expectEqual(@as(usize, 68), @sizeOf(ModelConfig));
 }

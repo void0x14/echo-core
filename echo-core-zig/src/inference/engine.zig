@@ -3,18 +3,44 @@ const config = @import("../core/config.zig");
 const memory = @import("../core/memory.zig");
 const types = @import("../core/types.zig");
 const matvec = @import("../kernels/matvec.zig");
+const ssm = @import("../kernels/ssm.zig");
 const tokenizer = @import("../tokenizer/tokenizer.zig");
 const kv_cache = @import("../kv_cache/cache.zig");
 const math = @import("../core/math.zig");
+const gguf = @import("../gguf/reader.zig");
 
 const ArrayList = std.array_list.Managed;
+
+/// Helper: Cast byte slice to fp16 slice
+fn fp16SliceFromBytes(bytes: []u8) []types.fp16_t {
+    const n_elements = bytes.len / @sizeOf(types.fp16_t);
+    return @as([*]types.fp16_t, @ptrCast(@alignCast(bytes.ptr)))[0..n_elements];
+}
+
+/// Get dtype for a layer tensor (Q, K, V, O projections, FFN weights)
+fn dtypeForTensor(weight_dtypes: []const gguf.GGMLType, layer_idx: u32, tensor_idx: u32) gguf.GGMLType {
+    // Slot layout: 0 = token_embedding, 1..(num_layers*11) = layer tensors, last 2 = final_norm, output_proj
+    // Per layer: 0=attn_norm, 1=q_proj, 2=k_proj, 3=v_proj, 4=o_proj, 5=ffn_norm, 6=ffn_w1, 7=ffn_w2, 8=ffn_w3, 9=attn_q_norm, 10=attn_k_norm
+    const slot = 1 + layer_idx * 11 + tensor_idx;
+    return weight_dtypes[slot];
+}
+
+/// Get dtype for global tensors (token_embedding, final_norm, output_proj)
+fn dtypeForGlobal(weight_dtypes: []const gguf.GGMLType, global_idx: u32) gguf.GGMLType {
+    // global_idx: 0 = token_embedding, 1 = final_norm, 2 = output_proj
+    if (global_idx == 0) return weight_dtypes[0]; // token_embedding
+    const n_slots: u32 = @intCast(weight_dtypes.len);
+    return weight_dtypes[n_slots - 2 + (global_idx - 1)];
+}
 
 pub const Engine = struct {
     allocator: std.mem.Allocator,
     config: config.ModelConfig,
     weight_layout: memory.WeightLayout,
-    weight_pool: []types.fp16_t,
+    weight_pool: []u8,
+    weight_dtypes: []gguf.GGMLType,
     kv_cache: ?kv_cache.KVCache,
+    ssm_states: []ssm.SSMState, // Per-layer SSM states (only for SSM layers)
     hidden_state: []f32,
     residual: []f32,
     attn_out: []f32,
@@ -31,17 +57,32 @@ pub const Engine = struct {
     ffn_gate_buf: []f32,
     ffn_up_buf: []f32,
     logits: []f32,
+    // SSM temporary buffers
+    ssm_tmp_x: []f32,
+    ssm_tmp_z: []f32,
+    ssm_tmp_dt: []f32,
+    ssm_tmp_B: []f32,
+    ssm_tmp_C: []f32,
     current_layer_base: usize,
     seq_pos: u32,
 
     pub fn init(cfg: config.ModelConfig, allocator: std.mem.Allocator) !Engine {
-        const layout = memory.WeightLayout.compute(cfg);
-        const total_weights = layout.total_size / @sizeOf(types.fp16_t);
+        var layout = try memory.WeightLayout.compute(cfg, allocator);
+        errdefer layout.deinit(allocator);
+
         const kv_dim = cfg.num_kv_heads * cfg.head_dim;
         const q_dim = cfg.num_heads * cfg.head_dim;
 
-        const weight_pool = try allocator.alloc(types.fp16_t, total_weights);
+        // Unified byte pool for all weights (quantized + fp16)
+        const weight_pool = try allocator.alloc(u8, layout.raw_pool_size);
         errdefer allocator.free(weight_pool);
+        @memset(weight_pool, 0);
+
+        // Per-tensor dtype tracking (default to fp16)
+        const n_slots = 1 + cfg.num_layers * 11 + 2;
+        const weight_dtypes = try allocator.alloc(gguf.GGMLType, n_slots);
+        errdefer allocator.free(weight_dtypes);
+        @memset(weight_dtypes, .f16);
 
         const cache: ?kv_cache.KVCache = null;
 
@@ -79,6 +120,22 @@ pub const Engine = struct {
         const logits = try allocator.alloc(f32, cfg.vocab_size);
         errdefer allocator.free(logits);
 
+        // Allocate SSM states and temporary buffers (only if model has SSM layers)
+        const ssm_states = try allocator.alloc(ssm.SSMState, cfg.num_layers);
+        errdefer allocator.free(ssm_states);
+        @memset(ssm_states, std.mem.zeroes(ssm.SSMState));
+
+        const ssm_tmp_x = try allocator.alloc(f32, if (cfg.hidden_dim > 0) cfg.hidden_dim else 1);
+        errdefer allocator.free(ssm_tmp_x);
+        const ssm_tmp_z = try allocator.alloc(f32, if (cfg.hidden_dim > 0) cfg.hidden_dim else 1);
+        errdefer allocator.free(ssm_tmp_z);
+        const ssm_tmp_dt = try allocator.alloc(f32, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1);
+        errdefer allocator.free(ssm_tmp_dt);
+        const ssm_tmp_B = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size else 1);
+        errdefer allocator.free(ssm_tmp_B);
+        const ssm_tmp_C = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size else 1);
+        errdefer allocator.free(ssm_tmp_C);
+
         @memset(hidden_state, 0);
         @memset(residual, 0);
         @memset(attn_out, 0);
@@ -95,13 +152,20 @@ pub const Engine = struct {
         @memset(ffn_gate_buf, 0);
         @memset(ffn_up_buf, 0);
         @memset(logits, 0);
+        @memset(ssm_tmp_x, 0);
+        @memset(ssm_tmp_z, 0);
+        @memset(ssm_tmp_dt, 0);
+        @memset(ssm_tmp_B, 0);
+        @memset(ssm_tmp_C, 0);
 
         return .{
             .allocator = allocator,
             .config = cfg,
             .weight_layout = layout,
             .weight_pool = weight_pool,
+            .weight_dtypes = weight_dtypes,
             .kv_cache = cache,
+            .ssm_states = ssm_states,
             .hidden_state = hidden_state,
             .residual = residual,
             .attn_out = attn_out,
@@ -118,13 +182,20 @@ pub const Engine = struct {
             .ffn_gate_buf = ffn_gate_buf,
             .ffn_up_buf = ffn_up_buf,
             .logits = logits,
+            .ssm_tmp_x = ssm_tmp_x,
+            .ssm_tmp_z = ssm_tmp_z,
+            .ssm_tmp_dt = ssm_tmp_dt,
+            .ssm_tmp_B = ssm_tmp_B,
+            .ssm_tmp_C = ssm_tmp_C,
             .current_layer_base = 0,
             .seq_pos = 0,
         };
     }
 
     pub fn deinit(self: *Engine, allocator: std.mem.Allocator) void {
+        self.weight_layout.deinit(allocator);
         allocator.free(self.weight_pool);
+        allocator.free(self.weight_dtypes);
         if (self.kv_cache) |*cache| cache.deinit(allocator);
         allocator.free(self.hidden_state);
         allocator.free(self.residual);
@@ -142,10 +213,28 @@ pub const Engine = struct {
         allocator.free(self.ffn_gate_buf);
         allocator.free(self.ffn_up_buf);
         allocator.free(self.logits);
+        allocator.free(self.ssm_tmp_x);
+        allocator.free(self.ssm_tmp_z);
+        allocator.free(self.ssm_tmp_dt);
+        allocator.free(self.ssm_tmp_B);
+        allocator.free(self.ssm_tmp_C);
+
+        // Free SSM states
+        for (self.ssm_states) |*state| {
+            if (state.conv_state.len > 0 or state.ssm_state.len > 0) {
+                state.deinit(allocator);
+            }
+        }
+        allocator.free(self.ssm_states);
     }
 
     pub fn reset(self: *Engine) void {
         if (self.kv_cache) |*cache| cache.reset();
+        for (self.ssm_states) |*state| {
+            if (state.conv_state.len > 0) {
+                state.reset();
+            }
+        }
         self.seq_pos = 0;
     }
 
@@ -156,8 +245,9 @@ pub const Engine = struct {
     }
 
     pub fn loadWeights(self: *Engine, weights: []const types.fp16_t) !void {
-        if (weights.len != self.weight_pool.len) return error.InvalidWeights;
-        @memcpy(self.weight_pool, weights);
+        const weight_bytes = @as([]const u8, @ptrCast(weights));
+        if (weight_bytes.len != self.weight_pool.len) return error.InvalidWeights;
+        @memcpy(self.weight_pool, weight_bytes);
     }
 
     /// Process a single token at self.seq_pos, return logits.
@@ -166,20 +256,24 @@ pub const Engine = struct {
 
         const hidden = self.config.hidden_dim;
         const vocab = self.config.vocab_size;
-        const embed_offset = self.weight_layout.token_embedding_offset / @sizeOf(types.fp16_t);
-        const emb_row = self.weight_pool[embed_offset + @as(usize, token_id) * hidden ..][0..hidden];
+        const embed_byte_offset = self.weight_layout.token_embedding_offset + @as(usize, token_id) * hidden * @sizeOf(types.fp16_t);
+        const emb_bytes = self.weight_pool[embed_byte_offset..][0 .. hidden * @sizeOf(types.fp16_t)];
+        const emb_row = fp16SliceFromBytes(emb_bytes);
         types.fp16_to_fp32_row(emb_row.ptr, self.hidden_state.ptr, hidden);
 
         for (0..self.config.num_layers) |layer_idx| {
             self.layerForward(@intCast(layer_idx), self.hidden_state, self.hidden_state);
         }
 
-        const final_norm_offset = self.weight_layout.final_norm_offset / @sizeOf(types.fp16_t);
-        self.norm(self.hidden_state, self.hidden_state, self.weight_pool[final_norm_offset..][0..hidden]);
+        const final_norm_byte_offset = self.weight_layout.final_norm_offset;
+        const final_norm_bytes = self.weight_pool[final_norm_byte_offset..][0 .. hidden * @sizeOf(types.fp16_t)];
+        const final_norm = fp16SliceFromBytes(final_norm_bytes);
+        self.norm(self.hidden_state, self.hidden_state, final_norm);
 
         @memset(self.logits, 0);
-        const output_proj_offset = self.weight_layout.output_proj_offset / @sizeOf(types.fp16_t);
-        matvec.matvecDispatch(self.weight_pool[output_proj_offset..].ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, self.config);
+        const output_proj_byte_offset = self.weight_layout.output_proj_offset;
+        const output_proj_bytes = self.weight_pool[output_proj_byte_offset..][0 .. hidden * vocab * @sizeOf(types.fp16_t)];
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, output_proj_bytes.ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, dtypeForGlobal(self.weight_dtypes, 2));
 
         self.seq_pos += 1;
         return self.logits;
@@ -193,23 +287,51 @@ pub const Engine = struct {
 
     fn layerForward(self: *Engine, layer_idx: u32, input: []const f32, output: []f32) void {
         const hidden = self.config.hidden_dim;
-        const layer_base = self.weight_layout.token_embedding_size + @as(usize, layer_idx) * self.weight_layout.per_layer_size;
-        self.current_layer_base = layer_base;
+        const layer_type = self.weight_layout.layer_types[layer_idx];
 
-        const layer_norm_offset = (layer_base + self.weight_layout.norm_weight_offset) / @sizeOf(types.fp16_t);
-        const layer_norm = self.weight_pool[layer_norm_offset..][0..hidden];
-        const ffn_norm_offset = (layer_base + self.weight_layout.ffn_norm_offset) / @sizeOf(types.fp16_t);
-        const ffn_norm = self.weight_pool[ffn_norm_offset..][0..hidden];
+        if (layer_type == .ssm) {
+            // SSM layer path
+            const layer_base = self.weight_layout.token_embedding_size +
+                @as(usize, layer_idx) * self.weight_layout.ssm_per_layer_size;
+            self.current_layer_base = layer_base;
 
-        @memcpy(self.residual, input);
-        self.norm(input, output, layer_norm);
-        self.attention(layer_idx, output, self.attn_proj);
-        for (0..hidden) |i| output[i] = self.residual[i] + self.attn_proj[i];
+            // SSM layers don't have separate attn_norm/ffn_norm in traditional sense
+            // They have their own normalization usually
+            const layer_norm_byte_offset = layer_base; // SSM norm is at start
+            const layer_norm_bytes = self.weight_pool[layer_norm_byte_offset..][0 .. hidden * @sizeOf(types.fp16_t)];
+            const layer_norm = fp16SliceFromBytes(layer_norm_bytes);
 
-        @memcpy(self.residual, output);
-        self.norm(output, output, ffn_norm);
-        self.ffn(output, self.ffn_out);
-        for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
+            @memcpy(self.residual, input);
+            self.norm(input, output, layer_norm);
+            self.ssmLayerForward(layer_idx, output, self.attn_proj);
+            for (0..hidden) |i| output[i] = self.residual[i] + self.attn_proj[i];
+
+            // FFN part of SSM layer (optional, depending on architecture)
+            @memcpy(self.residual, output);
+            self.ffn(output, self.ffn_out);
+            for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
+        } else {
+            // Standard attention layer path
+            const layer_base = self.weight_layout.token_embedding_size + @as(usize, layer_idx) * self.weight_layout.per_layer_size;
+            self.current_layer_base = layer_base;
+
+            const layer_norm_byte_offset = layer_base + self.weight_layout.norm_weight_offset;
+            const layer_norm_bytes = self.weight_pool[layer_norm_byte_offset..][0 .. hidden * @sizeOf(types.fp16_t)];
+            const layer_norm = fp16SliceFromBytes(layer_norm_bytes);
+            const ffn_norm_byte_offset = layer_base + self.weight_layout.ffn_norm_offset;
+            const ffn_norm_bytes = self.weight_pool[ffn_norm_byte_offset..][0 .. hidden * @sizeOf(types.fp16_t)];
+            const ffn_norm = fp16SliceFromBytes(ffn_norm_bytes);
+
+            @memcpy(self.residual, input);
+            self.norm(input, output, layer_norm);
+            self.attention(layer_idx, output, self.attn_proj);
+            for (0..hidden) |i| output[i] = self.residual[i] + self.attn_proj[i];
+
+            @memcpy(self.residual, output);
+            self.norm(output, output, ffn_norm);
+            self.ffn(output, self.ffn_out);
+            for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
+        }
     }
 
     /// Apply RoPE to Q and K projections in-place.
@@ -284,15 +406,17 @@ pub const Engine = struct {
         @memset(self.q_proj, 0);
         @memset(self.k_proj, 0);
         @memset(self.v_proj, 0);
-        matvec.matvecDispatch(self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, q_dim, hidden, self.config);
-        matvec.matvecDispatch(self.weight_pool[k_proj_offset..].ptr, input.ptr, self.k_proj.ptr, kv_dim, hidden, self.config);
-        matvec.matvecDispatch(self.weight_pool[v_proj_offset..].ptr, input.ptr, self.v_proj.ptr, kv_dim, hidden, self.config);
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, q_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[k_proj_offset..].ptr, input.ptr, self.k_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 2));
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[v_proj_offset..].ptr, input.ptr, self.v_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 3));
 
         // Apply Q/K head norms if weights are non-zero
-        const q_norm_offset = (layer_base + self.weight_layout.attn_q_norm_offset) / @sizeOf(types.fp16_t);
-        const k_norm_offset = (layer_base + self.weight_layout.attn_k_norm_offset) / @sizeOf(types.fp16_t);
-        const q_norm_w = self.weight_pool[q_norm_offset..][0..head_dim];
-        const k_norm_w = self.weight_pool[k_norm_offset..][0..head_dim];
+        const q_norm_byte_offset = layer_base + self.weight_layout.attn_q_norm_offset;
+        const k_norm_byte_offset = layer_base + self.weight_layout.attn_k_norm_offset;
+        const q_norm_bytes = self.weight_pool[q_norm_byte_offset..][0 .. head_dim * @sizeOf(types.fp16_t)];
+        const k_norm_bytes = self.weight_pool[k_norm_byte_offset..][0 .. head_dim * @sizeOf(types.fp16_t)];
+        const q_norm_w = fp16SliceFromBytes(q_norm_bytes);
+        const k_norm_w = fp16SliceFromBytes(k_norm_bytes);
         if (!std.mem.allEqual(types.fp16_t, q_norm_w, 0)) {
             applyHeadNorm(self.q_proj, num_heads, head_dim, q_norm_w);
         }
@@ -364,8 +488,65 @@ pub const Engine = struct {
         }
 
         @memset(self.attn_out, 0);
-        matvec.matvecDispatch(self.weight_pool[o_proj_offset..].ptr, self.attn_accum.ptr, self.attn_out.ptr, hidden, q_dim, self.config);
+        const layer_idx_u32: u32 = @intCast((self.current_layer_base - self.weight_layout.token_embedding_size) / self.weight_layout.per_layer_size);
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[o_proj_offset..].ptr, self.attn_accum.ptr, self.attn_out.ptr, hidden, q_dim, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 4));
         @memcpy(output, self.attn_out);
+    }
+
+    /// SSM layer forward pass using Mamba-2 selective scan
+    fn ssmLayerForward(self: *Engine, layer_idx: u32, input: []const f32, output: []f32) void {
+        const hidden = self.config.hidden_dim;
+        const ssm_inner = self.config.ssm_inner_size;
+        const ssm_groups = self.config.ssm_num_groups;
+        const dt_rank = self.config.ssm_dt_rank;
+        const conv_kernel = self.config.ssm_conv_kernel;
+        const dt_scale = self.config.ssm_dt_scale;
+
+        const layer_base = self.weight_layout.token_embedding_size +
+            @as(usize, layer_idx) * self.weight_layout.ssm_per_layer_size;
+
+        // Ensure SSM state is initialized for this layer
+        if (self.ssm_states[layer_idx].conv_state.len == 0) {
+            self.ssm_states[layer_idx] = ssm.SSMState.init(hidden, conv_kernel, ssm_inner, ssm_groups, self.allocator) catch unreachable;
+        }
+
+        // Get weight offsets
+        const ssm_out_offset = layer_base + self.weight_layout.ssm_out_offset;
+        const ssm_x_offset = layer_base + self.weight_layout.ssm_x_offset;
+        const ssm_dt_offset = layer_base + self.weight_layout.ssm_dt_offset;
+        const ssm_A_offset = layer_base + self.weight_layout.ssm_A_offset;
+        const ssm_B_offset = layer_base + self.weight_layout.ssm_B_offset;
+        const ssm_C_offset = layer_base + self.weight_layout.ssm_C_offset;
+        const ssm_D_offset = layer_base + self.weight_layout.ssm_D_offset;
+        const ssm_conv1d_offset = layer_base + self.weight_layout.ssm_conv1d_offset;
+        const ssm_conv1d_bias_offset = layer_base + self.weight_layout.ssm_conv1d_bias_offset;
+
+        // Call the SSM kernel
+        ssm.ssmForward(
+            hidden,
+            ssm_inner,
+            ssm_groups,
+            dt_rank,
+            conv_kernel,
+            dt_scale,
+            input,
+            output,
+            self.weight_pool.ptr + ssm_out_offset,
+            self.weight_pool.ptr + ssm_x_offset,
+            self.weight_pool.ptr + ssm_dt_offset,
+            self.weight_pool.ptr + ssm_A_offset,
+            self.weight_pool.ptr + ssm_B_offset,
+            self.weight_pool.ptr + ssm_C_offset,
+            self.weight_pool.ptr + ssm_D_offset,
+            self.weight_pool.ptr + ssm_conv1d_offset,
+            self.weight_pool.ptr + ssm_conv1d_bias_offset,
+            &self.ssm_states[layer_idx],
+            self.ssm_tmp_x,
+            self.ssm_tmp_z,
+            self.ssm_tmp_dt,
+            self.ssm_tmp_B,
+            self.ssm_tmp_C,
+        );
     }
 
     fn ffn(self: *Engine, input: []const f32, output: []f32) void {
@@ -376,18 +557,20 @@ pub const Engine = struct {
 
         switch (self.config.ffn_type) {
             .dense => {
+                const layer_idx_u32: u32 = @intCast((self.current_layer_base - self.weight_layout.token_embedding_size) / self.weight_layout.per_layer_size);
                 @memset(self.ffn_scratch[0..ffn_h], 0);
-                matvec.matvecDispatch(self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_scratch.ptr, ffn_h, hidden, self.config);
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_scratch.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 6));
                 for (self.ffn_scratch[0..ffn_h]) |*value| value.* = math.relu(value.*);
                 @memset(output[0..hidden], 0);
-                matvec.matvecDispatch(self.weight_pool[w2_offset..].ptr, self.ffn_scratch.ptr, output.ptr, hidden, ffn_h, self.config);
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w2_offset..].ptr, self.ffn_scratch.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 7));
             },
             .gated_swi_glu, .gated_gelu => {
                 const w3_offset = (self.current_layer_base + self.weight_layout.ffn_weight3_offset) / @sizeOf(types.fp16_t);
+                const layer_idx_u32: u32 = @intCast((self.current_layer_base - self.weight_layout.token_embedding_size) / self.weight_layout.per_layer_size);
                 @memset(self.ffn_gate_buf[0..ffn_h], 0);
                 @memset(self.ffn_up_buf[0..ffn_h], 0);
-                matvec.matvecDispatch(self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_gate_buf.ptr, ffn_h, hidden, self.config);
-                matvec.matvecDispatch(self.weight_pool[w2_offset..].ptr, input.ptr, self.ffn_up_buf.ptr, ffn_h, hidden, self.config);
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_gate_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 6));
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w2_offset..].ptr, input.ptr, self.ffn_up_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 7));
 
                 for (0..ffn_h) |i| {
                     self.ffn_gate_buf[i] = switch (self.config.ffn_type) {
@@ -398,7 +581,7 @@ pub const Engine = struct {
                 }
 
                 @memset(output[0..hidden], 0);
-                matvec.matvecDispatch(self.weight_pool[w3_offset..].ptr, self.ffn_gate_buf.ptr, output.ptr, hidden, ffn_h, self.config);
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w3_offset..].ptr, self.ffn_gate_buf.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 8));
             },
         }
     }
@@ -510,6 +693,11 @@ fn makeTinyConfig(num_layers: u32, max_seq_len: u32) config.ModelConfig {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .ssm_conv_kernel = 4,
+        .ssm_inner_size = 4,
+        .ssm_num_groups = 1,
+        .ssm_dt_rank = 1,
+        .ssm_dt_scale = 1.0,
     };
 }
 
@@ -525,21 +713,35 @@ test "Engine forward returns vocab logits and uses last token embedding" {
     var eng = try Engine.init(cfg, std.testing.allocator);
     defer eng.deinit(std.testing.allocator);
 
-    @memset(eng.weight_pool, types.fp32_to_fp16(0));
+    // Initialize weight_pool to zeros (as bytes)
+    @memset(eng.weight_pool, 0);
 
-    const embed_offset = eng.weight_layout.token_embedding_offset / @sizeOf(types.fp16_t);
-    const final_norm_offset = eng.weight_layout.final_norm_offset / @sizeOf(types.fp16_t);
-    const output_offset = eng.weight_layout.output_proj_offset / @sizeOf(types.fp16_t);
+    // Use byte offsets directly (not element offsets)
+    const embed_offset = eng.weight_layout.token_embedding_offset;
+    const final_norm_offset = eng.weight_layout.final_norm_offset;
+    const output_offset = eng.weight_layout.output_proj_offset;
 
+    // Set up embedding weights (one-hot identity)
     for (0..cfg.vocab_size) |tok| {
         for (0..cfg.hidden_dim) |i| {
-            eng.weight_pool[embed_offset + tok * cfg.hidden_dim + i] = types.fp32_to_fp16(if (tok == i) 1 else 0);
+            const byte_idx = embed_offset + (tok * cfg.hidden_dim + i) * @sizeOf(types.fp16_t);
+            const fp16_val = types.fp32_to_fp16(if (tok == i) 1 else 0);
+            const ptr: *u16 = @ptrCast(@alignCast(&eng.weight_pool[byte_idx]));
+            ptr.* = fp16_val;
         }
     }
+
+    // Set up final norm and output projection
     for (0..cfg.hidden_dim) |i| {
-        eng.weight_pool[final_norm_offset + i] = types.fp32_to_fp16(1);
+        const norm_byte_idx = final_norm_offset + i * @sizeOf(types.fp16_t);
+        const norm_ptr: *u16 = @ptrCast(@alignCast(&eng.weight_pool[norm_byte_idx]));
+        norm_ptr.* = types.fp32_to_fp16(1);
+
         for (0..cfg.hidden_dim) |j| {
-            eng.weight_pool[output_offset + i * cfg.hidden_dim + j] = types.fp32_to_fp16(if (i == j) 1 else 0);
+            const out_byte_idx = output_offset + (i * cfg.hidden_dim + j) * @sizeOf(types.fp16_t);
+            const fp16_val = types.fp32_to_fp16(if (i == j) 1 else 0);
+            const out_ptr: *u16 = @ptrCast(@alignCast(&eng.weight_pool[out_byte_idx]));
+            out_ptr.* = fp16_val;
         }
     }
 
@@ -558,7 +760,15 @@ test "Engine forward advances kv cache across calls" {
     var eng = try Engine.init(cfg, std.testing.allocator);
     defer eng.deinit(std.testing.allocator);
 
-    @memset(eng.weight_pool, types.fp32_to_fp16(0.1));
+    // Fill weight_pool with fp16(0.1) pattern = 0x2E66 (little endian: 0x66, 0x2E)
+    const fp16_pattern = types.fp32_to_fp16(0.1);
+    var i: usize = 0;
+    while (i < eng.weight_pool.len) : (i += 2) {
+        if (i + 1 < eng.weight_pool.len) {
+            const ptr: *u16 = @ptrCast(@alignCast(&eng.weight_pool[i]));
+            ptr.* = fp16_pattern;
+        }
+    }
 
     _ = try eng.forward(&.{0});
     try std.testing.expect(eng.kv_cache != null);
@@ -575,7 +785,15 @@ test "Engine lazily initializes kv cache on first forward" {
 
     try std.testing.expect(eng.kv_cache == null);
 
-    @memset(eng.weight_pool, types.fp32_to_fp16(0.1));
+    // Fill weight_pool with fp16(0.1) pattern
+    const fp16_pattern = types.fp32_to_fp16(0.1);
+    var j: usize = 0;
+    while (j < eng.weight_pool.len) : (j += 2) {
+        if (j + 1 < eng.weight_pool.len) {
+            const ptr2: *u16 = @ptrCast(@alignCast(&eng.weight_pool[j]));
+            ptr2.* = fp16_pattern;
+        }
+    }
     _ = try eng.forward(&.{0});
 
     try std.testing.expect(eng.kv_cache != null);

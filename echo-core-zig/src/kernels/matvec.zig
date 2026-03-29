@@ -2,11 +2,12 @@ const std = @import("std");
 const types = @import("../core/types.zig");
 const config = @import("../core/config.zig");
 const quant = @import("quant.zig");
+const gguf = @import("../gguf/reader.zig");
 
 pub fn matvecFp16Fp32(
     comptime TILE_K: u32,
     comptime TILE_M: u32,
-    W: [*]const types.fp16_t,
+    W: [*]const u8,
     x: [*]const f32,
     y: [*]f32,
     M: u32,
@@ -14,9 +15,10 @@ pub fn matvecFp16Fp32(
 ) void {
     _ = TILE_K;
     _ = TILE_M;
+    const W_fp16: [*]const types.fp16_t = @ptrCast(@alignCast(W));
     var m: u32 = 0;
     while (m < M) : (m += 1) {
-        const W_row = W + @as(usize, m) * K;
+        const W_row = W_fp16 + @as(usize, m) * K;
         var acc: f32 = 0;
 
         var k: u32 = 0;
@@ -29,7 +31,7 @@ pub fn matvecFp16Fp32(
 }
 
 pub fn matvecDispatch(
-    W: [*]const types.fp16_t,
+    W: [*]const u8,
     x: [*]const f32,
     y: [*]f32,
     M: u32,
@@ -38,6 +40,25 @@ pub fn matvecDispatch(
 ) void {
     _ = config_;
     matvecFp16Fp32(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, W, x, y, M, K);
+}
+
+pub fn matvecDispatchQuant(
+    comptime TILE_K: u32,
+    comptime TILE_M: u32,
+    W: [*]const u8,
+    x: [*]const f32,
+    y: [*]f32,
+    M: u32,
+    K: u32,
+    dtype: gguf.GGMLType,
+) void {
+    switch (dtype) {
+        .f16, .f32 => matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K),
+        .q8_0 => matvecQ80(W, x, y, M, K),
+        .q4_k => matvecQ4K(W, x, y, M, K),
+        .q2_k => matvecQ2K(W, x, y, M, K),
+        else => unreachable,
+    }
 }
 
 pub fn matvecQ80(
@@ -201,7 +222,8 @@ test "matvec basic" {
 
     @memset(&y, 0);
 
-    matvecFp16Fp32(8, 4, &W, &x, &y, 4, 8);
+    const W_bytes: [*]const u8 = @ptrCast(&W);
+    matvecFp16Fp32(8, 4, W_bytes, &x, &y, 4, 8);
 
     try std.testing.expectEqual(y[0], 36.0);
     try std.testing.expectEqual(y[1], 72.0);

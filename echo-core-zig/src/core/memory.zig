@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
+const config = @import("config.zig");
 
 pub const AlignedMemoryPool = struct {
     base: [*]u8,
@@ -135,19 +136,46 @@ pub const WeightLayout = struct {
     ffn_weight3_offset: usize,
     attn_q_norm_offset: usize,
     attn_k_norm_offset: usize,
+
+    // SSM weight offsets
+    ssm_out_offset: usize,
+    ssm_x_offset: usize,
+    ssm_dt_offset: usize,
+    ssm_A_offset: usize,
+    ssm_B_offset: usize,
+    ssm_C_offset: usize,
+    ssm_D_offset: usize,
+    ssm_conv1d_offset: usize,
+    ssm_conv1d_bias_offset: usize,
+
     per_layer_size: usize,
+    ssm_per_layer_size: usize,
     final_norm_offset: usize,
     output_proj_offset: usize,
     total_size: usize,
+    raw_pool_size: usize,
 
-    pub fn compute(config: anytype) WeightLayout {
-        const hidden = config.hidden_dim;
-        const vocab = config.vocab_size;
-        const kv_dim = config.num_kv_heads * config.head_dim;
-        const ffn_h = config.ffn_hidden_dim;
+    // Per-layer type tracking (dynamically allocated)
+    layer_types: []config.ModelConfig.LayerType,
+
+    pub fn compute(config_: anytype, allocator: std.mem.Allocator) !WeightLayout {
+        const hidden = config_.hidden_dim;
+        const vocab = config_.vocab_size;
+        const kv_dim = config_.num_kv_heads * config_.head_dim;
+        const ffn_h = config_.ffn_hidden_dim;
         const sizeof_fp16 = @sizeOf(types.fp16_t);
 
+        // Allocate layer types array
+        const layer_types = try allocator.alloc(config.ModelConfig.LayerType, config_.num_layers);
+        errdefer allocator.free(layer_types);
+
+        // Default all layers to attention initially
+        // Will be updated by loader based on tensor presence
+        @memset(layer_types, .attention);
+
         var layout: WeightLayout = undefined;
+        layout.layer_types = layer_types;
+
         layout.token_embedding_offset = 0;
         layout.token_embedding_size = vocab * hidden * sizeof_fp16;
 
@@ -156,7 +184,7 @@ pub const WeightLayout = struct {
         offset += hidden * sizeof_fp16;
 
         layout.q_proj_offset = offset;
-        offset += (config.num_heads * config.head_dim) * hidden * sizeof_fp16;
+        offset += (config_.num_heads * config_.head_dim) * hidden * sizeof_fp16;
 
         layout.k_proj_offset = offset;
         offset += kv_dim * hidden * sizeof_fp16;
@@ -165,13 +193,13 @@ pub const WeightLayout = struct {
         offset += kv_dim * hidden * sizeof_fp16;
 
         layout.o_proj_offset = offset;
-        offset += hidden * (config.num_heads * config.head_dim) * sizeof_fp16;
+        offset += hidden * (config_.num_heads * config_.head_dim) * sizeof_fp16;
 
         layout.ffn_norm_offset = offset;
         offset += hidden * sizeof_fp16;
 
         layout.ffn_weight1_offset = offset;
-        if (config.ffn_type == .dense) {
+        if (config_.ffn_type == .dense) {
             offset += hidden * ffn_h * sizeof_fp16;
             layout.ffn_weight2_offset = offset;
             offset += ffn_h * hidden * sizeof_fp16;
@@ -185,16 +213,60 @@ pub const WeightLayout = struct {
         }
 
         layout.attn_q_norm_offset = offset;
-        offset += config.head_dim * sizeof_fp16;
+        offset += config_.head_dim * sizeof_fp16;
         layout.attn_k_norm_offset = offset;
-        offset += config.head_dim * sizeof_fp16;
+        offset += config_.head_dim * sizeof_fp16;
 
         layout.per_layer_size = offset;
-        layout.final_norm_offset = layout.token_embedding_size + layout.per_layer_size * config.num_layers;
+
+        // Calculate SSM per-layer size
+        const ssm_conv_kernel = config_.ssm_conv_kernel;
+        const ssm_inner = config_.ssm_inner_size;
+        const dt_rank = config_.ssm_dt_rank;
+
+        var ssm_offset: usize = 0;
+        layout.ssm_out_offset = ssm_offset;
+        ssm_offset += hidden * hidden * sizeof_fp16; // ssm_out projection
+
+        layout.ssm_x_offset = ssm_offset;
+        ssm_offset += hidden * hidden * sizeof_fp16; // ssm_x projection
+
+        layout.ssm_dt_offset = ssm_offset;
+        ssm_offset += hidden * dt_rank * sizeof_fp16; // ssm_dt projection
+
+        layout.ssm_A_offset = ssm_offset;
+        ssm_offset += ssm_inner * sizeof_fp16; // A diagonal matrix
+
+        layout.ssm_B_offset = ssm_offset;
+        ssm_offset += hidden * ssm_inner * sizeof_fp16; // B matrix
+
+        layout.ssm_C_offset = ssm_offset;
+        ssm_offset += hidden * ssm_inner * sizeof_fp16; // C matrix
+
+        layout.ssm_D_offset = ssm_offset;
+        ssm_offset += hidden * sizeof_fp16; // D skip connection
+
+        layout.ssm_conv1d_offset = ssm_offset;
+        ssm_offset += ssm_conv_kernel * hidden * sizeof_fp16; // conv1d weights
+
+        layout.ssm_conv1d_bias_offset = ssm_offset;
+        ssm_offset += hidden * sizeof_fp16; // conv1d bias
+
+        layout.ssm_per_layer_size = ssm_offset;
+
+        // Calculate total size assuming all layers are attention (conservative)
+        // Actual size will depend on mix of attention and SSM layers
+        layout.final_norm_offset = layout.token_embedding_size + layout.per_layer_size * config_.num_layers;
         layout.output_proj_offset = layout.final_norm_offset + hidden * sizeof_fp16;
         layout.total_size = layout.output_proj_offset + hidden * vocab * sizeof_fp16;
 
+        layout.raw_pool_size = layout.total_size;
+
         return layout;
+    }
+
+    pub fn deinit(self: *WeightLayout, allocator: std.mem.Allocator) void {
+        allocator.free(self.layer_types);
     }
 };
 
@@ -207,7 +279,7 @@ test "AlignedMemoryPool basic alloc" {
 }
 
 test "WeightLayout compute" {
-    const config = .{
+    const test_config = .{
         .vocab_size = 32000,
         .hidden_dim = 4096,
         .num_heads = 32,
@@ -216,8 +288,12 @@ test "WeightLayout compute" {
         .num_layers = 32,
         .ffn_hidden_dim = 11008,
         .ffn_type = .gated_swi_glu,
+        .ssm_conv_kernel = 4,
+        .ssm_inner_size = 16,
+        .ssm_dt_rank = 256,
     };
-    const layout = WeightLayout.compute(config);
+    var layout = try WeightLayout.compute(test_config, std.testing.allocator);
+    defer layout.deinit(std.testing.allocator);
     try std.testing.expect(layout.token_embedding_size > 0);
     try std.testing.expect(layout.per_layer_size > 0);
     try std.testing.expect(layout.total_size > layout.token_embedding_size);

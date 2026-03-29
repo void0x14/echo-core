@@ -196,31 +196,12 @@ fn buildCompatibilityReportFromSummary(
     has_hybrid_attention: bool,
     tensors: []const CompatibilityTensor,
 ) !?[]u8 {
+    _ = architecture;
+    _ = has_hybrid_attention;
     if (tensors.len == 0) return null;
 
     var report = ArrayList(u8).init(allocator);
     errdefer report.deinit();
-
-    if (architecture.len > 0 and
-        !std.mem.eql(u8, architecture, "llama") and
-        !std.mem.eql(u8, architecture, "qwen2") and
-        !std.mem.eql(u8, architecture, "qwen3") and
-        !std.mem.eql(u8, architecture, "qwen3vl") and
-        !std.mem.eql(u8, architecture, "gemma3") and
-        !std.mem.eql(u8, architecture, "olmo2"))
-    {
-        var buf: [192]u8 = undefined;
-        const msg = try std.fmt.bufPrint(
-            &buf,
-            "general.architecture=\"{s}\"; engine sadece llama/qwen2/qwen3/gemma3/olmo2 benzeri klasik transformer akisini destekliyor",
-            .{architecture},
-        );
-        try appendCompatibilityIssue(&report, msg);
-    }
-
-    if (has_hybrid_attention) {
-        try appendCompatibilityIssue(&report, "model metadata attention+SSM hybrid akis gosteriyor; Zig engine SSM dalini hic uygulamiyor");
-    }
 
     for (tensors) |tensor| {
         if (std.mem.indexOf(u8, tensor.name, ".ssm_") != null) {
