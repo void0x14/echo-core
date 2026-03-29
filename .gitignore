@@ -8,3 +8,10 @@ echo_core
 compile_commands.json
 .cache/
 *.gguf
+
+# Zig
+.zig-cache/
+zig-out/
+*.pyc
+__pycache__/
+*.pyo
