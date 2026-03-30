@@ -689,6 +689,7 @@ fn makeTinyConfig(num_layers: u32, max_seq_len: u32) config.ModelConfig {
         .num_kv_heads = 1,
         .head_dim = 4,
         .num_layers = num_layers,
+        .num_ssm_layers = 0,
         .ffn_hidden_dim = 4,
         .max_seq_len = max_seq_len,
         .ffn_type = .dense,

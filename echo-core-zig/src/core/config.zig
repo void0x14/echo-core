@@ -7,6 +7,7 @@ pub const ModelConfig = extern struct {
     num_kv_heads: u32,
     head_dim: u32,
     num_layers: u32,
+    num_ssm_layers: u32,
     ffn_hidden_dim: u32,
     max_seq_len: u32,
     ffn_type: FFNType,
@@ -81,6 +82,7 @@ test "ModelConfig basic creation" {
         .num_kv_heads = 32,
         .head_dim = 128,
         .num_layers = 32,
+        .num_ssm_layers = 0,
         .ffn_hidden_dim = 11008,
         .max_seq_len = 2048,
         .ffn_type = .gated_swi_glu,
@@ -107,5 +109,5 @@ test "ModelConfig enum values and ABI assumptions" {
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.NormType));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.PosEncoding));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.LayerType));
-    try std.testing.expectEqual(@as(usize, 68), @sizeOf(ModelConfig));
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(ModelConfig));
 }

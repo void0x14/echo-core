@@ -229,13 +229,11 @@ pub const WeightLayout = struct {
 
         layout.per_layer_size = offset;
 
-        // Calculate SSM per-layer size with 2x conservative safety margin
-        // This handles variations in hybrid models where different layers
-        // may have different SSM weight sizes than config defaults
+        // Calculate SSM per-layer size
+        // Safety margin removed: detectActualDimensions() now detects actual tensor sizes
         const ssm_conv_kernel = config_.ssm_conv_kernel;
         const ssm_inner = config_.ssm_inner_size;
         const dt_rank = config_.ssm_dt_rank;
-        const safety_margin = 2; // 2x multiplier for conservative sizing
 
         // For ssm_out, use max of ffn_hidden_dim/2 or 2x hidden
         const ssm_out_hidden_dim = if (config_.ffn_hidden_dim > hidden * 2 and config_.ffn_type != .dense)
@@ -245,32 +243,32 @@ pub const WeightLayout = struct {
 
         var ssm_offset: usize = 0;
         layout.ssm_out_offset = ssm_offset;
-        // ssm_out: hidden × ssm_out_hidden_dim with safety margin
-        ssm_offset += hidden * ssm_out_hidden_dim * sizeof_fp16 * safety_margin;
+        // ssm_out: hidden × ssm_out_hidden_dim
+        ssm_offset += hidden * ssm_out_hidden_dim * sizeof_fp16;
 
         layout.ssm_x_offset = ssm_offset;
-        ssm_offset += hidden * hidden * sizeof_fp16 * safety_margin;
+        ssm_offset += hidden * hidden * sizeof_fp16;
 
         layout.ssm_dt_offset = ssm_offset;
-        ssm_offset += hidden * dt_rank * sizeof_fp16 * safety_margin;
+        ssm_offset += hidden * dt_rank * sizeof_fp16;
 
         layout.ssm_A_offset = ssm_offset;
-        ssm_offset += ssm_inner * sizeof_fp16 * safety_margin;
+        ssm_offset += ssm_inner * sizeof_fp16;
 
         layout.ssm_B_offset = ssm_offset;
-        ssm_offset += hidden * ssm_inner * sizeof_fp16 * safety_margin;
+        ssm_offset += hidden * ssm_inner * sizeof_fp16;
 
         layout.ssm_C_offset = ssm_offset;
-        ssm_offset += hidden * ssm_inner * sizeof_fp16 * safety_margin;
+        ssm_offset += hidden * ssm_inner * sizeof_fp16;
 
         layout.ssm_D_offset = ssm_offset;
-        ssm_offset += hidden * sizeof_fp16 * safety_margin;
+        ssm_offset += hidden * sizeof_fp16;
 
         layout.ssm_conv1d_offset = ssm_offset;
-        ssm_offset += ssm_conv_kernel * hidden * sizeof_fp16 * safety_margin;
+        ssm_offset += ssm_conv_kernel * hidden * sizeof_fp16;
 
         layout.ssm_conv1d_bias_offset = ssm_offset;
-        ssm_offset += hidden * sizeof_fp16 * safety_margin;
+        ssm_offset += hidden * sizeof_fp16;
 
         layout.ssm_per_layer_size = ssm_offset;
 
@@ -280,8 +278,10 @@ pub const WeightLayout = struct {
         layout.output_proj_offset = layout.final_norm_offset + hidden * sizeof_fp16;
         layout.ssm_region_offset = layout.output_proj_offset + hidden * vocab * sizeof_fp16;
 
-        // Conservative: allocate space for all layers to potentially be SSM
-        const ssm_region_size = layout.ssm_per_layer_size * config_.num_layers;
+        // Use actual SSM layer count if available (detected by detectActualDimensions)
+        // Otherwise fall back to num_layers for backward compatibility with pure SSM models
+        const num_ssm_layers = if (config_.num_ssm_layers > 0) config_.num_ssm_layers else config_.num_layers;
+        const ssm_region_size = layout.ssm_per_layer_size * num_ssm_layers;
         layout.total_size = layout.ssm_region_offset + ssm_region_size;
 
         layout.raw_pool_size = layout.total_size;
@@ -310,11 +310,18 @@ test "WeightLayout compute" {
         .num_kv_heads = 32,
         .head_dim = 128,
         .num_layers = 32,
+        .num_ssm_layers = 0,
         .ffn_hidden_dim = 11008,
+        .max_seq_len = 2048,
         .ffn_type = .gated_swi_glu,
+        .norm_type = .rms_norm,
+        .pos_encoding = .rope,
+        .use_kv_quantization = false,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
+        .ssm_num_groups = 1,
         .ssm_dt_rank = 256,
+        .ssm_dt_scale = 1.0,
     };
     var layout = try WeightLayout.compute(test_config, std.testing.allocator);
     defer layout.deinit(std.testing.allocator);

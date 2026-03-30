@@ -14,6 +14,93 @@ const CompatibilityTensor = struct {
     dtype: gguf.GGMLType,
 };
 
+/// Detect actual tensor dimensions from GGUF file and update config.
+/// This fixes mismatches between metadata-reported dimensions and actual tensor shapes.
+fn detectActualDimensions(cfg: *config.ModelConfig, reader: *const gguf.Reader) void {
+    // Try to detect actual hidden_dim from attn_q.weight tensor
+    // Qwen 3.5 models report 4096 in metadata but tensors are 8192
+    if (reader.tensors.get("blk.0.attn_q.weight")) |tensor_info| {
+        if (tensor_info.shape.len >= 2) {
+            const actual_hidden_dim = @as(u32, @intCast(tensor_info.shape[1]));
+            if (actual_hidden_dim > cfg.hidden_dim) {
+                std.debug.print("INFO: Detected actual hidden_dim={d} from attn_q.weight, metadata reported {d}\n", .{ actual_hidden_dim, cfg.hidden_dim });
+                cfg.hidden_dim = actual_hidden_dim;
+            }
+        }
+    }
+
+    // Try to detect SSM parameters from ssm_conv1d.weight
+    // Shape should be [conv_kernel, hidden_dim]
+    if (reader.tensors.get("blk.0.ssm_conv1d.weight")) |tensor_info| {
+        if (tensor_info.shape.len >= 2) {
+            const actual_conv_kernel = @as(u32, @intCast(tensor_info.shape[0]));
+            const actual_ssm_hidden = @as(u32, @intCast(tensor_info.shape[1]));
+
+            if (actual_conv_kernel > cfg.ssm_conv_kernel) {
+                std.debug.print("INFO: Detected actual ssm_conv_kernel={d} from ssm_conv1d.weight, metadata reported {d}\n", .{ actual_conv_kernel, cfg.ssm_conv_kernel });
+                cfg.ssm_conv_kernel = actual_conv_kernel;
+            }
+
+            if (actual_ssm_hidden > cfg.hidden_dim) {
+                std.debug.print("INFO: Detected actual SSM hidden_dim={d} from ssm_conv1d.weight, metadata reported {d}\n", .{ actual_ssm_hidden, cfg.hidden_dim });
+                cfg.hidden_dim = actual_ssm_hidden;
+            }
+        }
+    }
+
+    // Try to detect ssm_dt_rank from ssm_dt.weight
+    // Shape should be [hidden_dim, dt_rank]
+    if (reader.tensors.get("blk.0.ssm_dt.weight")) |tensor_info| {
+        if (tensor_info.shape.len >= 2) {
+            const actual_dt_rank = @as(u32, @intCast(tensor_info.shape[1]));
+            if (actual_dt_rank > cfg.ssm_dt_rank) {
+                std.debug.print("INFO: Detected actual ssm_dt_rank={d} from ssm_dt.weight, metadata reported {d}\n", .{ actual_dt_rank, cfg.ssm_dt_rank });
+                cfg.ssm_dt_rank = actual_dt_rank;
+            }
+        }
+    }
+
+    // Try to detect ssm_inner_size from ssm_A.weight
+    // Shape should be [inner_size] or [hidden_dim, inner_size]
+    if (reader.tensors.get("blk.0.ssm_A.weight")) |tensor_info| {
+        if (tensor_info.shape.len >= 1) {
+            const actual_inner_size = @as(u32, @intCast(tensor_info.shape[tensor_info.shape.len - 1]));
+            if (actual_inner_size > cfg.ssm_inner_size) {
+                std.debug.print("INFO: Detected actual ssm_inner_size={d} from ssm_A.weight, metadata reported {d}\n", .{ actual_inner_size, cfg.ssm_inner_size });
+                cfg.ssm_inner_size = actual_inner_size;
+            }
+        }
+    }
+
+    // Recalculate dependent values if hidden_dim changed
+    if (cfg.num_heads > 0) {
+        cfg.head_dim = cfg.hidden_dim / cfg.num_heads;
+    }
+
+    // Count actual SSM layers in the model for proper memory allocation
+    // Hybrid models like Qwen 3.5 have only a few SSM layers among many attention layers
+    var ssm_layer_count: u32 = 0;
+    var layer_idx: u32 = 0;
+    while (layer_idx < cfg.num_layers) : (layer_idx += 1) {
+        var tensor_name_buf: [64]u8 = undefined;
+        const tensor_name = std.fmt.bufPrint(&tensor_name_buf, "blk.{d}.ssm_conv1d.weight", .{layer_idx}) catch continue;
+        if (reader.tensors.get(tensor_name)) |_| {
+            ssm_layer_count += 1;
+        }
+    }
+
+    if (ssm_layer_count > 0 and ssm_layer_count < cfg.num_layers) {
+        std.debug.print("INFO: Detected hybrid model with {d} SSM layers out of {d} total layers\n", .{ ssm_layer_count, cfg.num_layers });
+        cfg.num_ssm_layers = ssm_layer_count;
+    } else if (ssm_layer_count == 0) {
+        // No SSM layers detected - pure attention model
+        cfg.num_ssm_layers = 0;
+    } else {
+        // All layers have SSM - pure SSM model (Mamba-style)
+        cfg.num_ssm_layers = cfg.num_layers;
+    }
+}
+
 pub const ModelLoader = struct {
     config: config.ModelConfig,
     engine_: engine.Engine,
@@ -28,7 +115,11 @@ pub const ModelLoader = struct {
             return error.ModelIncompatible;
         }
 
-        const cfg = reader.config;
+        // Get mutable copy of config so we can update it with actual dimensions
+        var cfg = reader.config;
+
+        // Detect actual tensor dimensions before computing weight layout
+        detectActualDimensions(&cfg, &reader);
 
         var eng = try engine.Engine.init(cfg, allocator);
         errdefer eng.deinit(allocator);
