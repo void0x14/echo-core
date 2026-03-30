@@ -4,6 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Create the main module that will be shared
+    const echo_core_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Test files to run
     const test_files = [_][]const u8{
         "src/kernel_tests.zig",
@@ -29,11 +36,29 @@ pub fn build(b: *std.Build) void {
     // Executable
     const exe = b.addExecutable(.{
         .name = "echo-core-zig",
+        .root_module = echo_core_module,
+    });
+    b.installArtifact(exe);
+
+    // Dump model tool - reuse the same module but with different entry point
+    const dump_model_exe = b.addExecutable(.{
+        .name = "dump-model",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/tools/dump_model.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
-    b.installArtifact(exe);
+    // Add the gguf and core modules as imports
+    dump_model_exe.root_module.addImport("gguf", b.createModule(.{
+        .root_source_file = b.path("src/gguf/reader.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    dump_model_exe.root_module.addImport("core_config", b.createModule(.{
+        .root_source_file = b.path("src/core/config.zig"),
+        .target = target,
+        .optimize = optimize,
+    }));
+    b.installArtifact(dump_model_exe);
 }
