@@ -994,3 +994,21 @@ test "Engine lazily initializes kv cache on first forward" {
     try std.testing.expect(eng.kv_cache != null);
     try std.testing.expectEqual(@as(u32, 1), eng.kv_cache.?.seqLen());
 }
+
+test "Engine.greedyNextToken correctly identifies token with max logit" {
+    const cfg = makeTinyConfig(0, 0);
+    var eng = try Engine.init(cfg, std.testing.allocator);
+    defer eng.deinit(std.testing.allocator);
+
+    // Populate logits with known values
+    eng.logits[0] = 0.1;
+    eng.logits[1] = 0.5;
+    eng.logits[2] = 2.0; // max
+    eng.logits[3] = 1.1;
+
+    try std.testing.expectEqual(@as(u32, 2), eng.greedyNextToken());
+
+    // Change max
+    eng.logits[1] = 5.0; // new max
+    try std.testing.expectEqual(@as(u32, 1), eng.greedyNextToken());
+}
