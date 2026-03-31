@@ -1,0 +1,337 @@
+============================================================
+QWEN 3.5 GGUF TENSOR ANALYSIS REPORT
+============================================================
+
+Model: Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf
+Analysis Date: 2026-03-30
+
+METADATA:
+  hidden_dim (embedding_length): 2560
+  n_layers: 32
+  n_heads: 16
+  n_kv_heads: 4
+  head_dim: 160
+  ffn_dim: 9216
+  ssm_conv_kernel: 4
+  ssm_inner_size: 4096
+  ssm_dt_rank: 32
+  ssm_state_size: 128
+  ssm_group_count: 16
+  vocab_size: 248320
+
+TOTALS:
+  Total tensors: 426
+  Total model size: 4.16 GB
+
+============================================================
+LAYER 0 TENSORS:
+============================================================
+
+blk.0.attn_gate.weight:
+  dtype: q8_0
+  shape: [2560, 4096]
+  size: 11,141,120 bytes
+
+blk.0.attn_norm.weight:
+  dtype: f32
+  shape: [2560]
+  size: 10,240 bytes
+
+blk.0.attn_qkv.weight:
+  dtype: q8_0
+  shape: [2560, 8192]
+  size: 22,282,240 bytes
+
+blk.0.ffn_down.weight:
+  dtype: q8_0
+  shape: [9216, 2560]
+  size: 25,067,520 bytes
+
+blk.0.ffn_gate.weight:
+  dtype: q8_0
+  shape: [2560, 9216]
+  size: 25,067,520 bytes
+
+blk.0.ffn_up.weight:
+  dtype: q8_0
+  shape: [2560, 9216]
+  size: 25,067,520 bytes
+
+blk.0.post_attention_norm.weight:
+  dtype: f32
+  shape: [2560]
+  size: 10,240 bytes
+
+blk.0.ssm_a:
+  dtype: f32
+  shape: [32]
+  size: 128 bytes
+
+blk.0.ssm_alpha.weight:
+  dtype: q8_0
+  shape: [2560, 32]
+  size: 87,040 bytes
+
+blk.0.ssm_beta.weight:
+  dtype: q8_0
+  shape: [2560, 32]
+  size: 87,040 bytes
+
+blk.0.ssm_conv1d.weight:
+  dtype: f32
+  shape: [4, 8192]
+  size: 131,072 bytes
+
+blk.0.ssm_dt.bias:
+  dtype: f32
+  shape: [32]
+  size: 128 bytes
+
+blk.0.ssm_norm.weight:
+  dtype: f32
+  shape: [128]
+  size: 512 bytes
+
+blk.0.ssm_out.weight:
+  dtype: q8_0
+  shape: [4096, 2560]
+  size: 11,141,120 bytes
+
+============================================================
+LAYER 1 TENSORS:
+============================================================
+
+blk.1.attn_gate.weight:
+  dtype: q8_0
+  shape: [2560, 4096]
+  size: 11,141,120 bytes
+
+blk.1.attn_norm.weight:
+  dtype: f32
+  shape: [2560]
+  size: 10,240 bytes
+
+blk.1.attn_qkv.weight:
+  dtype: q8_0
+  shape: [2560, 8192]
+  size: 22,282,240 bytes
+
+blk.1.ffn_down.weight:
+  dtype: q8_0
+  shape: [9216, 2560]
+  size: 25,067,520 bytes
+
+blk.1.ffn_gate.weight:
+  dtype: q8_0
+  shape: [2560, 9216]
+  size: 25,067,520 bytes
+
+blk.1.ffn_up.weight:
+  dtype: q8_0
+  shape: [2560, 9216]
+  size: 25,067,520 bytes
+
+blk.1.post_attention_norm.weight:
+  dtype: f32
+  shape: [2560]
+  size: 10,240 bytes
+
+blk.1.ssm_a:
+  dtype: f32
+  shape: [32]
+  size: 128 bytes
+
+blk.1.ssm_alpha.weight:
+  dtype: q8_0
+  shape: [2560, 32]
+  size: 87,040 bytes
+
+blk.1.ssm_beta.weight:
+  dtype: q8_0
+  shape: [2560, 32]
+  size: 87,040 bytes
+
+blk.1.ssm_conv1d.weight:
+  dtype: f32
+  shape: [4, 8192]
+  size: 131,072 bytes
+
+blk.1.ssm_dt.bias:
+  dtype: f32
+  shape: [32]
+  size: 128 bytes
+
+blk.1.ssm_norm.weight:
+  dtype: f32
+  shape: [128]
+  size: 512 bytes
+
+blk.1.ssm_out.weight:
+  dtype: q8_0
+  shape: [4096, 2560]
+  size: 11,141,120 bytes
+
+============================================================
+LAYER 2 TENSORS:
+============================================================
+
+blk.2.attn_gate.weight:
+  dtype: q8_0
+  shape: [2560, 4096]
+  size: 11,141,120 bytes
+
+blk.2.attn_norm.weight:
+  dtype: f32
+  shape: [2560]
+  size: 10,240 bytes
+
+blk.2.attn_qkv.weight:
+  dtype: q8_0
+  shape: [2560, 8192]
+  size: 22,282,240 bytes
+
+blk.2.ffn_down.weight:
+  dtype: q8_0
+  shape: [9216, 2560]
+  size: 25,067,520 bytes
+
+blk.2.ffn_gate.weight:
+  dtype: q8_0
+  shape: [2560, 9216]
+  size: 25,067,520 bytes
+
+blk.2.ffn_up.weight:
+  dtype: q8_0
+  shape: [2560, 9216]
+  size: 25,067,520 bytes
+
+blk.2.post_attention_norm.weight:
+  dtype: f32
+  shape: [2560]
+  size: 10,240 bytes
+
+blk.2.ssm_a:
+  dtype: f32
+  shape: [32]
+  size: 128 bytes
+
+blk.2.ssm_alpha.weight:
+  dtype: q8_0
+  shape: [2560, 32]
+  size: 87,040 bytes
+
+blk.2.ssm_beta.weight:
+  dtype: q8_0
+  shape: [2560, 32]
+  size: 87,040 bytes
+
+blk.2.ssm_conv1d.weight:
+  dtype: f32
+  shape: [4, 8192]
+  size: 131,072 bytes
+
+blk.2.ssm_dt.bias:
+  dtype: f32
+  shape: [32]
+  size: 128 bytes
+
+blk.2.ssm_norm.weight:
+  dtype: f32
+  shape: [128]
+  size: 512 bytes
+
+blk.2.ssm_out.weight:
+  dtype: q8_0
+  shape: [4096, 2560]
+  size: 11,141,120 bytes
+
+============================================================
+CRITICAL MISMATCHES FOUND:
+============================================================
+
+1. ssm_conv1d.weight:
+   Metadata expects: [4, 2560]
+   Actual shape:     [4, 8192]
+   Issue: shape[1] is 3.2x LARGER than metadata reports
+   Hidden_dim mismatch: 2560 (metadata) vs 8192 (actual)
+   
+   This affects: ssm_conv1d.weight second dimension
+   Impact: 68% data loss if using metadata dimensions
+
+2. attn_qkv.weight (fused tensor - not separate Q/K/V):
+   Shape: [2560, 8192]
+   Expected separate: attn_q.weight, attn_k.weight, attn_v.weight
+   Note: This model uses FUSED QKV tensors!
+   
+   The 8192 dimension breakdown for GQA with 4 KV heads:
+   - Q: 2560 (16 heads × 160 head_dim)
+   - K: 2560 (4 heads × 160 head_dim × 4 for GQA?)
+   - V: 3072 (remainder?)
+   
+   Actually: 8192 = 5120 + 3072 where:
+   - Q: 5120 = 32 heads (???) × 160
+   - K+V: 3072 = 4 heads × 2 × 384 (different head_dim?)
+   
+   OR more likely: This uses a different projection scheme
+   where hidden_dim is expanded in the attention mechanism.
+
+3. SSM tensor naming convention different:
+   
+   Found tensors:
+   - ssm_a (1D vector, shape [32])
+   - ssm_alpha.weight (shape [2560, 32])
+   - ssm_beta.weight (shape [2560, 32])
+   - ssm_dt.bias (shape [32])
+   - ssm_conv1d.weight (shape [4, 8192])
+   - ssm_norm.weight (shape [128])
+   - ssm_out.weight (shape [4096, 2560])
+   
+   Expected (from echo-core inference code):
+   - ssm_A.weight (matrix)
+   - ssm_B.weight (matrix)
+   - ssm_C.weight (matrix)
+   - ssm_D.weight (vector)
+   - ssm_dt.weight (matrix)
+   - ssm_x.weight (matrix)
+   
+   This is a DIFFERENT SSM architecture than Mamba-2!
+   Qwen 3.5 appears to use a custom state space model design.
+
+4. attn_gate.weight instead of attn_output.weight:
+   Found: blk.0.attn_gate.weight with shape [2560, 4096]
+   Expected: blk.0.attn_output.weight
+   
+   This suggests the model uses:
+   - Fused QKV projection
+   - Attention gate mechanism
+   - Different output projection scheme
+
+============================================================
+KEY FINDINGS SUMMARY:
+============================================================
+
+Architecture: Qwen 3.5 with hybrid attention/SSM layers
+Model Type: Hybrid transformer (every 4th layer is full attention)
+
+Critical Issues:
+1. Hidden dimension mismatch: metadata reports 2560, tensors use 8192
+2. Uses fused QKV tensors instead of separate projections
+3. SSM architecture is different from standard Mamba-2
+4. Uses attn_gate instead of attn_output for attention
+
+Recommendations:
+1. Update detectActualDimensions() to handle 8192 hidden_dim
+2. Add support for fused QKV tensor splitting
+3. Implement new SSM kernel for Qwen 3.5's custom SSM design
+4. Handle attn_gate tensors in attention mechanism
+
+Tensor Counts:
+- Total: 426 tensors
+- SSM layers: 24 layers have SSM tensors
+- Full attention layers: 8 layers (every 4th)
+- Attention tensors per SSM layer: ~13
+- Model size: 4.16 GB
+
+Quantization: Q8_0 (8-bit quantization with block size 32)
+File type: 7 (GGUF v3)
+Architecture prefix: qwen35
