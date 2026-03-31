@@ -67,8 +67,8 @@ pub const Engine = struct {
     current_layer_base: usize,
     seq_pos: u32,
 
-    pub fn init(cfg: config.ModelConfig, allocator: std.mem.Allocator) !Engine {
-        var layout = try memory.WeightLayout.compute(cfg, allocator);
+    pub fn init(cfg: config.ModelConfig, reader_opt: ?*const gguf.Reader, allocator: std.mem.Allocator) !Engine {
+        var layout = try memory.WeightLayout.compute(cfg, reader_opt, allocator);
         errdefer layout.deinit(allocator);
 
         const kv_dim = cfg.num_kv_heads * cfg.head_dim;
@@ -400,10 +400,10 @@ pub const Engine = struct {
         const kv_dim = num_kv_heads * head_dim;
         const layer_base = self.weight_layout.token_embedding_size + @as(usize, layer_idx) * self.weight_layout.per_layer_size;
 
-        const q_proj_offset = (layer_base + self.weight_layout.q_proj_offset) / @sizeOf(types.fp16_t);
-        const k_proj_offset = (layer_base + self.weight_layout.k_proj_offset) / @sizeOf(types.fp16_t);
-        const v_proj_offset = (layer_base + self.weight_layout.v_proj_offset) / @sizeOf(types.fp16_t);
-        const o_proj_offset = (layer_base + self.weight_layout.o_proj_offset) / @sizeOf(types.fp16_t);
+        const q_proj_offset = layer_base + self.weight_layout.q_proj_offset;
+        const k_proj_offset = layer_base + self.weight_layout.k_proj_offset;
+        const v_proj_offset = layer_base + self.weight_layout.v_proj_offset;
+        const o_proj_offset = layer_base + self.weight_layout.o_proj_offset;
 
         @memset(self.q_proj, 0);
         @memset(self.k_proj, 0);
@@ -554,8 +554,8 @@ pub const Engine = struct {
     fn ffn(self: *Engine, input: []const f32, output: []f32) void {
         const hidden = self.config.hidden_dim;
         const ffn_h = self.config.ffn_hidden_dim;
-        const w1_offset = (self.current_layer_base + self.weight_layout.ffn_weight1_offset) / @sizeOf(types.fp16_t);
-        const w2_offset = (self.current_layer_base + self.weight_layout.ffn_weight2_offset) / @sizeOf(types.fp16_t);
+        const w1_offset = self.current_layer_base + self.weight_layout.ffn_weight1_offset;
+        const w2_offset = self.current_layer_base + self.weight_layout.ffn_weight2_offset;
 
         switch (self.config.ffn_type) {
             .dense => {
@@ -567,7 +567,7 @@ pub const Engine = struct {
                 matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w2_offset..].ptr, self.ffn_scratch.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 7));
             },
             .gated_swi_glu, .gated_gelu => {
-                const w3_offset = (self.current_layer_base + self.weight_layout.ffn_weight3_offset) / @sizeOf(types.fp16_t);
+                const w3_offset = self.current_layer_base + self.weight_layout.ffn_weight3_offset;
                 const layer_idx_u32: u32 = @intCast((self.current_layer_base - self.weight_layout.token_embedding_size) / self.weight_layout.per_layer_size);
                 @memset(self.ffn_gate_buf[0..ffn_h], 0);
                 @memset(self.ffn_up_buf[0..ffn_h], 0);
@@ -705,7 +705,7 @@ fn makeTinyConfig(num_layers: u32, max_seq_len: u32) config.ModelConfig {
 }
 
 test "Engine init" {
-    var eng = try Engine.init(makeTinyConfig(1, 8), std.testing.allocator);
+    var eng = try Engine.init(makeTinyConfig(1, 8), null, std.testing.allocator);
     defer eng.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 4), eng.config.hidden_dim);
     try std.testing.expectEqual(@as(usize, 4), eng.logits.len);
@@ -713,7 +713,7 @@ test "Engine init" {
 
 test "Engine forward returns vocab logits and uses last token embedding" {
     const cfg = makeTinyConfig(0, 0);
-    var eng = try Engine.init(cfg, std.testing.allocator);
+    var eng = try Engine.init(cfg, null, std.testing.allocator);
     defer eng.deinit(std.testing.allocator);
 
     // Initialize weight_pool to zeros (as bytes)
@@ -760,7 +760,7 @@ test "Engine forward returns vocab logits and uses last token embedding" {
 
 test "Engine forward advances kv cache across calls" {
     const cfg = makeTinyConfig(1, 8);
-    var eng = try Engine.init(cfg, std.testing.allocator);
+    var eng = try Engine.init(cfg, null, std.testing.allocator);
     defer eng.deinit(std.testing.allocator);
 
     // Fill weight_pool with fp16(0.1) pattern = 0x2E66 (little endian: 0x66, 0x2E)
@@ -783,7 +783,7 @@ test "Engine forward advances kv cache across calls" {
 
 test "Engine lazily initializes kv cache on first forward" {
     const cfg = makeTinyConfig(1, 8);
-    var eng = try Engine.init(cfg, std.testing.allocator);
+    var eng = try Engine.init(cfg, null, std.testing.allocator);
     defer eng.deinit(std.testing.allocator);
 
     try std.testing.expect(eng.kv_cache == null);

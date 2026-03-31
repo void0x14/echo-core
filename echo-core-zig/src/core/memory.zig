@@ -1,6 +1,71 @@
 const std = @import("std");
 const types = @import("types.zig");
 const config = @import("config.zig");
+const gguf = @import("../gguf/reader.zig");
+
+/// Compute byte size for a tensor given its shape and dtype
+pub fn computeTensorQuantizedBytes(shape: []const u64, dtype: gguf.GGMLType) usize {
+    var n_elements: u64 = 1;
+    for (shape) |dim| n_elements *= dim;
+
+    return switch (dtype) {
+        .f32 => n_elements * 4,
+        .f16, .bf16 => n_elements * 2,
+        .f64 => n_elements * 8,
+        .i8 => n_elements,
+        .i16 => n_elements * 2,
+        .i32 => n_elements * 4,
+        .i64 => n_elements * 8,
+        else => blk: {
+            // Quantized types: calculate blocks
+            const block_bytes = blockSizeBytes(dtype);
+            const block_elems = blockElements(dtype);
+            if (block_bytes == 0 or block_elems == 0) unreachable;
+            const n_blocks = (n_elements + block_elems - 1) / block_elems;
+            break :blk n_blocks * block_bytes;
+        },
+    };
+}
+
+fn blockSizeBytes(dtype: gguf.GGMLType) u64 {
+    return switch (dtype) {
+        .q4_0 => 18, // 32 elements, 16 bytes quants + 2 bytes scale
+        .q4_1 => 20, // 32 elements, 16 bytes quants + 2 bytes scale + 2 bytes min
+        .q5_0 => 22, // 32 elements, 20 bytes quants + 2 bytes scale
+        .q5_1 => 24, // 32 elements, 20 bytes quants + 2 bytes scale + 2 bytes min
+        .q8_0 => 34, // 32 elements, 32 bytes quants + 2 bytes scale
+        .q8_1 => 36, // 32 elements, 32 bytes quants + 2 bytes scale + 2 bytes min
+        .q2_k => 84, // 256 elements, super-block
+        .q3_k => 110, // 256 elements, super-block
+        .q4_k => 144, // 256 elements, super-block
+        .q5_k => 176, // 256 elements, super-block
+        .q6_k => 210, // 256 elements, super-block
+        .q8_k => 34, // 32 elements (note: different from Q8_0)
+        .iq2_xxs => 66,
+        .iq2_xs => 74,
+        .iq2_s => 74,
+        .iq3_xxs => 102,
+        .iq3_s => 109,
+        .iq1_s => 42,
+        .iq1_m => 58,
+        .iq4_nl => 144,
+        .iq4_xs => 136,
+        .tq1_0 => 34,
+        .tq2_0 => 66,
+        .mxfp4 => 32,
+        else => 0,
+    };
+}
+
+fn blockElements(dtype: gguf.GGMLType) u64 {
+    return switch (dtype) {
+        .q4_0, .q4_1, .q5_0, .q5_1, .q8_0, .q8_1, .q8_k => 32,
+        .q2_k, .q3_k, .q4_k, .q5_k, .q6_k => 256,
+        .iq2_xxs, .iq2_xs, .iq2_s, .iq3_xxs, .iq3_s, .iq1_s, .iq1_m, .iq4_nl, .iq4_xs => 256,
+        .tq1_0, .tq2_0, .mxfp4 => 32,
+        else => 1,
+    };
+}
 
 pub const AlignedMemoryPool = struct {
     base: [*]u8,
@@ -159,7 +224,7 @@ pub const WeightLayout = struct {
     // Per-layer type tracking (dynamically allocated)
     layer_types: []config.ModelConfig.LayerType,
 
-    pub fn compute(config_: anytype, allocator: std.mem.Allocator) !WeightLayout {
+    pub fn compute(config_: anytype, reader_opt: ?*const gguf.Reader, allocator: std.mem.Allocator) !WeightLayout {
         const hidden = config_.hidden_dim;
         const vocab = config_.vocab_size;
         const kv_dim = config_.num_kv_heads * config_.head_dim;
@@ -177,65 +242,81 @@ pub const WeightLayout = struct {
         var layout: WeightLayout = undefined;
         layout.layer_types = layer_types;
 
+        // Helper to get actual tensor size or fallback to FP16
+        const getTensorBytes = struct {
+            fn call(r: ?*const gguf.Reader, tensor_name: []const u8, fallback_elements: u64) usize {
+                if (r) |reader| {
+                    if (reader.tensors.get(tensor_name)) |tensor_info| {
+                        return computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                    }
+                }
+                return fallback_elements * sizeof_fp16;
+            }
+        }.call;
+
+        // Helper to get per-layer tensor size by looking up layer 0
+        const getLayerTensorBytes = struct {
+            fn call(r: ?*const gguf.Reader, suffix: []const u8, fallback_elements: u64) usize {
+                if (r) |reader| {
+                    var name_buf: [64]u8 = undefined;
+                    const tensor_name = std.fmt.bufPrint(&name_buf, "blk.0.{s}", .{suffix}) catch return fallback_elements * @sizeOf(types.fp16_t);
+                    if (reader.tensors.get(tensor_name)) |tensor_info| {
+                        return computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                    }
+                }
+                return fallback_elements * @sizeOf(types.fp16_t);
+            }
+        }.call;
+
         layout.token_embedding_offset = 0;
-        layout.token_embedding_size = vocab * hidden * sizeof_fp16;
+        layout.token_embedding_size = getTensorBytes(reader_opt, "token_embd.weight", vocab * hidden);
 
         var offset: usize = 0;
         layout.norm_weight_offset = offset;
-        offset += hidden * sizeof_fp16;
+        offset += hidden * sizeof_fp16; // attn_norm is usually FP16/FP32
 
         layout.q_proj_offset = offset;
-        // Hybrid modeller için: q_proj = hidden × q_dim (matmul input×output)
-        // Attention layer: attn_q.weight = [hidden, q_dim] (hidden input, q_dim output)
         const q_dim = config_.num_heads * config_.head_dim;
-        // per_layer_size hem attention hem SSM layer'ları karşılayacak kadar büyük olmalı
-        // Attention layer: q_proj = hidden × q_dim
-        // SSM layer: ssm_conv1d = ssm_conv_kernel × hidden (ama farklı bir bölgede)
-        // max_slot_size = max(hidden × q_dim, ssm_conv_kernel × hidden)
-        const max_proj_size = hidden * q_dim;
-        offset += max_proj_size * sizeof_fp16;
+        offset += getLayerTensorBytes(reader_opt, "attn_q.weight", hidden * q_dim);
 
         layout.k_proj_offset = offset;
-        offset += kv_dim * hidden * sizeof_fp16;
+        offset += getLayerTensorBytes(reader_opt, "attn_k.weight", hidden * kv_dim);
 
         layout.v_proj_offset = offset;
-        offset += kv_dim * hidden * sizeof_fp16;
+        offset += getLayerTensorBytes(reader_opt, "attn_v.weight", hidden * kv_dim);
 
         layout.o_proj_offset = offset;
-        // o_proj = q_dim × hidden (output projection)
-        offset += q_dim * hidden * sizeof_fp16;
+        offset += getLayerTensorBytes(reader_opt, "attn_output.weight", q_dim * hidden);
 
         layout.ffn_norm_offset = offset;
-        offset += hidden * sizeof_fp16;
+        offset += hidden * sizeof_fp16; // ffn_norm is usually FP16/FP32
 
         layout.ffn_weight1_offset = offset;
         if (config_.ffn_type == .dense) {
-            offset += hidden * ffn_h * sizeof_fp16;
+            offset += getLayerTensorBytes(reader_opt, "ffn_up.weight", hidden * ffn_h);
             layout.ffn_weight2_offset = offset;
-            offset += ffn_h * hidden * sizeof_fp16;
+            offset += getLayerTensorBytes(reader_opt, "ffn_down.weight", ffn_h * hidden);
             layout.ffn_weight3_offset = 0;
         } else {
-            offset += hidden * ffn_h * sizeof_fp16;
+            offset += getLayerTensorBytes(reader_opt, "ffn_gate.weight", hidden * ffn_h);
             layout.ffn_weight2_offset = offset;
-            offset += hidden * ffn_h * sizeof_fp16;
+            offset += getLayerTensorBytes(reader_opt, "ffn_up.weight", hidden * ffn_h);
             layout.ffn_weight3_offset = offset;
-            offset += ffn_h * hidden * sizeof_fp16;
+            offset += getLayerTensorBytes(reader_opt, "ffn_down.weight", ffn_h * hidden);
         }
 
         layout.attn_q_norm_offset = offset;
-        offset += config_.head_dim * sizeof_fp16;
+        offset += config_.head_dim * sizeof_fp16; // q_norm is usually FP16
         layout.attn_k_norm_offset = offset;
-        offset += config_.head_dim * sizeof_fp16;
+        offset += config_.head_dim * sizeof_fp16; // k_norm is usually FP16
 
         layout.per_layer_size = offset;
 
-        // Calculate SSM per-layer size
-        // Safety margin removed: detectActualDimensions() now detects actual tensor sizes
+        // Calculate SSM per-layer size using actual tensor sizes if available
         const ssm_conv_kernel = config_.ssm_conv_kernel;
         const ssm_inner = config_.ssm_inner_size;
         const dt_rank = config_.ssm_dt_rank;
 
-        // For ssm_out, use max of ffn_hidden_dim/2 or 2x hidden
         const ssm_out_hidden_dim = if (config_.ffn_hidden_dim > hidden * 2 and config_.ffn_type != .dense)
             config_.ffn_hidden_dim / 2
         else
@@ -243,29 +324,28 @@ pub const WeightLayout = struct {
 
         var ssm_offset: usize = 0;
         layout.ssm_out_offset = ssm_offset;
-        // ssm_out: hidden × ssm_out_hidden_dim
-        ssm_offset += hidden * ssm_out_hidden_dim * sizeof_fp16;
+        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_out.weight", hidden * ssm_out_hidden_dim);
 
         layout.ssm_x_offset = ssm_offset;
-        ssm_offset += hidden * hidden * sizeof_fp16;
+        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_x.weight", hidden * hidden);
 
         layout.ssm_dt_offset = ssm_offset;
-        ssm_offset += hidden * dt_rank * sizeof_fp16;
+        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_dt.weight", hidden * dt_rank);
 
         layout.ssm_A_offset = ssm_offset;
-        ssm_offset += ssm_inner * sizeof_fp16;
+        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_A.weight", ssm_inner);
 
         layout.ssm_B_offset = ssm_offset;
-        ssm_offset += hidden * ssm_inner * sizeof_fp16;
+        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_B.weight", hidden * ssm_inner);
 
         layout.ssm_C_offset = ssm_offset;
-        ssm_offset += hidden * ssm_inner * sizeof_fp16;
+        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_C.weight", hidden * ssm_inner);
 
         layout.ssm_D_offset = ssm_offset;
-        ssm_offset += hidden * sizeof_fp16;
+        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_D.weight", hidden);
 
         layout.ssm_conv1d_offset = ssm_offset;
-        ssm_offset += ssm_conv_kernel * hidden * sizeof_fp16;
+        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_conv1d.weight", ssm_conv_kernel * hidden);
 
         layout.ssm_conv1d_bias_offset = ssm_offset;
         ssm_offset += hidden * sizeof_fp16;
@@ -273,13 +353,10 @@ pub const WeightLayout = struct {
         layout.ssm_per_layer_size = ssm_offset;
 
         // Calculate total size including space for SSM weights
-        // SSM weights are placed after output projection, one region per potential SSM layer
         layout.final_norm_offset = layout.token_embedding_size + layout.per_layer_size * config_.num_layers;
         layout.output_proj_offset = layout.final_norm_offset + hidden * sizeof_fp16;
-        layout.ssm_region_offset = layout.output_proj_offset + hidden * vocab * sizeof_fp16;
+        layout.ssm_region_offset = layout.output_proj_offset + vocab * hidden * sizeof_fp16;
 
-        // Use actual SSM layer count if available (detected by detectActualDimensions)
-        // Otherwise fall back to num_layers for backward compatibility with pure SSM models
         const num_ssm_layers = if (config_.num_ssm_layers > 0) config_.num_ssm_layers else config_.num_layers;
         const ssm_region_size = layout.ssm_per_layer_size * num_ssm_layers;
         layout.total_size = layout.ssm_region_offset + ssm_region_size;
@@ -317,13 +394,14 @@ test "WeightLayout compute" {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .quantization_scale = 1.0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,
         .ssm_dt_rank = 256,
         .ssm_dt_scale = 1.0,
     };
-    var layout = try WeightLayout.compute(test_config, std.testing.allocator);
+    var layout = try WeightLayout.compute(test_config, null, std.testing.allocator);
     defer layout.deinit(std.testing.allocator);
     try std.testing.expect(layout.token_embedding_size > 0);
     try std.testing.expect(layout.per_layer_size > 0);

@@ -55,9 +55,22 @@ pub fn matvecDispatchQuant(
     switch (dtype) {
         .f16, .f32 => matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .q8_0 => matvecQ80(W, x, y, M, K),
+        .q6_k => {
+            // Q6_K not yet optimized - treat as fp16 for now
+            std.debug.print("WARN: Q6_K not optimized, treating as FP16 (may produce incorrect results)\n", .{});
+            matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K);
+        },
         .q4_k => matvecQ4K(W, x, y, M, K),
         .q2_k => matvecQ2K(W, x, y, M, K),
-        else => unreachable,
+        .iq2_xs, .iq4_xs => {
+            // IQ types not yet optimized - treat as fp16 for now
+            std.debug.print("WARN: {s} not optimized, treating as FP16 (may produce incorrect results)\n", .{@tagName(dtype)});
+            matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K);
+        },
+        else => {
+            std.debug.print("WARN: unsupported dtype {s}, falling back to FP16 (may produce incorrect results)\n", .{@tagName(dtype)});
+            matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K);
+        },
     }
 }
 
