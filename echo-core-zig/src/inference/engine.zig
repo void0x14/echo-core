@@ -3,6 +3,7 @@ const config = @import("../core/config.zig");
 const memory = @import("../core/memory.zig");
 const types = @import("../core/types.zig");
 const matvec = @import("../kernels/matvec.zig");
+const qwen_linear = @import("../kernels/qwen_linear.zig");
 const ssm = @import("../kernels/ssm.zig");
 const tokenizer = @import("../tokenizer/tokenizer.zig");
 const kv_cache = @import("../kv_cache/cache.zig");
@@ -17,12 +18,51 @@ fn fp16SliceFromBytes(bytes: []u8) []types.fp16_t {
     return @as([*]types.fp16_t, @ptrCast(@alignCast(bytes.ptr)))[0..n_elements];
 }
 
+fn rowByteSize(cols: u32, dtype: gguf.GGMLType) usize {
+    return switch (dtype) {
+        .f16 => cols * @sizeOf(types.fp16_t),
+        .f32 => cols * @sizeOf(f32),
+        .q8_0 => (cols / 32) * 34,
+        else => cols * @sizeOf(types.fp16_t),
+    };
+}
+
+fn loadEmbeddingRowToF32(src: []const u8, dtype: gguf.GGMLType, cols: u32, dst: []f32) void {
+    switch (dtype) {
+        .f16 => {
+            const row = @as([*]const types.fp16_t, @ptrCast(@alignCast(src.ptr)))[0..cols];
+            types.fp16_to_fp32_row(row.ptr, dst.ptr, cols);
+        },
+        .f32 => {
+            const row = @as([*]const f32, @ptrCast(@alignCast(src.ptr)))[0..cols];
+            @memcpy(dst[0..cols], row);
+        },
+        .q8_0 => {
+            const block_stride: usize = 34;
+            const blocks_per_row = cols / 32;
+            for (0..blocks_per_row) |block_idx| {
+                const bp = src[block_idx * block_stride ..][0..block_stride];
+                const d = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+                const qs = @as([*]const i8, @ptrCast(bp.ptr + 2));
+                for (0..32) |j| {
+                    dst[block_idx * 32 + j] = d * @as(f32, @floatFromInt(qs[j]));
+                }
+            }
+        },
+        else => unreachable,
+    }
+}
+
 /// Get dtype for a layer tensor (Q, K, V, O projections, FFN weights)
+const layer_slot_stride: u32 = 19;
+
 fn dtypeForTensor(weight_dtypes: []const gguf.GGMLType, layer_idx: u32, tensor_idx: u32) gguf.GGMLType {
-    // Slot layout: 0 = token_embedding, 1..(num_layers*19) = layer tensors, last 2 = final_norm, output_proj
-    // Per layer (11 attention slots): 0=attn_norm, 1=q_proj, 2=k_proj, 3=v_proj, 4=o_proj, 5=ffn_norm, 6=ffn_w1, 7=ffn_w2, 8=ffn_w3, 9=attn_q_norm, 10=attn_k_norm
-    // Per layer (8 SSM slots, if applicable): 11=ssm_out, 12=ssm_x, 13=ssm_dt, 14=ssm_A, 15=ssm_B, 16=ssm_C, 17=ssm_D, 18=ssm_conv1d
-    const slot = 1 + layer_idx * 11 + tensor_idx;
+    const slot = 1 + layer_idx * layer_slot_stride + tensor_idx;
+    return weight_dtypes[slot];
+}
+
+fn dtypeForLayerSlot(weight_dtypes: []const gguf.GGMLType, layer_idx: u32, slot_idx: u32) gguf.GGMLType {
+    const slot = 1 + layer_idx * layer_slot_stride + slot_idx;
     return weight_dtypes[slot];
 }
 
@@ -47,6 +87,7 @@ pub const Engine = struct {
     weight_dtypes: []gguf.GGMLType,
     kv_cache: ?kv_cache.KVCache,
     ssm_states: []ssm.SSMState, // Per-layer SSM states (only for SSM layers)
+    qwen_states: []qwen_linear.QwenLinearState,
     hidden_state: []f32,
     residual: []f32,
     attn_out: []f32,
@@ -69,6 +110,12 @@ pub const Engine = struct {
     ssm_tmp_dt: []f32,
     ssm_tmp_B: []f32,
     ssm_tmp_C: []f32,
+    qwen_tmp_mixed_qkv: []f32,
+    qwen_tmp_conv_out: []f32,
+    qwen_tmp_z: []f32,
+    qwen_tmp_core: []f32,
+    qwen_tmp_alpha: []f32,
+    qwen_tmp_beta: []f32,
     current_layer_base: usize,
     seq_pos: u32,
 
@@ -136,6 +183,10 @@ pub const Engine = struct {
         errdefer allocator.free(ssm_states);
         @memset(ssm_states, std.mem.zeroes(ssm.SSMState));
 
+        const qwen_states = try allocator.alloc(qwen_linear.QwenLinearState, cfg.num_layers);
+        errdefer allocator.free(qwen_states);
+        @memset(qwen_states, std.mem.zeroes(qwen_linear.QwenLinearState));
+
         const ssm_tmp_x = try allocator.alloc(f32, if (cfg.hidden_dim > 0) cfg.hidden_dim else 1);
         errdefer allocator.free(ssm_tmp_x);
         const ssm_tmp_z = try allocator.alloc(f32, if (cfg.hidden_dim > 0) cfg.hidden_dim else 1);
@@ -146,6 +197,19 @@ pub const Engine = struct {
         errdefer allocator.free(ssm_tmp_B);
         const ssm_tmp_C = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size else 1);
         errdefer allocator.free(ssm_tmp_C);
+
+        const qwen_tmp_mixed_qkv = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size * 2 else 1);
+        errdefer allocator.free(qwen_tmp_mixed_qkv);
+        const qwen_tmp_conv_out = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size * 2 else 1);
+        errdefer allocator.free(qwen_tmp_conv_out);
+        const qwen_tmp_z = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size else 1);
+        errdefer allocator.free(qwen_tmp_z);
+        const qwen_tmp_core = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size else 1);
+        errdefer allocator.free(qwen_tmp_core);
+        const qwen_tmp_alpha = try allocator.alloc(f32, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1);
+        errdefer allocator.free(qwen_tmp_alpha);
+        const qwen_tmp_beta = try allocator.alloc(f32, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1);
+        errdefer allocator.free(qwen_tmp_beta);
 
         @memset(hidden_state, 0);
         @memset(residual, 0);
@@ -168,6 +232,12 @@ pub const Engine = struct {
         @memset(ssm_tmp_dt, 0);
         @memset(ssm_tmp_B, 0);
         @memset(ssm_tmp_C, 0);
+        @memset(qwen_tmp_mixed_qkv, 0);
+        @memset(qwen_tmp_conv_out, 0);
+        @memset(qwen_tmp_z, 0);
+        @memset(qwen_tmp_core, 0);
+        @memset(qwen_tmp_alpha, 0);
+        @memset(qwen_tmp_beta, 0);
 
         return .{
             .allocator = allocator,
@@ -177,6 +247,7 @@ pub const Engine = struct {
             .weight_dtypes = weight_dtypes,
             .kv_cache = cache,
             .ssm_states = ssm_states,
+            .qwen_states = qwen_states,
             .hidden_state = hidden_state,
             .residual = residual,
             .attn_out = attn_out,
@@ -198,6 +269,12 @@ pub const Engine = struct {
             .ssm_tmp_dt = ssm_tmp_dt,
             .ssm_tmp_B = ssm_tmp_B,
             .ssm_tmp_C = ssm_tmp_C,
+            .qwen_tmp_mixed_qkv = qwen_tmp_mixed_qkv,
+            .qwen_tmp_conv_out = qwen_tmp_conv_out,
+            .qwen_tmp_z = qwen_tmp_z,
+            .qwen_tmp_core = qwen_tmp_core,
+            .qwen_tmp_alpha = qwen_tmp_alpha,
+            .qwen_tmp_beta = qwen_tmp_beta,
             .current_layer_base = 0,
             .seq_pos = 0,
         };
@@ -229,6 +306,12 @@ pub const Engine = struct {
         allocator.free(self.ssm_tmp_dt);
         allocator.free(self.ssm_tmp_B);
         allocator.free(self.ssm_tmp_C);
+        allocator.free(self.qwen_tmp_mixed_qkv);
+        allocator.free(self.qwen_tmp_conv_out);
+        allocator.free(self.qwen_tmp_z);
+        allocator.free(self.qwen_tmp_core);
+        allocator.free(self.qwen_tmp_alpha);
+        allocator.free(self.qwen_tmp_beta);
 
         // Free SSM states
         for (self.ssm_states) |*state| {
@@ -237,11 +320,23 @@ pub const Engine = struct {
             }
         }
         allocator.free(self.ssm_states);
+
+        for (self.qwen_states) |*state| {
+            if (state.conv_state.len > 0 or state.recurrent_state.len > 0) {
+                state.deinit(allocator);
+            }
+        }
+        allocator.free(self.qwen_states);
     }
 
     pub fn reset(self: *Engine) void {
         if (self.kv_cache) |*cache| cache.reset();
         for (self.ssm_states) |*state| {
+            if (state.conv_state.len > 0) {
+                state.reset();
+            }
+        }
+        for (self.qwen_states) |*state| {
             if (state.conv_state.len > 0) {
                 state.reset();
             }
@@ -267,10 +362,11 @@ pub const Engine = struct {
 
         const hidden = self.config.hidden_dim;
         const vocab = self.config.vocab_size;
-        const embed_byte_offset = self.weight_layout.token_embedding_offset + @as(usize, token_id) * hidden * @sizeOf(types.fp16_t);
-        const emb_bytes = self.weight_pool[embed_byte_offset..][0 .. hidden * @sizeOf(types.fp16_t)];
-        const emb_row = fp16SliceFromBytes(emb_bytes);
-        types.fp16_to_fp32_row(emb_row.ptr, self.hidden_state.ptr, hidden);
+        const embedding_dtype = dtypeForGlobal(self.weight_dtypes, 0);
+        const embedding_row_bytes = rowByteSize(hidden, embedding_dtype);
+        const embed_byte_offset = self.weight_layout.token_embedding_offset + @as(usize, token_id) * embedding_row_bytes;
+        const emb_bytes = self.weight_pool[embed_byte_offset..][0..embedding_row_bytes];
+        loadEmbeddingRowToF32(emb_bytes, embedding_dtype, hidden, self.hidden_state);
 
         for (0..self.config.num_layers) |layer_idx| {
             self.layerForward(@intCast(layer_idx), self.hidden_state, self.hidden_state);
@@ -285,7 +381,8 @@ pub const Engine = struct {
         const output_proj_byte_offset = self.weight_layout.output_proj_offset;
         const output_proj_size = self.weight_layout.ssm_region_offset - self.weight_layout.output_proj_offset;
         const output_proj_bytes = self.weight_pool[output_proj_byte_offset..][0..output_proj_size];
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, output_proj_bytes.ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, dtypeForGlobal(self.weight_dtypes, 2));
+        const output_dtype = dtypeForGlobal(self.weight_dtypes, 2);
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, output_proj_bytes.ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, output_dtype);
 
         self.seq_pos += 1;
         return self.logits;
@@ -319,6 +416,26 @@ pub const Engine = struct {
 
             // FFN part of SSM layer (optional, depending on architecture)
             @memcpy(self.residual, output);
+            self.ffn(layer_idx, output, self.ffn_out);
+            for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
+        } else if (layer_type == .qwen_linear) {
+            const layer_base = self.weight_layout.layer_offsets[layer_idx];
+            self.current_layer_base = layer_base;
+
+            const layer_norm_byte_offset = layer_base + self.weight_layout.norm_weight_offset;
+            const layer_norm_bytes = self.weight_pool[layer_norm_byte_offset..][0 .. hidden * @sizeOf(types.fp16_t)];
+            const layer_norm = fp16SliceFromBytes(layer_norm_bytes);
+            const ffn_norm_byte_offset = layer_base + self.weight_layout.ffn_norm_offset;
+            const ffn_norm_bytes = self.weight_pool[ffn_norm_byte_offset..][0 .. hidden * @sizeOf(types.fp16_t)];
+            const ffn_norm = fp16SliceFromBytes(ffn_norm_bytes);
+
+            @memcpy(self.residual, input);
+            self.norm(input, output, layer_norm);
+            self.qwenLinearLayerForward(layer_idx, output, self.attn_proj);
+            for (0..hidden) |i| output[i] = self.residual[i] + self.attn_proj[i];
+
+            @memcpy(self.residual, output);
+            self.norm(output, output, ffn_norm);
             self.ffn(layer_idx, output, self.ffn_out);
             for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
         } else {
@@ -556,6 +673,76 @@ pub const Engine = struct {
             self.ssm_tmp_B,
             self.ssm_tmp_C,
         );
+    }
+
+    fn qwenLinearLayerForward(self: *Engine, layer_idx: u32, input: []const f32, output: []f32) void {
+        const hidden = self.config.hidden_dim;
+        const layer_base = self.weight_layout.layer_offsets[layer_idx];
+        const qkv_offset = layer_base + self.weight_layout.q_proj_offset;
+        const qkv_end = layer_base + self.weight_layout.k_proj_offset;
+        const z_offset = layer_base + self.weight_layout.o_proj_offset;
+        const z_end = layer_base + self.weight_layout.ffn_norm_offset;
+
+        const qwen_base = packedSsmBase(&self.weight_layout, layer_idx);
+        const out_offset = qwen_base + self.weight_layout.ssm_out_offset;
+        const out_end = qwen_base + self.weight_layout.ssm_x_offset;
+        const alpha_offset = qwen_base + self.weight_layout.ssm_dt_offset;
+        const alpha_end = qwen_base + self.weight_layout.ssm_A_offset;
+        const beta_offset = qwen_base + self.weight_layout.ssm_B_offset;
+        const beta_end = qwen_base + self.weight_layout.ssm_C_offset;
+        const a_offset = qwen_base + self.weight_layout.ssm_A_offset;
+        const a_end = qwen_base + self.weight_layout.ssm_B_offset;
+        const dt_bias_offset = qwen_base + self.weight_layout.ssm_conv1d_bias_offset;
+        const dt_bias_end = qwen_base + self.weight_layout.ssm_per_layer_size;
+        const conv_offset = qwen_base + self.weight_layout.ssm_conv1d_offset;
+        const conv_end = qwen_base + self.weight_layout.ssm_conv1d_bias_offset;
+        const norm_offset = qwen_base + self.weight_layout.ssm_D_offset;
+        const norm_end = qwen_base + self.weight_layout.ssm_conv1d_offset;
+
+        const value_dim = self.config.ssm_inner_size;
+        const num_v_heads = self.config.ssm_dt_rank;
+        const head_v_dim = if (num_v_heads > 0) value_dim / num_v_heads else 0;
+        const key_dim = value_dim / 2;
+        const num_k_heads = if (head_v_dim > 0) key_dim / head_v_dim else 0;
+
+        if (self.qwen_states[layer_idx].conv_state.len == 0) {
+            self.qwen_states[layer_idx] = qwen_linear.QwenLinearState.init(
+                value_dim * 2,
+                self.config.ssm_conv_kernel,
+                num_v_heads,
+                if (num_k_heads > 0) key_dim / num_k_heads else 0,
+                head_v_dim,
+                self.allocator,
+            ) catch unreachable;
+        }
+
+        qwen_linear.forward(
+            self.config,
+            input,
+            output,
+            &self.qwen_states[layer_idx],
+            .{
+                .qkv = .{ .bytes = self.weight_pool[qkv_offset..qkv_end], .dtype = dtypeForTensor(self.weight_dtypes, layer_idx, 1) },
+                .z = .{ .bytes = self.weight_pool[z_offset..z_end], .dtype = dtypeForTensor(self.weight_dtypes, layer_idx, 4) },
+                .alpha = .{ .bytes = self.weight_pool[alpha_offset..alpha_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 12) },
+                .beta = .{ .bytes = self.weight_pool[beta_offset..beta_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 13) },
+                .a_log = .{ .bytes = self.weight_pool[a_offset..a_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 14) },
+                .dt_bias = .{ .bytes = self.weight_pool[dt_bias_offset..dt_bias_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 15) },
+                .conv1d = .{ .bytes = self.weight_pool[conv_offset..conv_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 16) },
+                .norm = .{ .bytes = self.weight_pool[norm_offset..norm_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 17) },
+                .out = .{ .bytes = self.weight_pool[out_offset..out_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 11) },
+            },
+            .{
+                .mixed_qkv = self.qwen_tmp_mixed_qkv,
+                .conv_out = self.qwen_tmp_conv_out,
+                .z = self.qwen_tmp_z,
+                .core = self.qwen_tmp_core,
+                .alpha = self.qwen_tmp_alpha,
+                .beta = self.qwen_tmp_beta,
+            },
+        );
+
+        _ = hidden;
     }
 
     fn ffn(self: *Engine, layer_idx: u32, input: []const f32, output: []f32) void {

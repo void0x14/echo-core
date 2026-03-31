@@ -607,11 +607,11 @@ pub const WeightLayout = struct {
 };
 
 pub fn ssmPackedLayerIndex(layer_types: []const config.ModelConfig.LayerType, layer_idx: usize) ?usize {
-    if (layer_types[layer_idx] != .ssm) return null;
+    if (layer_types[layer_idx] == .attention) return null;
 
     var packed_idx: usize = 0;
     for (layer_types[0..layer_idx]) |layer_type| {
-        if (layer_type == .ssm) packed_idx += 1;
+        if (layer_type != .attention) packed_idx += 1;
     }
     return packed_idx;
 }
@@ -659,7 +659,7 @@ fn addTestTensor(reader: *gguf.Reader, name: []const u8, dtype: gguf.GGMLType, s
 }
 
 test "ssmPackedLayerIndex compacts sparse SSM layers" {
-    const layer_types = [_]config.ModelConfig.LayerType{ .ssm, .attention, .ssm, .attention, .ssm };
+    const layer_types = [_]config.ModelConfig.LayerType{ .ssm, .attention, .qwen_linear, .attention, .ssm };
 
     try std.testing.expectEqual(@as(?usize, 0), ssmPackedLayerIndex(&layer_types, 0));
     try std.testing.expectEqual(@as(?usize, null), ssmPackedLayerIndex(&layer_types, 1));

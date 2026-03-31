@@ -42,6 +42,7 @@ pub const ModelConfig = extern struct {
 
     pub const LayerType = enum(c_int) {
         attention,
+        qwen_linear,
         ssm,
     };
 };
@@ -104,7 +105,8 @@ test "ModelConfig enum values and ABI assumptions" {
     try std.testing.expectEqual(@as(c_int, 1), @intFromEnum(ModelConfig.NormType.rms_norm));
     try std.testing.expectEqual(@as(c_int, 2), @intFromEnum(ModelConfig.PosEncoding.alibi));
     try std.testing.expectEqual(@as(c_int, 0), @intFromEnum(ModelConfig.LayerType.attention));
-    try std.testing.expectEqual(@as(c_int, 1), @intFromEnum(ModelConfig.LayerType.ssm));
+    try std.testing.expectEqual(@as(c_int, 1), @intFromEnum(ModelConfig.LayerType.qwen_linear));
+    try std.testing.expectEqual(@as(c_int, 2), @intFromEnum(ModelConfig.LayerType.ssm));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.FFNType));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.NormType));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.PosEncoding));

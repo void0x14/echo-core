@@ -30,6 +30,32 @@ pub fn matvecFp16Fp32(
     }
 }
 
+pub fn matvecF32Fp32(
+    comptime TILE_K: u32,
+    comptime TILE_M: u32,
+    W: [*]const u8,
+    x: [*]const f32,
+    y: [*]f32,
+    M: u32,
+    K: u32,
+) void {
+    _ = TILE_K;
+    _ = TILE_M;
+    const W_f32: [*]const f32 = @ptrCast(@alignCast(W));
+    var m: u32 = 0;
+    while (m < M) : (m += 1) {
+        const W_row = W_f32 + @as(usize, m) * K;
+        var acc: f32 = 0;
+
+        var k: u32 = 0;
+        while (k < K) : (k += 1) {
+            acc += W_row[k] * x[k];
+        }
+
+        y[m] += acc;
+    }
+}
+
 pub fn matvecDispatch(
     W: [*]const u8,
     x: [*]const f32,
@@ -53,7 +79,8 @@ pub fn matvecDispatchQuant(
     dtype: gguf.GGMLType,
 ) void {
     switch (dtype) {
-        .f16, .f32 => matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K),
+        .f16 => matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K),
+        .f32 => matvecF32Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .q8_0 => matvecQ80(W, x, y, M, K),
         .q6_k => {
             // Q6_K not yet optimized - treat as fp16 for now
@@ -242,6 +269,21 @@ test "matvec basic" {
     try std.testing.expectEqual(y[1], 72.0);
     try std.testing.expectEqual(y[2], 108.0);
     try std.testing.expectEqual(y[3], 144.0);
+}
+
+test "matvec f32 basic" {
+    var W = [_]f32{
+        1, 1, 1, 1,
+        2, 2, 2, 2,
+    };
+    var x = [_]f32{ 1, 2, 3, 4 };
+    var y = [_]f32{ 0, 0 };
+
+    const W_bytes: [*]const u8 = @ptrCast(&W);
+    matvecF32Fp32(4, 2, W_bytes, &x, &y, 2, 4);
+
+    try std.testing.expectEqual(@as(f32, 10), y[0]);
+    try std.testing.expectEqual(@as(f32, 20), y[1]);
 }
 
 test "matvecQ4K matches canonical scale packing" {

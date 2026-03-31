@@ -183,7 +183,7 @@ pub const Reader = struct {
             });
         }
 
-        self.data_offset = std.mem.alignForward(u64, self.cursor, 32);
+        self.data_offset = std.mem.alignForward(u64, self.cursor, self.alignment);
 
         // Debug: Print tensor count and some tensor names
         std.debug.print("DEBUG: Loaded {d} tensors from GGUF file\n", .{self.tensors.count()});
@@ -314,7 +314,9 @@ pub const Reader = struct {
         if (self.prefixedLookup("ssm.inner_size")) |value| {
             if (self.numericAsU64(value)) |v| self.config.ssm_inner_size = @intCast(v);
         }
-        if (self.prefixedLookup("ssm.num_groups")) |value| {
+        if (self.prefixedLookup("ssm.group_count")) |value| {
+            if (self.numericAsU64(value)) |v| self.config.ssm_num_groups = @intCast(v);
+        } else if (self.prefixedLookup("ssm.num_groups")) |value| {
             if (self.numericAsU64(value)) |v| self.config.ssm_num_groups = @intCast(v);
         }
         if (self.prefixedLookup("ssm.time_step_rank")) |value| {
@@ -721,10 +723,73 @@ pub fn buildSyntheticGgufForTests(allocator: Allocator) ![]u8 {
     try appendU32LE(&bytes, @intFromEnum(GGMLType.f16));
     try appendU64LE(&bytes, 0);
 
-    const aligned_len = std.mem.alignForward(usize, bytes.items.len, 32);
+    const aligned_len = std.mem.alignForward(usize, bytes.items.len, 64);
     try bytes.ensureTotalCapacity(aligned_len + 128);
     while (bytes.items.len < aligned_len) try bytes.append(0);
     for (0..128) |_| try appendU8(&bytes, 0xAB);
+
+    return try bytes.toOwnedSlice();
+}
+
+pub fn buildSyntheticQwen35GgufForTests(allocator: Allocator) ![]u8 {
+    var bytes = ArrayList(u8).init(allocator);
+    errdefer bytes.deinit();
+
+    try appendU32LE(&bytes, GGUF_MAGIC);
+    try appendU32LE(&bytes, GGUF_VERSION);
+    try appendU64LE(&bytes, 1); // tensor count
+    try appendU64LE(&bytes, 9); // metadata count
+
+    try appendString(&bytes, "general.alignment");
+    try appendU32LE(&bytes, GGUF_VAL_UINT32);
+    try appendU32LE(&bytes, 32);
+
+    try appendString(&bytes, "qwen35.context_length");
+    try appendU32LE(&bytes, GGUF_VAL_UINT32);
+    try appendU32LE(&bytes, 262144);
+
+    try appendString(&bytes, "qwen35.embedding_length");
+    try appendU32LE(&bytes, GGUF_VAL_UINT32);
+    try appendU32LE(&bytes, 2560);
+
+    try appendString(&bytes, "qwen35.block_count");
+    try appendU32LE(&bytes, GGUF_VAL_UINT32);
+    try appendU32LE(&bytes, 32);
+
+    try appendString(&bytes, "qwen35.attention.head_count");
+    try appendU32LE(&bytes, GGUF_VAL_UINT32);
+    try appendU32LE(&bytes, 16);
+
+    try appendString(&bytes, "qwen35.attention.head_count_kv");
+    try appendU32LE(&bytes, GGUF_VAL_UINT32);
+    try appendU32LE(&bytes, 4);
+
+    try appendString(&bytes, "qwen35.attention.key_length");
+    try appendU32LE(&bytes, GGUF_VAL_UINT32);
+    try appendU32LE(&bytes, 256);
+
+    try appendString(&bytes, "qwen35.ssm.group_count");
+    try appendU32LE(&bytes, GGUF_VAL_UINT32);
+    try appendU32LE(&bytes, 16);
+
+    try appendString(&bytes, "tokenizer.ggml.tokens");
+    try appendU32LE(&bytes, GGUF_VAL_ARRAY);
+    try appendU32LE(&bytes, GGUF_VAL_STRING);
+    try appendU64LE(&bytes, 2);
+    try appendString(&bytes, "hello");
+    try appendString(&bytes, "world");
+
+    try appendString(&bytes, "blk.0.attn_qkv.weight");
+    try appendU32LE(&bytes, 2);
+    try appendU64LE(&bytes, 2560);
+    try appendU64LE(&bytes, 8192);
+    try appendU32LE(&bytes, @intFromEnum(GGMLType.q8_0));
+    try appendU64LE(&bytes, 0);
+
+    const aligned_len = std.mem.alignForward(usize, bytes.items.len, 32);
+    try bytes.ensureTotalCapacity(aligned_len + 22282240);
+    while (bytes.items.len < aligned_len) try bytes.append(0);
+    for (0..22282240) |_| try appendU8(&bytes, 0xCD);
 
     return try bytes.toOwnedSlice();
 }
@@ -808,4 +873,27 @@ test "Reader loadTensorInto matches loadTensor bytes" {
     try reader.loadTensorInto("blk.0.attn_q.weight", direct);
 
     try std.testing.expectEqualSlices(u8, raw, direct);
+}
+
+test "Reader honors qwen35 explicit key_length and group_count metadata" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const data = try buildSyntheticQwen35GgufForTests(std.testing.allocator);
+    defer std.testing.allocator.free(data);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "qwen35.gguf", .data = data });
+
+    var path_buf: [256]u8 = undefined;
+    const rel_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/qwen35.gguf", .{tmp.sub_path[0..]});
+
+    var reader = try Reader.openWithAllocator(rel_path, std.testing.allocator);
+    defer reader.deinit();
+
+    try std.testing.expectEqual(@as(u32, 2560), reader.config.hidden_dim);
+    try std.testing.expectEqual(@as(u32, 16), reader.config.num_heads);
+    try std.testing.expectEqual(@as(u32, 4), reader.config.num_kv_heads);
+    try std.testing.expectEqual(@as(u32, 256), reader.config.head_dim);
+    try std.testing.expectEqual(@as(u32, 16), reader.config.ssm_num_groups);
 }
