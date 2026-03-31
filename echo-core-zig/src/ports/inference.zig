@@ -608,12 +608,12 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
     const layer_info = try allocator.alloc(LayerInfo, cfg.num_layers);
     defer allocator.free(layer_info);
 
-    var cumulative_offset: usize = layout.token_embedding_size;
+    // Use pre-calculated layer offsets from memory.zig
     for (0..cfg.num_layers) |layer_idx| {
         const q_dim = cfg.num_heads * cfg.head_dim;
 
         var info = LayerInfo{
-            .base_offset = cumulative_offset,
+            .base_offset = layout.token_embedding_size + layout.layer_offsets[layer_idx],
             .norm_offset = 0,
             .norm_size = 0,
             .q_offset = 0,
@@ -709,9 +709,6 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
         rel_offset += info.k_norm_size;
 
         layer_info[layer_idx] = info;
-
-        // Update cumulative offset for next layer
-        cumulative_offset += @max(rel_offset, layout.per_layer_size);
     }
 
     // Token embedding (slot 0)

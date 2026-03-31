@@ -294,7 +294,7 @@ pub const Engine = struct {
         if (layer_type == .ssm) {
             // SSM layer path
             const layer_base = self.weight_layout.token_embedding_size +
-                @as(usize, layer_idx) * self.weight_layout.ssm_per_layer_size;
+                self.weight_layout.layer_offsets[layer_idx];
             self.current_layer_base = layer_base;
 
             // SSM layers don't have separate attn_norm/ffn_norm in traditional sense
@@ -314,7 +314,7 @@ pub const Engine = struct {
             for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
         } else {
             // Standard attention layer path
-            const layer_base = self.weight_layout.token_embedding_size + @as(usize, layer_idx) * self.weight_layout.per_layer_size;
+            const layer_base = self.weight_layout.token_embedding_size + self.weight_layout.layer_offsets[layer_idx];
             self.current_layer_base = layer_base;
 
             const layer_norm_byte_offset = layer_base + self.weight_layout.norm_weight_offset;
@@ -398,7 +398,7 @@ pub const Engine = struct {
         const head_dim = self.config.head_dim;
         const q_dim = num_heads * head_dim;
         const kv_dim = num_kv_heads * head_dim;
-        const layer_base = self.weight_layout.token_embedding_size + @as(usize, layer_idx) * self.weight_layout.per_layer_size;
+        const layer_base = self.weight_layout.token_embedding_size + self.weight_layout.layer_offsets[layer_idx];
 
         const q_proj_offset = layer_base + self.weight_layout.q_proj_offset;
         const k_proj_offset = layer_base + self.weight_layout.k_proj_offset;
@@ -505,7 +505,7 @@ pub const Engine = struct {
         const dt_scale = self.config.ssm_dt_scale;
 
         const layer_base = self.weight_layout.token_embedding_size +
-            @as(usize, layer_idx) * self.weight_layout.ssm_per_layer_size;
+            self.weight_layout.layer_offsets[layer_idx];
 
         // Ensure SSM state is initialized for this layer
         if (self.ssm_states[layer_idx].conv_state.len == 0) {
