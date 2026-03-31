@@ -74,3 +74,10 @@ test "ArrayList const get returns const pointer" {
     const const_list = list;
     try std.testing.expectEqual(*const i32, @TypeOf(const_list.get(0).?));
 }
+
+test "ArrayList empty pop returns null" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+}
