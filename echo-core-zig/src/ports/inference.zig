@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const config = @import("../core/config.zig");
+const memory = @import("../core/memory.zig");
 const types = @import("../core/types.zig");
 const engine = @import("../inference/engine.zig");
 const tokenizer = @import("../tokenizer/tokenizer.zig");
@@ -17,40 +18,49 @@ const CompatibilityTensor = struct {
 /// Detect actual tensor dimensions from GGUF file and update config.
 /// This fixes mismatches between metadata-reported dimensions and actual tensor shapes.
 fn detectActualDimensions(cfg: *config.ModelConfig, reader: *const gguf.Reader) void {
-    // Try to detect actual hidden_dim from attn_q.weight tensor
-    // Qwen 3.5 models report 4096 in metadata but tensors are 8192
-    if (reader.tensors.get("blk.0.attn_q.weight")) |tensor_info| {
-        if (tensor_info.shape.len >= 2) {
-            const actual_hidden_dim = @as(u32, @intCast(tensor_info.shape[1]));
-            if (actual_hidden_dim > cfg.hidden_dim) {
-                std.debug.print("INFO: Detected actual hidden_dim={d} from attn_q.weight, metadata reported {d}\n", .{ actual_hidden_dim, cfg.hidden_dim });
-                cfg.hidden_dim = actual_hidden_dim;
+    const metadata_hidden_dim = cfg.hidden_dim;
+    const metadata_derived_head_dim = if (cfg.num_heads > 0) metadata_hidden_dim / cfg.num_heads else 0;
+    const has_explicit_head_dim = cfg.head_dim != 0 and cfg.head_dim != metadata_derived_head_dim;
+
+    var detected_hidden_dim: ?u32 = null;
+    const hidden_sources = [_]struct { suffix: []const u8, axis: usize }{
+        .{ .suffix = "token_embd.weight", .axis = 0 },
+        .{ .suffix = "output_norm.weight", .axis = 0 },
+        .{ .suffix = "blk.0.attn_norm.weight", .axis = 0 },
+        .{ .suffix = "blk.0.post_attention_norm.weight", .axis = 0 },
+        .{ .suffix = "blk.0.attn_q.weight", .axis = 0 },
+        .{ .suffix = "blk.0.attn_qkv.weight", .axis = 0 },
+        .{ .suffix = "blk.0.attn_gate.weight", .axis = 0 },
+        .{ .suffix = "blk.0.ssm_out.weight", .axis = 1 },
+    };
+
+    for (hidden_sources) |source| {
+        if (reader.findTensorBySuffix(source.suffix)) |tensor_info| {
+            if (tensor_info.shape.len > source.axis) {
+                detected_hidden_dim = @as(u32, @intCast(tensor_info.shape[source.axis]));
+                break;
             }
         }
     }
 
-    // Try to detect SSM parameters from ssm_conv1d.weight
-    // Shape should be [conv_kernel, hidden_dim]
-    if (reader.tensors.get("blk.0.ssm_conv1d.weight")) |tensor_info| {
-        if (tensor_info.shape.len >= 2) {
-            const actual_conv_kernel = @as(u32, @intCast(tensor_info.shape[0]));
-            const actual_ssm_hidden = @as(u32, @intCast(tensor_info.shape[1]));
+    if (detected_hidden_dim) |actual_hidden_dim| {
+        if (actual_hidden_dim != 0 and actual_hidden_dim != cfg.hidden_dim) {
+            std.debug.print("INFO: Detected actual hidden_dim={d}, metadata reported {d}\n", .{ actual_hidden_dim, cfg.hidden_dim });
+            cfg.hidden_dim = actual_hidden_dim;
+        }
+    }
 
+    if (reader.findTensorBySuffix("blk.0.ssm_conv1d.weight")) |tensor_info| {
+        if (tensor_info.shape.len >= 1) {
+            const actual_conv_kernel = @as(u32, @intCast(tensor_info.shape[0]));
             if (actual_conv_kernel > cfg.ssm_conv_kernel) {
                 std.debug.print("INFO: Detected actual ssm_conv_kernel={d} from ssm_conv1d.weight, metadata reported {d}\n", .{ actual_conv_kernel, cfg.ssm_conv_kernel });
                 cfg.ssm_conv_kernel = actual_conv_kernel;
             }
-
-            if (actual_ssm_hidden > cfg.hidden_dim) {
-                std.debug.print("INFO: Detected actual SSM hidden_dim={d} from ssm_conv1d.weight, metadata reported {d}\n", .{ actual_ssm_hidden, cfg.hidden_dim });
-                cfg.hidden_dim = actual_ssm_hidden;
-            }
         }
     }
 
-    // Try to detect ssm_dt_rank from ssm_dt.weight
-    // Shape should be [hidden_dim, dt_rank]
-    if (reader.tensors.get("blk.0.ssm_dt.weight")) |tensor_info| {
+    if (reader.findTensorBySuffix("blk.0.ssm_dt.weight")) |tensor_info| {
         if (tensor_info.shape.len >= 2) {
             const actual_dt_rank = @as(u32, @intCast(tensor_info.shape[1]));
             if (actual_dt_rank > cfg.ssm_dt_rank) {
@@ -58,11 +68,25 @@ fn detectActualDimensions(cfg: *config.ModelConfig, reader: *const gguf.Reader) 
                 cfg.ssm_dt_rank = actual_dt_rank;
             }
         }
+    } else if (reader.findTensorBySuffix("blk.0.ssm_dt.bias")) |tensor_info| {
+        if (tensor_info.shape.len >= 1) {
+            const actual_dt_rank = @as(u32, @intCast(tensor_info.shape[0]));
+            if (actual_dt_rank > cfg.ssm_dt_rank) {
+                std.debug.print("INFO: Detected actual ssm_dt_rank={d} from ssm_dt.bias, metadata reported {d}\n", .{ actual_dt_rank, cfg.ssm_dt_rank });
+                cfg.ssm_dt_rank = actual_dt_rank;
+            }
+        }
     }
 
-    // Try to detect ssm_inner_size from ssm_A.weight
-    // Shape should be [inner_size] or [hidden_dim, inner_size]
-    if (reader.tensors.get("blk.0.ssm_A.weight")) |tensor_info| {
+    if (reader.findTensorBySuffix("blk.0.ssm_out.weight")) |tensor_info| {
+        if (tensor_info.shape.len >= 1) {
+            const actual_inner_size = @as(u32, @intCast(tensor_info.shape[0]));
+            if (actual_inner_size > cfg.ssm_inner_size) {
+                std.debug.print("INFO: Detected actual ssm_inner_size={d} from ssm_out.weight, metadata reported {d}\n", .{ actual_inner_size, cfg.ssm_inner_size });
+                cfg.ssm_inner_size = actual_inner_size;
+            }
+        }
+    } else if (reader.findTensorBySuffix("blk.0.ssm_A.weight")) |tensor_info| {
         if (tensor_info.shape.len >= 1) {
             const actual_inner_size = @as(u32, @intCast(tensor_info.shape[tensor_info.shape.len - 1]));
             if (actual_inner_size > cfg.ssm_inner_size) {
@@ -70,10 +94,17 @@ fn detectActualDimensions(cfg: *config.ModelConfig, reader: *const gguf.Reader) 
                 cfg.ssm_inner_size = actual_inner_size;
             }
         }
+    } else if (reader.findTensorBySuffix("blk.0.ssm_a")) |tensor_info| {
+        if (tensor_info.shape.len >= 1) {
+            const actual_inner_size = @as(u32, @intCast(tensor_info.shape[tensor_info.shape.len - 1]));
+            if (actual_inner_size > cfg.ssm_inner_size) {
+                std.debug.print("INFO: Detected actual ssm_inner_size={d} from ssm_a, metadata reported {d}\n", .{ actual_inner_size, cfg.ssm_inner_size });
+                cfg.ssm_inner_size = actual_inner_size;
+            }
+        }
     }
 
-    // Recalculate dependent values if hidden_dim changed
-    if (cfg.num_heads > 0) {
+    if (!has_explicit_head_dim and cfg.num_heads > 0) {
         cfg.head_dim = cfg.hidden_dim / cfg.num_heads;
     }
 
@@ -83,8 +114,8 @@ fn detectActualDimensions(cfg: *config.ModelConfig, reader: *const gguf.Reader) 
     var layer_idx: u32 = 0;
     while (layer_idx < cfg.num_layers) : (layer_idx += 1) {
         var tensor_name_buf: [64]u8 = undefined;
-        const tensor_name = std.fmt.bufPrint(&tensor_name_buf, "blk.{d}.ssm_conv1d.weight", .{layer_idx}) catch continue;
-        if (reader.tensors.get(tensor_name)) |_| {
+        const tensor_name = std.fmt.bufPrint(&tensor_name_buf, "blk.{d}.ssm_out.weight", .{layer_idx}) catch continue;
+        if (reader.findTensorBySuffix(tensor_name)) |_| {
             ssm_layer_count += 1;
         }
     }
@@ -121,11 +152,18 @@ pub const ModelLoader = struct {
         // Detect actual tensor dimensions before computing weight layout
         detectActualDimensions(&cfg, &reader);
 
+        std.debug.print("DEBUG: Initializing engine with config: hidden_dim={d}, num_layers={d}, num_ssm_layers={d}\n", .{ cfg.hidden_dim, cfg.num_layers, cfg.num_ssm_layers });
+
         var eng = try engine.Engine.init(cfg, &reader, allocator);
         errdefer eng.deinit(allocator);
+
+        std.debug.print("DEBUG: Engine initialized, weight_pool_size={d} bytes ({d:.2} MB)\n", .{ eng.weight_pool.len, @as(f64, @floatFromInt(eng.weight_pool.len)) / (1024.0 * 1024.0) });
+
         @memset(eng.weight_pool, types.fp32_to_fp16(0));
 
+        std.debug.print("DEBUG: Loading weights from reader...\n", .{});
         try loadWeightsFromReader(&eng, &reader, allocator);
+        std.debug.print("DEBUG: Weights loaded successfully\n", .{});
 
         return .{
             .config = cfg,
@@ -459,6 +497,16 @@ fn loadTensorIfPresent(
         // Compute actual byte size from tensor shape and dtype
         const actual_bytes = computeTensorByteSize(info.dtype, info.shape);
 
+        if (info.dtype == .f32 and actual_bytes == dst_bytes.len * 2) {
+            const raw = try reader.loadTensor(tensor_name);
+            defer reader.allocator.free(raw);
+
+            const dst_fp16 = @as([*]types.fp16_t, @ptrCast(@alignCast(dst_bytes.ptr)))[0 .. dst_bytes.len / @sizeOf(types.fp16_t)];
+            try copyTensorToFp16(dst_fp16, info.dtype, raw);
+            weight_dtypes[dtype_slot_index] = .f16;
+            return true;
+        }
+
         // Verify destination can hold the data
         if (actual_bytes > dst_bytes.len) {
             std.debug.print("WARN: tensor '{s}' needs {d} bytes but only {d} allocated\n", .{ tensor_name, actual_bytes, dst_bytes.len });
@@ -613,7 +661,7 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
         const q_dim = cfg.num_heads * cfg.head_dim;
 
         var info = LayerInfo{
-            .base_offset = layout.token_embedding_size + layout.layer_offsets[layer_idx],
+            .base_offset = layout.layer_offsets[layer_idx],
             .norm_offset = 0,
             .norm_size = 0,
             .q_offset = 0,
@@ -641,7 +689,7 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
         var rel_offset: usize = 0;
 
         // attn_norm
-        info.norm_size = getLayerTensorBytes(reader, layer_idx, "attn_norm.weight", hidden);
+        info.norm_size = hidden * @sizeOf(types.fp16_t);
         info.norm_offset = rel_offset;
         rel_offset += info.norm_size;
 
@@ -666,7 +714,7 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
         rel_offset += info.o_size;
 
         // ffn_norm
-        info.ffn_norm_size = getLayerTensorBytes(reader, layer_idx, "ffn_norm.weight", hidden);
+        info.ffn_norm_size = hidden * @sizeOf(types.fp16_t);
         info.ffn_norm_offset = rel_offset;
         rel_offset += info.ffn_norm_size;
 
@@ -700,11 +748,11 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
         }
 
         // q_norm and k_norm
-        info.q_norm_size = getLayerTensorBytes(reader, layer_idx, "attn_q_norm.weight", cfg.head_dim);
+        info.q_norm_size = cfg.head_dim * @sizeOf(types.fp16_t);
         info.q_norm_offset = rel_offset;
         rel_offset += info.q_norm_size;
 
-        info.k_norm_size = getLayerTensorBytes(reader, layer_idx, "attn_k_norm.weight", cfg.head_dim);
+        info.k_norm_size = cfg.head_dim * @sizeOf(types.fp16_t);
         info.k_norm_offset = rel_offset;
         rel_offset += info.k_norm_size;
 
@@ -752,11 +800,16 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
         }
 
         // o_proj (slot current_slot + 0)
-        _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_output.weight"), eng.weight_pool[layer_base + info.o_offset ..][0..info.o_size], current_slot, eng.weight_dtypes);
+        var alias_buf: [96]u8 = undefined;
+        const attn_output_suffix = try tensorSuffixForLayer(&name_buf, layer_idx, "attn_output.weight");
+        const attn_gate_suffix = try tensorSuffixForLayer(&alias_buf, layer_idx, "attn_gate.weight");
+        _ = try loadTensorWithAliasIfPresent(reader, attn_output_suffix, attn_gate_suffix, eng.weight_pool[layer_base + info.o_offset ..][0..info.o_size], current_slot, eng.weight_dtypes);
         current_slot += 1;
 
         // ffn_norm (slot current_slot + 0)
-        _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_norm.weight"), eng.weight_pool[layer_base + info.ffn_norm_offset ..][0..info.ffn_norm_size], current_slot, eng.weight_dtypes);
+        const ffn_norm_suffix = try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_norm.weight");
+        const post_attn_norm_suffix = try tensorSuffixForLayer(&alias_buf, layer_idx, "post_attention_norm.weight");
+        _ = try loadTensorWithAliasIfPresent(reader, ffn_norm_suffix, post_attn_norm_suffix, eng.weight_pool[layer_base + info.ffn_norm_offset ..][0..info.ffn_norm_size], current_slot, eng.weight_dtypes);
         current_slot += 1;
 
         // attn_q_norm (slot current_slot + 0)
@@ -792,7 +845,8 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
 
         // SSM weights (8 tensors) - only loaded if layer is SSM type
         if (eng.weight_layout.layer_types[layer_idx] == .ssm) {
-            const ssm_base = layout.ssm_region_offset + layer_idx * layout.ssm_per_layer_size;
+            const packed_ssm_idx = memory.ssmPackedLayerIndex(eng.weight_layout.layer_types, layer_idx) orelse unreachable;
+            const ssm_base = layout.ssm_region_offset + packed_ssm_idx * layout.ssm_per_layer_size;
             const ssm_inner = cfg.ssm_inner_size;
             const dt_rank = cfg.ssm_dt_rank;
             const conv_kernel = cfg.ssm_conv_kernel;
@@ -809,6 +863,19 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
                     if (r.tensors.get(full)) |tensor| {
                         return computeTensorByteSize(tensor.dtype, tensor.shape);
                     }
+                    if (std.mem.eql(u8, suffix, "ssm_x.weight")) return 0;
+                    if (std.mem.eql(u8, suffix, "ssm_A.weight")) {
+                        const alias = std.fmt.bufPrint(&b, "blk.{d}.ssm_a", .{l}) catch return fallback;
+                        if (r.tensors.get(alias)) |tensor| return computeTensorByteSize(tensor.dtype, tensor.shape);
+                    }
+                    if (std.mem.eql(u8, suffix, "ssm_B.weight")) {
+                        const alias = std.fmt.bufPrint(&b, "blk.{d}.ssm_beta.weight", .{l}) catch return fallback;
+                        if (r.tensors.get(alias)) |tensor| return computeTensorByteSize(tensor.dtype, tensor.shape);
+                    }
+                    if (std.mem.eql(u8, suffix, "ssm_C.weight")) {
+                        const alias = std.fmt.bufPrint(&b, "blk.{d}.ssm_alpha.weight", .{l}) catch return fallback;
+                        if (r.tensors.get(alias)) |tensor| return computeTensorByteSize(tensor.dtype, tensor.shape);
+                    }
                     return fallback;
                 }
             }.call;
@@ -820,7 +887,9 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
 
             // ssm_x
             const ssm_x_bytes = getSsmSize(reader, layer_idx, "ssm_x.weight", cfg.hidden_dim * cfg.hidden_dim);
-            _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ssm_x.weight"), eng.weight_pool[ssm_base + layout.ssm_x_offset ..][0..ssm_x_bytes], current_slot, eng.weight_dtypes);
+            if (ssm_x_bytes > 0) {
+                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ssm_x.weight"), eng.weight_pool[ssm_base + layout.ssm_x_offset ..][0..ssm_x_bytes], current_slot, eng.weight_dtypes);
+            }
             current_slot += 1;
 
             // ssm_dt
@@ -830,17 +899,23 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
 
             // ssm_A
             const ssm_A_bytes = getSsmSize(reader, layer_idx, "ssm_A.weight", ssm_inner);
-            _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ssm_A.weight"), eng.weight_pool[ssm_base + layout.ssm_A_offset ..][0..ssm_A_bytes], current_slot, eng.weight_dtypes);
+            const ssm_A_suffix = try tensorSuffixForLayer(&name_buf, layer_idx, "ssm_A.weight");
+            const ssm_a_suffix = try tensorSuffixForLayer(&alias_buf, layer_idx, "ssm_a");
+            _ = try loadTensorWithAliasIfPresent(reader, ssm_A_suffix, ssm_a_suffix, eng.weight_pool[ssm_base + layout.ssm_A_offset ..][0..ssm_A_bytes], current_slot, eng.weight_dtypes);
             current_slot += 1;
 
             // ssm_B
             const ssm_B_bytes = getSsmSize(reader, layer_idx, "ssm_B.weight", cfg.hidden_dim * ssm_inner);
-            _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ssm_B.weight"), eng.weight_pool[ssm_base + layout.ssm_B_offset ..][0..ssm_B_bytes], current_slot, eng.weight_dtypes);
+            const ssm_B_suffix = try tensorSuffixForLayer(&name_buf, layer_idx, "ssm_B.weight");
+            const ssm_beta_suffix = try tensorSuffixForLayer(&alias_buf, layer_idx, "ssm_beta.weight");
+            _ = try loadTensorWithAliasIfPresent(reader, ssm_B_suffix, ssm_beta_suffix, eng.weight_pool[ssm_base + layout.ssm_B_offset ..][0..ssm_B_bytes], current_slot, eng.weight_dtypes);
             current_slot += 1;
 
             // ssm_C
             const ssm_C_bytes = getSsmSize(reader, layer_idx, "ssm_C.weight", cfg.hidden_dim * ssm_inner);
-            _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ssm_C.weight"), eng.weight_pool[ssm_base + layout.ssm_C_offset ..][0..ssm_C_bytes], current_slot, eng.weight_dtypes);
+            const ssm_C_suffix = try tensorSuffixForLayer(&name_buf, layer_idx, "ssm_C.weight");
+            const ssm_alpha_suffix = try tensorSuffixForLayer(&alias_buf, layer_idx, "ssm_alpha.weight");
+            _ = try loadTensorWithAliasIfPresent(reader, ssm_C_suffix, ssm_alpha_suffix, eng.weight_pool[ssm_base + layout.ssm_C_offset ..][0..ssm_C_bytes], current_slot, eng.weight_dtypes);
             current_slot += 1;
 
             // ssm_D
@@ -856,14 +931,16 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
     }
 
     // Final norm (slot after all layers)
-    const final_norm_info = reader.tensors.get("output_norm.weight");
-    const final_norm_bytes = if (final_norm_info) |info| computeTensorByteSize(info.dtype, info.shape) else cfg.hidden_dim * @sizeOf(types.fp16_t);
+    const final_norm_bytes = cfg.hidden_dim * @sizeOf(types.fp16_t);
     _ = try loadTensorIfPresent(reader, "output_norm.weight", eng.weight_pool[layout.final_norm_offset..][0..final_norm_bytes], current_slot, eng.weight_dtypes);
     current_slot += 1;
 
     // Output projection (final slot)
-    const output_info = reader.tensors.get("output.weight");
-    const output_bytes = if (output_info) |info| computeTensorByteSize(info.dtype, info.shape) else cfg.hidden_dim * cfg.vocab_size * @sizeOf(types.fp16_t);
+    const output_info = reader.findTensorBySuffix("output.weight");
+    const output_bytes = if (output_info) |info|
+        computeTensorByteSize(info.dtype, info.shape)
+    else
+        token_embd_bytes;
     if (reader.findTensorBySuffix("output.weight") != null) {
         _ = try loadTensorIfPresent(reader, "output.weight", eng.weight_pool[layout.output_proj_offset..][0..output_bytes], current_slot, eng.weight_dtypes);
     } else {

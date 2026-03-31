@@ -261,13 +261,74 @@ pub const WeightLayout = struct {
         }.call;
 
         // Helper to get per-layer tensor size by looking up layer 0
+        // Supports both old naming (attn_q, attn_k, attn_v, attn_output) and new naming (attn_qkv, attn_gate)
         const getLayerTensorBytes = struct {
             fn call(r: ?*const gguf.Reader, suffix: []const u8, fallback_elements: u64) usize {
                 if (r) |reader| {
                     var name_buf: [64]u8 = undefined;
+
+                    // Try the requested suffix first
                     const tensor_name = std.fmt.bufPrint(&name_buf, "blk.0.{s}", .{suffix}) catch return fallback_elements * @sizeOf(types.fp16_t);
                     if (reader.tensors.get(tensor_name)) |tensor_info| {
                         return computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                    }
+
+                    // Special cases: handle naming differences
+                    if (std.mem.eql(u8, suffix, "attn_q.weight")) {
+                        // Try fused QKV instead of separate Q
+                        const qkv_name = std.fmt.bufPrint(&name_buf, "blk.0.attn_qkv.weight", .{}) catch return fallback_elements * @sizeOf(types.fp16_t);
+                        if (reader.tensors.get(qkv_name)) |tensor_info| {
+                            // Fused QKV contains all 3 projections, so return appropriate portion
+                            return computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                        }
+                    }
+
+                    if (std.mem.eql(u8, suffix, "attn_k.weight") or std.mem.eql(u8, suffix, "attn_v.weight")) {
+                        // If model uses fused QKV, K and V are included in that tensor
+                        // Return 0 since they're not separate
+                        const qkv_name = std.fmt.bufPrint(&name_buf, "blk.0.attn_qkv.weight", .{}) catch return 0;
+                        if (reader.tensors.get(qkv_name)) |_| {
+                            return 0; // Included in QKV
+                        }
+                    }
+
+                    if (std.mem.eql(u8, suffix, "attn_output.weight")) {
+                        // Try attn_gate instead of attn_output
+                        const gate_name = std.fmt.bufPrint(&name_buf, "blk.0.attn_gate.weight", .{}) catch return fallback_elements * @sizeOf(types.fp16_t);
+                        if (reader.tensors.get(gate_name)) |tensor_info| {
+                            return computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                        }
+                    }
+
+                    // SSM tensor name mappings for Qwen3.5 models
+                    if (std.mem.eql(u8, suffix, "ssm_A.weight")) {
+                        // Try ssm_a (lowercase, no .weight extension)
+                        const ssm_a_name = std.fmt.bufPrint(&name_buf, "blk.0.ssm_a", .{}) catch return fallback_elements * @sizeOf(types.fp16_t);
+                        if (reader.tensors.get(ssm_a_name)) |tensor_info| {
+                            return computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                        }
+                    }
+
+                    if (std.mem.eql(u8, suffix, "ssm_B.weight")) {
+                        // Try ssm_beta instead of ssm_B
+                        const beta_name = std.fmt.bufPrint(&name_buf, "blk.0.ssm_beta.weight", .{}) catch return fallback_elements * @sizeOf(types.fp16_t);
+                        if (reader.tensors.get(beta_name)) |tensor_info| {
+                            return computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                        }
+                    }
+
+                    if (std.mem.eql(u8, suffix, "ssm_C.weight")) {
+                        // Try ssm_alpha instead of ssm_C
+                        const alpha_name = std.fmt.bufPrint(&name_buf, "blk.0.ssm_alpha.weight", .{}) catch return fallback_elements * @sizeOf(types.fp16_t);
+                        if (reader.tensors.get(alpha_name)) |tensor_info| {
+                            return computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                        }
+                    }
+
+                    if (std.mem.eql(u8, suffix, "ssm_x.weight")) {
+                        // ssm_x doesn't exist in this model - fused into other tensors
+                        // Return 0 since it's not needed
+                        return 0;
                     }
                 }
                 return fallback_elements * @sizeOf(types.fp16_t);
@@ -318,6 +379,8 @@ pub const WeightLayout = struct {
 
         layout.per_layer_size = offset;
 
+        std.debug.print("DEBUG: per_layer_size={d} bytes ({d:.2} MB), num_layers={d}\n", .{ layout.per_layer_size, @as(f64, @floatFromInt(layout.per_layer_size)) / (1024.0 * 1024.0), config_.num_layers });
+
         // Calculate SSM per-layer size using actual tensor sizes if available
         const ssm_conv_kernel = config_.ssm_conv_kernel;
         const ssm_inner = config_.ssm_inner_size;
@@ -330,22 +393,38 @@ pub const WeightLayout = struct {
 
         var ssm_offset: usize = 0;
         layout.ssm_out_offset = ssm_offset;
-        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_out.weight", hidden * ssm_out_hidden_dim);
+        const ssm_out_bytes = getTensorBytes(reader_opt, "blk.0.ssm_out.weight", hidden * ssm_out_hidden_dim);
+        ssm_offset += ssm_out_bytes;
+        std.debug.print("DEBUG: ssm_out: {d} bytes (fallback: {d})\n", .{ ssm_out_bytes, hidden * ssm_out_hidden_dim * sizeof_fp16 });
 
         layout.ssm_x_offset = ssm_offset;
-        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_x.weight", hidden * hidden);
+        // ssm_x doesn't exist in this model - use getLayerTensorBytes which will return 0
+        const ssm_x_bytes = getLayerTensorBytes(reader_opt, "ssm_x.weight", hidden * hidden);
+        ssm_offset += ssm_x_bytes;
+        std.debug.print("DEBUG: ssm_x: {d} bytes (fallback: {d})\n", .{ ssm_x_bytes, hidden * hidden * sizeof_fp16 });
 
         layout.ssm_dt_offset = ssm_offset;
-        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_dt.weight", hidden * dt_rank);
+        const ssm_dt_bytes = getTensorBytes(reader_opt, "blk.0.ssm_dt.weight", hidden * dt_rank);
+        ssm_offset += ssm_dt_bytes;
+        std.debug.print("DEBUG: ssm_dt: {d} bytes (fallback: {d})\n", .{ ssm_dt_bytes, hidden * dt_rank * sizeof_fp16 });
 
         layout.ssm_A_offset = ssm_offset;
-        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_A.weight", ssm_inner);
+        // ssm_A maps to ssm_a (lowercase, no .weight)
+        const ssm_A_bytes = getLayerTensorBytes(reader_opt, "ssm_A.weight", ssm_inner);
+        ssm_offset += ssm_A_bytes;
+        std.debug.print("DEBUG: ssm_A: {d} bytes (fallback: {d})\n", .{ ssm_A_bytes, ssm_inner * sizeof_fp16 });
 
         layout.ssm_B_offset = ssm_offset;
-        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_B.weight", hidden * ssm_inner);
+        // ssm_B maps to ssm_beta.weight
+        const ssm_B_bytes = getLayerTensorBytes(reader_opt, "ssm_B.weight", hidden * ssm_inner);
+        ssm_offset += ssm_B_bytes;
+        std.debug.print("DEBUG: ssm_B: {d} bytes (fallback: {d})\n", .{ ssm_B_bytes, hidden * ssm_inner * sizeof_fp16 });
 
         layout.ssm_C_offset = ssm_offset;
-        ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_C.weight", hidden * ssm_inner);
+        // ssm_C maps to ssm_alpha.weight
+        const ssm_C_bytes = getLayerTensorBytes(reader_opt, "ssm_C.weight", hidden * ssm_inner);
+        ssm_offset += ssm_C_bytes;
+        std.debug.print("DEBUG: ssm_C: {d} bytes (fallback: {d})\n", .{ ssm_C_bytes, hidden * ssm_inner * sizeof_fp16 });
 
         layout.ssm_D_offset = ssm_offset;
         ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_D.weight", hidden);
@@ -367,59 +446,56 @@ pub const WeightLayout = struct {
             // Calculate actual layer size for this specific layer
             var actual_layer_size: usize = 0;
 
-            // attn_norm
+            // Norm vectors are converted to fp16 when loaded into engine memory.
             var buf: [64]u8 = undefined;
-            const attn_norm_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_norm.weight", .{i}) catch "";
-            if (reader_opt) |reader| {
-                if (reader.tensors.get(attn_norm_name)) |tensor| {
-                    actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
-                } else {
-                    actual_layer_size += hidden * sizeof_fp16;
-                }
-            } else {
-                actual_layer_size += hidden * sizeof_fp16;
-            }
+            actual_layer_size += hidden * sizeof_fp16;
 
-            // q_proj
-            const q_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_q.weight", .{i}) catch "";
+            // Attention projections - support both fused (qkv) and separate (q,k,v) naming
+            // Try fused QKV first
+            const qkv_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_qkv.weight", .{i}) catch "";
             if (reader_opt) |reader| {
-                if (reader.tensors.get(q_name)) |tensor| {
+                if (reader.tensors.get(qkv_name)) |tensor| {
+                    // Fused QKV: contains all three projections in one tensor
                     actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
                 } else {
-                    actual_layer_size += hidden * q_dim * sizeof_fp16;
+                    // Fall back to separate Q, K, V projections
+                    const q_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_q.weight", .{i}) catch "";
+                    if (reader.tensors.get(q_name)) |tensor| {
+                        actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
+                    } else {
+                        actual_layer_size += hidden * q_dim * sizeof_fp16;
+                    }
+
+                    const k_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_k.weight", .{i}) catch "";
+                    if (reader.tensors.get(k_name)) |tensor| {
+                        actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
+                    } else {
+                        actual_layer_size += hidden * kv_dim * sizeof_fp16;
+                    }
+
+                    const v_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_v.weight", .{i}) catch "";
+                    if (reader.tensors.get(v_name)) |tensor| {
+                        actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
+                    } else {
+                        actual_layer_size += hidden * kv_dim * sizeof_fp16;
+                    }
                 }
             } else {
+                // No reader: use separate projections with FP16 fallback
                 actual_layer_size += hidden * q_dim * sizeof_fp16;
-            }
-
-            // k_proj
-            const k_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_k.weight", .{i}) catch "";
-            if (reader_opt) |reader| {
-                if (reader.tensors.get(k_name)) |tensor| {
-                    actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
-                } else {
-                    actual_layer_size += hidden * kv_dim * sizeof_fp16;
-                }
-            } else {
+                actual_layer_size += hidden * kv_dim * sizeof_fp16;
                 actual_layer_size += hidden * kv_dim * sizeof_fp16;
             }
 
-            // v_proj
-            const v_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_v.weight", .{i}) catch "";
+            // Output projection - support both attn_output and attn_gate naming
+            // IMPORTANT: Use separate buffer to avoid overwriting with ffn_norm below
+            var buf2: [64]u8 = undefined;
+            const attn_gate_name = std.fmt.bufPrint(&buf2, "blk.{d}.attn_gate.weight", .{i}) catch "";
+            const output_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_output.weight", .{i}) catch "";
             if (reader_opt) |reader| {
-                if (reader.tensors.get(v_name)) |tensor| {
+                if (reader.tensors.get(attn_gate_name)) |tensor| {
                     actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
-                } else {
-                    actual_layer_size += hidden * kv_dim * sizeof_fp16;
-                }
-            } else {
-                actual_layer_size += hidden * kv_dim * sizeof_fp16;
-            }
-
-            // o_proj
-            const o_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_output.weight", .{i}) catch "";
-            if (reader_opt) |reader| {
-                if (reader.tensors.get(o_name)) |tensor| {
+                } else if (reader.tensors.get(output_name)) |tensor| {
                     actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
                 } else {
                     actual_layer_size += q_dim * hidden * sizeof_fp16;
@@ -428,17 +504,8 @@ pub const WeightLayout = struct {
                 actual_layer_size += q_dim * hidden * sizeof_fp16;
             }
 
-            // ffn_norm
-            const ffn_norm_name = std.fmt.bufPrint(&buf, "blk.{d}.ffn_norm.weight", .{i}) catch "";
-            if (reader_opt) |reader| {
-                if (reader.tensors.get(ffn_norm_name)) |tensor| {
-                    actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
-                } else {
-                    actual_layer_size += hidden * sizeof_fp16;
-                }
-            } else {
-                actual_layer_size += hidden * sizeof_fp16;
-            }
+            // ffn_norm / post_attention_norm are also stored as fp16 in engine memory.
+            actual_layer_size += hidden * sizeof_fp16;
 
             // FFN weights
             switch (config_.ffn_type) {
@@ -498,27 +565,9 @@ pub const WeightLayout = struct {
                 },
             }
 
-            // q_norm and k_norm
-            const q_norm_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_q_norm.weight", .{i}) catch "";
-            if (reader_opt) |reader| {
-                if (reader.tensors.get(q_norm_name)) |tensor| {
-                    actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
-                } else {
-                    actual_layer_size += config_.head_dim * sizeof_fp16;
-                }
-            } else {
-                actual_layer_size += config_.head_dim * sizeof_fp16;
-            }
-            const k_norm_name = std.fmt.bufPrint(&buf, "blk.{d}.attn_k_norm.weight", .{i}) catch "";
-            if (reader_opt) |reader| {
-                if (reader.tensors.get(k_norm_name)) |tensor| {
-                    actual_layer_size += computeTensorQuantizedBytes(tensor.shape, tensor.dtype);
-                } else {
-                    actual_layer_size += config_.head_dim * sizeof_fp16;
-                }
-            } else {
-                actual_layer_size += config_.head_dim * sizeof_fp16;
-            }
+            // q_norm and k_norm are stored as fp16 as well.
+            actual_layer_size += config_.head_dim * sizeof_fp16;
+            actual_layer_size += config_.head_dim * sizeof_fp16;
 
             // Update cumulative offset for next layer
             cumulative_offset += @max(actual_layer_size, layout.per_layer_size);
@@ -526,9 +575,21 @@ pub const WeightLayout = struct {
 
         // Calculate final offsets based on actual layer sizes
         // cumulative_offset now contains the total size of all layers
+        const output_proj_bytes = blk: {
+            if (reader_opt) |reader| {
+                if (reader.findTensorBySuffix("output.weight")) |tensor_info| {
+                    break :blk computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                }
+                if (reader.tensors.get("token_embd.weight")) |tensor_info| {
+                    break :blk computeTensorQuantizedBytes(tensor_info.shape, tensor_info.dtype);
+                }
+            }
+            break :blk vocab * hidden * sizeof_fp16;
+        };
+
         layout.final_norm_offset = cumulative_offset;
         layout.output_proj_offset = layout.final_norm_offset + hidden * sizeof_fp16;
-        layout.ssm_region_offset = layout.output_proj_offset + vocab * hidden * sizeof_fp16;
+        layout.ssm_region_offset = layout.output_proj_offset + output_proj_bytes;
 
         const num_ssm_layers = if (config_.num_ssm_layers > 0) config_.num_ssm_layers else config_.num_layers;
         const ssm_region_size = layout.ssm_per_layer_size * num_ssm_layers;
@@ -545,6 +606,105 @@ pub const WeightLayout = struct {
     }
 };
 
+pub fn ssmPackedLayerIndex(layer_types: []const config.ModelConfig.LayerType, layer_idx: usize) ?usize {
+    if (layer_types[layer_idx] != .ssm) return null;
+
+    var packed_idx: usize = 0;
+    for (layer_types[0..layer_idx]) |layer_type| {
+        if (layer_type == .ssm) packed_idx += 1;
+    }
+    return packed_idx;
+}
+
+fn initTestReader(allocator: std.mem.Allocator) gguf.Reader {
+    return .{
+        .file = undefined,
+        .allocator = allocator,
+        .cursor = 0,
+        .data_offset = 0,
+        .model_prefix = &.{},
+        .metadata = std.StringHashMap(gguf.GGUFValue).init(allocator),
+        .tokens = std.array_list.Managed([]const u8).init(allocator),
+        .tensors = std.StringHashMap(gguf.TensorInfo).init(allocator),
+        .config = std.mem.zeroes(config.ModelConfig),
+        .alignment = 32,
+    };
+}
+
+fn deinitTestReader(reader: *gguf.Reader) void {
+    var tensor_it = reader.tensors.iterator();
+    while (tensor_it.next()) |entry| {
+        reader.allocator.free(entry.key_ptr.*);
+        reader.allocator.free(entry.value_ptr.shape);
+    }
+    reader.tensors.deinit();
+    reader.tokens.deinit();
+    reader.metadata.deinit();
+}
+
+fn addTestTensor(reader: *gguf.Reader, name: []const u8, dtype: gguf.GGMLType, shape_src: []const u64) !void {
+    const owned_name = try reader.allocator.dupe(u8, name);
+    errdefer reader.allocator.free(owned_name);
+
+    const shape = try reader.allocator.alloc(u64, shape_src.len);
+    errdefer reader.allocator.free(shape);
+    @memcpy(shape, shape_src);
+
+    try reader.tensors.put(owned_name, .{
+        .offset = 0,
+        .size = computeTensorQuantizedBytes(shape, dtype),
+        .shape = shape,
+        .dtype = dtype,
+    });
+}
+
+test "ssmPackedLayerIndex compacts sparse SSM layers" {
+    const layer_types = [_]config.ModelConfig.LayerType{ .ssm, .attention, .ssm, .attention, .ssm };
+
+    try std.testing.expectEqual(@as(?usize, 0), ssmPackedLayerIndex(&layer_types, 0));
+    try std.testing.expectEqual(@as(?usize, null), ssmPackedLayerIndex(&layer_types, 1));
+    try std.testing.expectEqual(@as(?usize, 1), ssmPackedLayerIndex(&layer_types, 2));
+    try std.testing.expectEqual(@as(?usize, 2), ssmPackedLayerIndex(&layer_types, 4));
+}
+
+test "WeightLayout uses actual output tensor bytes" {
+    var reader = initTestReader(std.testing.allocator);
+    defer deinitTestReader(&reader);
+
+    try addTestTensor(&reader, "token_embd.weight", .q8_0, &.{ 256, 8 });
+    try addTestTensor(&reader, "output_norm.weight", .f32, &.{256});
+    try addTestTensor(&reader, "output.weight", .q4_k, &.{ 256, 8 });
+
+    const cfg = config.ModelConfig{
+        .vocab_size = 8,
+        .hidden_dim = 256,
+        .num_heads = 8,
+        .num_kv_heads = 8,
+        .head_dim = 32,
+        .num_layers = 1,
+        .num_ssm_layers = 0,
+        .ffn_hidden_dim = 512,
+        .max_seq_len = 128,
+        .ffn_type = .gated_swi_glu,
+        .norm_type = .rms_norm,
+        .pos_encoding = .rope,
+        .use_kv_quantization = false,
+        .ssm_conv_kernel = 4,
+        .ssm_inner_size = 16,
+        .ssm_num_groups = 1,
+        .ssm_dt_rank = 16,
+        .ssm_dt_scale = 1.0,
+    };
+
+    var layout = try WeightLayout.compute(cfg, &reader, std.testing.allocator);
+    defer layout.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(
+        computeTensorQuantizedBytes(&.{ 256, 8 }, .q4_k),
+        layout.ssm_region_offset - layout.output_proj_offset,
+    );
+}
+
 test "AlignedMemoryPool basic alloc" {
     var pool = try AlignedMemoryPool.init(4096);
     defer pool.deinit();
@@ -554,7 +714,7 @@ test "AlignedMemoryPool basic alloc" {
 }
 
 test "WeightLayout compute" {
-    const test_config = .{
+    const test_config = config.ModelConfig{
         .vocab_size = 32000,
         .hidden_dim = 4096,
         .num_heads = 32,
@@ -568,7 +728,6 @@ test "WeightLayout compute" {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
-        .quantization_scale = 1.0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,

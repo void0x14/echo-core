@@ -34,6 +34,11 @@ fn dtypeForGlobal(weight_dtypes: []const gguf.GGMLType, global_idx: u32) gguf.GG
     return weight_dtypes[n_slots - 2 + (global_idx - 1)];
 }
 
+fn packedSsmBase(layout: *const memory.WeightLayout, layer_idx: u32) usize {
+    const packed_idx = memory.ssmPackedLayerIndex(layout.layer_types, @intCast(layer_idx)) orelse unreachable;
+    return layout.ssm_region_offset + packed_idx * layout.ssm_per_layer_size;
+}
+
 pub const Engine = struct {
     allocator: std.mem.Allocator,
     config: config.ModelConfig,
@@ -68,16 +73,20 @@ pub const Engine = struct {
     seq_pos: u32,
 
     pub fn init(cfg: config.ModelConfig, reader_opt: ?*const gguf.Reader, allocator: std.mem.Allocator) !Engine {
+        std.debug.print("DEBUG: Engine.init() - starting WeightLayout.compute()\n", .{});
         var layout = try memory.WeightLayout.compute(cfg, reader_opt, allocator);
         errdefer layout.deinit(allocator);
+        std.debug.print("DEBUG: WeightLayout.compute() completed - raw_pool_size={d} bytes ({d:.2} MB)\n", .{ layout.raw_pool_size, @as(f64, @floatFromInt(layout.raw_pool_size)) / (1024.0 * 1024.0) });
 
         const kv_dim = cfg.num_kv_heads * cfg.head_dim;
         const q_dim = cfg.num_heads * cfg.head_dim;
 
         // Unified byte pool for all weights (quantized + fp16)
+        std.debug.print("DEBUG: Allocating weight_pool ({d:.2} MB)...\n", .{@as(f64, @floatFromInt(layout.raw_pool_size)) / (1024.0 * 1024.0)});
         const weight_pool = try allocator.alloc(u8, layout.raw_pool_size);
         errdefer allocator.free(weight_pool);
         @memset(weight_pool, 0);
+        std.debug.print("DEBUG: weight_pool allocated successfully\n", .{});
 
         // Per-tensor dtype tracking (default to fp16)
         // Slot layout: 1 token_embd + num_layers * (11 attention + 8 ssm) + final_norm + output_proj
@@ -274,7 +283,8 @@ pub const Engine = struct {
 
         @memset(self.logits, 0);
         const output_proj_byte_offset = self.weight_layout.output_proj_offset;
-        const output_proj_bytes = self.weight_pool[output_proj_byte_offset..][0 .. hidden * vocab * @sizeOf(types.fp16_t)];
+        const output_proj_size = self.weight_layout.ssm_region_offset - self.weight_layout.output_proj_offset;
+        const output_proj_bytes = self.weight_pool[output_proj_byte_offset..][0..output_proj_size];
         matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, output_proj_bytes.ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, dtypeForGlobal(self.weight_dtypes, 2));
 
         self.seq_pos += 1;
@@ -293,8 +303,7 @@ pub const Engine = struct {
 
         if (layer_type == .ssm) {
             // SSM layer path
-            const layer_base = self.weight_layout.token_embedding_size +
-                self.weight_layout.layer_offsets[layer_idx];
+            const layer_base = self.weight_layout.layer_offsets[layer_idx];
             self.current_layer_base = layer_base;
 
             // SSM layers don't have separate attn_norm/ffn_norm in traditional sense
@@ -310,11 +319,11 @@ pub const Engine = struct {
 
             // FFN part of SSM layer (optional, depending on architecture)
             @memcpy(self.residual, output);
-            self.ffn(output, self.ffn_out);
+            self.ffn(layer_idx, output, self.ffn_out);
             for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
         } else {
             // Standard attention layer path
-            const layer_base = self.weight_layout.token_embedding_size + self.weight_layout.layer_offsets[layer_idx];
+            const layer_base = self.weight_layout.layer_offsets[layer_idx];
             self.current_layer_base = layer_base;
 
             const layer_norm_byte_offset = layer_base + self.weight_layout.norm_weight_offset;
@@ -331,7 +340,7 @@ pub const Engine = struct {
 
             @memcpy(self.residual, output);
             self.norm(output, output, ffn_norm);
-            self.ffn(output, self.ffn_out);
+            self.ffn(layer_idx, output, self.ffn_out);
             for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
         }
     }
@@ -398,7 +407,7 @@ pub const Engine = struct {
         const head_dim = self.config.head_dim;
         const q_dim = num_heads * head_dim;
         const kv_dim = num_kv_heads * head_dim;
-        const layer_base = self.weight_layout.token_embedding_size + self.weight_layout.layer_offsets[layer_idx];
+        const layer_base = self.weight_layout.layer_offsets[layer_idx];
 
         const q_proj_offset = layer_base + self.weight_layout.q_proj_offset;
         const k_proj_offset = layer_base + self.weight_layout.k_proj_offset;
@@ -490,8 +499,7 @@ pub const Engine = struct {
         }
 
         @memset(self.attn_out, 0);
-        const layer_idx_u32: u32 = @intCast((self.current_layer_base - self.weight_layout.token_embedding_size) / self.weight_layout.per_layer_size);
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[o_proj_offset..].ptr, self.attn_accum.ptr, self.attn_out.ptr, hidden, q_dim, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 4));
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[o_proj_offset..].ptr, self.attn_accum.ptr, self.attn_out.ptr, hidden, q_dim, dtypeForTensor(self.weight_dtypes, layer_idx, 4));
         @memcpy(output, self.attn_out);
     }
 
@@ -504,8 +512,7 @@ pub const Engine = struct {
         const conv_kernel = self.config.ssm_conv_kernel;
         const dt_scale = self.config.ssm_dt_scale;
 
-        const layer_base = self.weight_layout.token_embedding_size +
-            self.weight_layout.layer_offsets[layer_idx];
+        const ssm_base = packedSsmBase(&self.weight_layout, layer_idx);
 
         // Ensure SSM state is initialized for this layer
         if (self.ssm_states[layer_idx].conv_state.len == 0) {
@@ -513,15 +520,15 @@ pub const Engine = struct {
         }
 
         // Get weight offsets
-        const ssm_out_offset = layer_base + self.weight_layout.ssm_out_offset;
-        const ssm_x_offset = layer_base + self.weight_layout.ssm_x_offset;
-        const ssm_dt_offset = layer_base + self.weight_layout.ssm_dt_offset;
-        const ssm_A_offset = layer_base + self.weight_layout.ssm_A_offset;
-        const ssm_B_offset = layer_base + self.weight_layout.ssm_B_offset;
-        const ssm_C_offset = layer_base + self.weight_layout.ssm_C_offset;
-        const ssm_D_offset = layer_base + self.weight_layout.ssm_D_offset;
-        const ssm_conv1d_offset = layer_base + self.weight_layout.ssm_conv1d_offset;
-        const ssm_conv1d_bias_offset = layer_base + self.weight_layout.ssm_conv1d_bias_offset;
+        const ssm_out_offset = ssm_base + self.weight_layout.ssm_out_offset;
+        const ssm_x_offset = ssm_base + self.weight_layout.ssm_x_offset;
+        const ssm_dt_offset = ssm_base + self.weight_layout.ssm_dt_offset;
+        const ssm_A_offset = ssm_base + self.weight_layout.ssm_A_offset;
+        const ssm_B_offset = ssm_base + self.weight_layout.ssm_B_offset;
+        const ssm_C_offset = ssm_base + self.weight_layout.ssm_C_offset;
+        const ssm_D_offset = ssm_base + self.weight_layout.ssm_D_offset;
+        const ssm_conv1d_offset = ssm_base + self.weight_layout.ssm_conv1d_offset;
+        const ssm_conv1d_bias_offset = ssm_base + self.weight_layout.ssm_conv1d_bias_offset;
 
         // Call the SSM kernel
         ssm.ssmForward(
@@ -551,7 +558,7 @@ pub const Engine = struct {
         );
     }
 
-    fn ffn(self: *Engine, input: []const f32, output: []f32) void {
+    fn ffn(self: *Engine, layer_idx: u32, input: []const f32, output: []f32) void {
         const hidden = self.config.hidden_dim;
         const ffn_h = self.config.ffn_hidden_dim;
         const w1_offset = self.current_layer_base + self.weight_layout.ffn_weight1_offset;
@@ -559,20 +566,18 @@ pub const Engine = struct {
 
         switch (self.config.ffn_type) {
             .dense => {
-                const layer_idx_u32: u32 = @intCast((self.current_layer_base - self.weight_layout.token_embedding_size) / self.weight_layout.per_layer_size);
                 @memset(self.ffn_scratch[0..ffn_h], 0);
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_scratch.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 6));
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_scratch.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 6));
                 for (self.ffn_scratch[0..ffn_h]) |*value| value.* = math.relu(value.*);
                 @memset(output[0..hidden], 0);
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w2_offset..].ptr, self.ffn_scratch.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 7));
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w2_offset..].ptr, self.ffn_scratch.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx, 7));
             },
             .gated_swi_glu, .gated_gelu => {
                 const w3_offset = self.current_layer_base + self.weight_layout.ffn_weight3_offset;
-                const layer_idx_u32: u32 = @intCast((self.current_layer_base - self.weight_layout.token_embedding_size) / self.weight_layout.per_layer_size);
                 @memset(self.ffn_gate_buf[0..ffn_h], 0);
                 @memset(self.ffn_up_buf[0..ffn_h], 0);
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_gate_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 6));
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w2_offset..].ptr, input.ptr, self.ffn_up_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 7));
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_gate_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 6));
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w2_offset..].ptr, input.ptr, self.ffn_up_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 7));
 
                 for (0..ffn_h) |i| {
                     self.ffn_gate_buf[i] = switch (self.config.ffn_type) {
@@ -583,7 +588,7 @@ pub const Engine = struct {
                 }
 
                 @memset(output[0..hidden], 0);
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w3_offset..].ptr, self.ffn_gate_buf.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx_u32, 8));
+                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w3_offset..].ptr, self.ffn_gate_buf.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx, 8));
             },
         }
     }

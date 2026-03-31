@@ -138,6 +138,9 @@ pub const Reader = struct {
         const tensor_count = try self.readU64();
         const metadata_kv_count = try self.readU64();
 
+        // Debug: Print header values
+        std.debug.print("DEBUG: tensor_count={d}, metadata_kv_count={d}\n", .{ tensor_count, metadata_kv_count });
+
         var i: u64 = 0;
         while (i < metadata_kv_count) : (i += 1) {
             const key = try self.readString();
@@ -181,6 +184,38 @@ pub const Reader = struct {
         }
 
         self.data_offset = std.mem.alignForward(u64, self.cursor, 32);
+
+        // Debug: Print tensor count and some tensor names
+        std.debug.print("DEBUG: Loaded {d} tensors from GGUF file\n", .{self.tensors.count()});
+
+        // Print first 10 tensor names
+        var it = self.tensors.iterator();
+        var count: usize = 0;
+        while (it.next()) |entry| {
+            if (count < 10) {
+                std.debug.print("DEBUG: Tensor {d}: {s}\n", .{ count, entry.key_ptr.* });
+            }
+            count += 1;
+        }
+
+        // Look for specific patterns
+        std.debug.print("DEBUG: Looking for blk.0 tensors:\n", .{});
+        it = self.tensors.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.startsWith(u8, entry.key_ptr.*, "blk.0.")) {
+                std.debug.print("DEBUG:   {s}\n", .{entry.key_ptr.*});
+            }
+        }
+
+        // Count attention vs SSM tensors
+        var attn_count: usize = 0;
+        var ssm_count: usize = 0;
+        it = self.tensors.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.indexOf(u8, entry.key_ptr.*, "attn") != null) attn_count += 1;
+            if (std.mem.indexOf(u8, entry.key_ptr.*, "ssm") != null) ssm_count += 1;
+        }
+        std.debug.print("DEBUG: Total attn tensors: {d}, ssm tensors: {d}\n", .{ attn_count, ssm_count });
     }
 
     fn numericAsU64(_: *const Reader, value: GGUFValue) ?u64 {
