@@ -42,7 +42,7 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
 
         fn keyBytes(key: K) []const u8 {
             return switch (@typeInfo(K)) {
-                .pointer => |ptr| if (ptr.size == .slice and ptr.child == u8)
+                .Pointer => |ptr| if (ptr.size == .Slice and ptr.child == u8)
                     key
                 else
                     std.mem.asBytes(&key),
@@ -188,4 +188,38 @@ test "HashMap remove preserves probe chain" {
     try map.put(second.?, 2);
     try std.testing.expect(map.remove(first.?));
     try std.testing.expectEqual(@as(i32, 2), map.get(second.?).?.*);
+}
+
+test "HashMap resize" {
+    // Initial capacity of 8 means it resizes when adding the 6th element (8 * 3 / 4)
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // Insert 10 elements to trigger at least one resize
+    try map.put("key1", 1);
+    try map.put("key2", 2);
+    try map.put("key3", 3);
+    try map.put("key4", 4);
+    try map.put("key5", 5);
+    try map.put("key6", 6); // Triggers resize
+    try map.put("key7", 7);
+    try map.put("key8", 8);
+    try map.put("key9", 9);
+    try map.put("key10", 10);
+
+    // Verify all elements are still present and have correct values
+    try std.testing.expectEqual(@as(i32, 1), map.get("key1").?.*);
+    try std.testing.expectEqual(@as(i32, 2), map.get("key2").?.*);
+    try std.testing.expectEqual(@as(i32, 3), map.get("key3").?.*);
+    try std.testing.expectEqual(@as(i32, 4), map.get("key4").?.*);
+    try std.testing.expectEqual(@as(i32, 5), map.get("key5").?.*);
+    try std.testing.expectEqual(@as(i32, 6), map.get("key6").?.*);
+    try std.testing.expectEqual(@as(i32, 7), map.get("key7").?.*);
+    try std.testing.expectEqual(@as(i32, 8), map.get("key8").?.*);
+    try std.testing.expectEqual(@as(i32, 9), map.get("key9").?.*);
+    try std.testing.expectEqual(@as(i32, 10), map.get("key10").?.*);
+
+    // Verify the size actually increased
+    try std.testing.expect(map.entries.len > 8);
+    try std.testing.expectEqual(@as(usize, 10), map.count);
 }
