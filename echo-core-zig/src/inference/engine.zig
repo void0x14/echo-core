@@ -1011,4 +1011,32 @@ test "Engine.greedyNextToken correctly identifies token with max logit" {
     // Change max
     eng.logits[1] = 5.0; // new max
     try std.testing.expectEqual(@as(u32, 1), eng.greedyNextToken());
+
+    // Test first element is max
+    eng.logits[0] = 10.0; // new max
+    eng.logits[1] = 1.0;
+    eng.logits[2] = 2.0;
+    eng.logits[3] = 3.0;
+    try std.testing.expectEqual(@as(u32, 0), eng.greedyNextToken());
+
+    // Test last element is max
+    eng.logits[0] = 1.0;
+    eng.logits[1] = 2.0;
+    eng.logits[2] = 3.0;
+    eng.logits[3] = 10.0; // new max
+    try std.testing.expectEqual(@as(u32, 3), eng.greedyNextToken());
+
+    // Test negative logits
+    eng.logits[0] = -10.0;
+    eng.logits[1] = -5.0;
+    eng.logits[2] = -2.0; // new max (closest to zero)
+    eng.logits[3] = -8.0;
+    try std.testing.expectEqual(@as(u32, 2), eng.greedyNextToken());
+
+    // Test all identical logits (should pick index 0)
+    eng.logits[0] = 1.0;
+    eng.logits[1] = 1.0;
+    eng.logits[2] = 1.0;
+    eng.logits[3] = 1.0;
+    try std.testing.expectEqual(@as(u32, 0), eng.greedyNextToken());
 }
