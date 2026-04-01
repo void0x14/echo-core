@@ -81,3 +81,25 @@ test "ArrayList empty pop returns null" {
 
     try std.testing.expectEqual(@as(?i32, null), list.pop());
 }
+
+test "ArrayList pop until empty and then pop returns null" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(1);
+    try list.append(2);
+
+    try std.testing.expectEqual(@as(?i32, 2), list.pop());
+    try std.testing.expectEqual(@as(?i32, 1), list.pop());
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+}
+
+test "ArrayList get out of bounds returns null" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(100);
+
+    try std.testing.expectEqual(@as(?*const i32, null), list.get(1));
+    try std.testing.expectEqual(@as(?*const i32, null), list.get(100));
+}
