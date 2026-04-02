@@ -40,23 +40,23 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
             return v + 1;
         }
 
-        fn keyBytes(key: K) []const u8 {
+        fn keyBytes(key: *const K) []const u8 {
             return switch (@typeInfo(K)) {
                 .Pointer => |ptr| if (ptr.size == .Slice and ptr.child == u8)
-                    key
+                    key.*
                 else
-                    std.mem.asBytes(&key),
-                else => std.mem.asBytes(&key),
+                    std.mem.asBytes(key),
+                else => std.mem.asBytes(key),
             };
         }
 
         fn keysEqual(a: K, b: K) bool {
-            return std.mem.eql(u8, keyBytes(a), keyBytes(b));
+            return std.mem.eql(u8, keyBytes(&a), keyBytes(&b));
         }
 
         fn hash(key: K) usize {
             var h: usize = 2166136261;
-            const bytes = keyBytes(key);
+            const bytes = keyBytes(&key);
             for (bytes) |byte| {
                 h ^= byte;
                 h *%= 16777619;
@@ -223,4 +223,29 @@ test "HashMap resize logic" {
 
     // Verify it actually resized by checking the underlying slice capacity (power of two > 10)
     try std.testing.expect(map.entries.len >= 16);
+}
+
+test "HashMap resize multiple times (stress test)" {
+    var map = try HashMap(usize, usize).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    const num_items: usize = 1000;
+
+    // Insert enough items to trigger multiple resizes
+    for (0..num_items) |i| {
+        try map.put(i, i * 2);
+    }
+
+    // Verify all items are still present and values are correct
+    for (0..num_items) |i| {
+        const val = map.get(i);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(@as(usize, i * 2), val.?.*);
+    }
+
+    // Verify count is correct
+    try std.testing.expectEqual(num_items, map.count);
+
+    // Verify it actually resized enough times (capacity should be > 1000 * 4 / 3)
+    try std.testing.expect(map.entries.len >= 2048);
 }
