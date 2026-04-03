@@ -40,21 +40,21 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
             return v + 1;
         }
 
-        fn keyBytes(key: K) []const u8 {
+        fn keyBytes(key: *const K) []const u8 {
             return switch (@typeInfo(K)) {
                 .Pointer => |ptr| if (ptr.size == .Slice and ptr.child == u8)
-                    key
+                    key.*
                 else
-                    std.mem.asBytes(&key),
-                else => std.mem.asBytes(&key),
+                    std.mem.asBytes(key),
+                else => std.mem.asBytes(key),
             };
         }
 
-        fn keysEqual(a: K, b: K) bool {
+        fn keysEqual(a: *const K, b: *const K) bool {
             return std.mem.eql(u8, keyBytes(a), keyBytes(b));
         }
 
-        fn hash(key: K) usize {
+        fn hash(key: *const K) usize {
             var h: usize = 2166136261;
             const bytes = keyBytes(key);
             for (bytes) |byte| {
@@ -66,14 +66,14 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
 
         fn putAssumeCapacity(self: *@This(), key: K, value: V) void {
             const mask = self.entries.len - 1;
-            var i = hash(key) & mask;
+            var i = hash(&key) & mask;
             while (true) : (i = (i + 1) & mask) {
                 if (self.entries[i] == null) {
                     self.entries[i] = .{ .key = key, .value = value };
                     self.count += 1;
                     return;
                 }
-                if (keysEqual(self.entries[i].?.key, key)) {
+                if (keysEqual(&self.entries[i].?.key, &key)) {
                     self.entries[i].?.value = value;
                     return;
                 }
@@ -82,10 +82,10 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
 
         pub fn get(self: *const @This(), key: K) ?*const V {
             const mask = self.entries.len - 1;
-            var i = hash(key) & mask;
+            var i = hash(&key) & mask;
             while (true) : (i = (i + 1) & mask) {
                 if (self.entries[i] == null) return null;
-                if (keysEqual(self.entries[i].?.key, key)) {
+                if (keysEqual(&self.entries[i].?.key, &key)) {
                     return &self.entries[i].?.value;
                 }
             }
@@ -128,10 +128,10 @@ pub fn HashMap(comptime K: type, comptime V: type) type {
 
         pub fn remove(self: *@This(), key: K) bool {
             const mask = self.entries.len - 1;
-            var i = hash(key) & mask;
+            var i = hash(&key) & mask;
             while (true) : (i = (i + 1) & mask) {
                 if (self.entries[i] == null) return false;
-                if (keysEqual(self.entries[i].?.key, key)) {
+                if (keysEqual(&self.entries[i].?.key, &key)) {
                     self.entries[i] = null;
                     self.count -= 1;
                     self.reinsertCluster(i);
@@ -175,7 +175,7 @@ test "HashMap remove preserves probe chain" {
     var second: ?[]const u8 = null;
     outer: for (candidates, 0..) |a, i| {
         for (candidates[(i + 1)..]) |b| {
-            if ((HashMap([]const u8, i32).hash(a) & 7) == (HashMap([]const u8, i32).hash(b) & 7)) {
+            if ((HashMap([]const u8, i32).hash(&a) & 7) == (HashMap([]const u8, i32).hash(&b) & 7)) {
                 first = a;
                 second = b;
                 break :outer;
@@ -223,4 +223,25 @@ test "HashMap resize logic" {
 
     // Verify it actually resized by checking the underlying slice capacity (power of two > 10)
     try std.testing.expect(map.entries.len >= 16);
+}
+
+test "HashMap multiple resizes" {
+    var map = try HashMap(i32, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // Insert 1000 items to trigger multiple resizes
+    var i: i32 = 0;
+    while (i < 1000) : (i += 1) {
+        try map.put(i, i * 10);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1000), map.count);
+
+    // Verify all items are present and correct
+    i = 0;
+    while (i < 1000) : (i += 1) {
+        const val = map.get(i);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(i * 10, val.?.*);
+    }
 }
