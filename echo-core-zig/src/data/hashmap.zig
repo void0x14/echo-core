@@ -224,3 +224,31 @@ test "HashMap resize logic" {
     // Verify it actually resized by checking the underlying slice capacity (power of two > 10)
     try std.testing.expect(map.entries.len >= 16);
 }
+
+test "HashMap multiple resizes" {
+    var map = try HashMap([]const u8, usize).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    const num_items: usize = 1000;
+    var keys = try std.testing.allocator.alloc([]const u8, num_items);
+    var initialized_keys: usize = 0;
+    defer {
+        for (0..initialized_keys) |i| std.testing.allocator.free(keys[i]);
+        std.testing.allocator.free(keys);
+    }
+
+    for (0..num_items) |i| {
+        keys[i] = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        initialized_keys += 1;
+        try map.put(keys[i], i * 2);
+    }
+
+    try std.testing.expectEqual(num_items, map.count);
+    try std.testing.expect(map.entries.len > num_items);
+
+    for (0..num_items) |i| {
+        const val = map.get(keys[i]);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(i * 2, val.?.*);
+    }
+}
