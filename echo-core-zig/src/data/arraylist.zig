@@ -81,3 +81,50 @@ test "ArrayList empty pop returns null" {
 
     try std.testing.expectEqual(@as(?i32, null), list.pop());
 }
+
+test "ArrayList pop multiple items" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(10);
+    try list.append(20);
+    try list.append(30);
+
+    try std.testing.expectEqual(@as(?i32, 30), list.pop());
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+
+    try std.testing.expectEqual(@as(?i32, 20), list.pop());
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+
+    try std.testing.expectEqual(@as(?i32, 10), list.pop());
+    try std.testing.expectEqual(@as(usize, 0), list.len);
+
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+    try std.testing.expectEqual(@as(usize, 0), list.len);
+}
+
+test "ArrayList get retrieves items by index and handles out of bounds" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try std.testing.expectEqual(@as(?*const i32, null), list.get(0));
+
+    try list.append(100);
+    try list.append(200);
+    try list.append(300);
+
+    const first = list.get(0);
+    try std.testing.expect(first != null);
+    try std.testing.expectEqual(@as(i32, 100), first.?.*);
+
+    const second = list.get(1);
+    try std.testing.expect(second != null);
+    try std.testing.expectEqual(@as(i32, 200), second.?.*);
+
+    const third = list.get(2);
+    try std.testing.expect(third != null);
+    try std.testing.expectEqual(@as(i32, 300), third.?.*);
+
+    try std.testing.expectEqual(@as(?*const i32, null), list.get(3));
+    try std.testing.expectEqual(@as(?*const i32, null), list.get(10));
+}
