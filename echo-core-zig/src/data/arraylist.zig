@@ -81,3 +81,26 @@ test "ArrayList empty pop returns null" {
 
     try std.testing.expectEqual(@as(?i32, null), list.pop());
 }
+
+test "ArrayList pop LIFO and length tracking" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(10);
+    try list.append(20);
+    try list.append(30);
+
+    try std.testing.expectEqual(@as(usize, 3), list.len);
+
+    try std.testing.expectEqual(@as(?i32, 30), list.pop());
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+
+    try std.testing.expectEqual(@as(?i32, 20), list.pop());
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+
+    try std.testing.expectEqual(@as(?i32, 10), list.pop());
+    try std.testing.expectEqual(@as(usize, 0), list.len);
+
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+    try std.testing.expectEqual(@as(usize, 0), list.len);
+}
