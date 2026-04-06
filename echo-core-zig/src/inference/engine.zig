@@ -997,7 +997,7 @@ test "Engine lazily initializes kv cache on first forward" {
 
 test "Engine.greedyNextToken correctly identifies token with max logit" {
     const cfg = makeTinyConfig(0, 0);
-    var eng = try Engine.init(cfg, std.testing.allocator);
+    var eng = try Engine.init(cfg, null, std.testing.allocator);
     defer eng.deinit(std.testing.allocator);
 
     // Populate logits with known values
@@ -1011,4 +1011,8 @@ test "Engine.greedyNextToken correctly identifies token with max logit" {
     // Change max
     eng.logits[1] = 5.0; // new max
     try std.testing.expectEqual(@as(u32, 1), eng.greedyNextToken());
+
+    // Test early in the slice
+    eng.logits[0] = 10.0;
+    try std.testing.expectEqual(@as(u32, 0), eng.greedyNextToken());
 }
