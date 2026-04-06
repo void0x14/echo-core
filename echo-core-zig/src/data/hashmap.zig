@@ -248,3 +248,49 @@ test "HashMap resize multiple times (stress test)" {
     // Verify it actually resized enough times (capacity should be > 1000 * 4 / 3)
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap multiple resizes and collisions" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // Insert 1000 items to trigger multiple resizes and force hash collisions
+    var i: i32 = 0;
+    while (i < 1000) : (i += 1) {
+        // Create a heap-allocated key since primitive types passed by value shouldn't be used as keys directly
+        // due to the dangling pointer issue mentioned in memory
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        defer std.testing.allocator.free(key);
+
+        // HashMap stores the slice directly, so the underlying memory must outlive the map.
+        // We allocate and keep the keys until the map is destroyed.
+        const stored_key = try std.testing.allocator.dupe(u8, key);
+        errdefer std.testing.allocator.free(stored_key);
+        try map.put(stored_key, i);
+    }
+    defer {
+        // Clean up stored keys
+        for (map.entries) |entry_opt| {
+            if (entry_opt) |entry| {
+                std.testing.allocator.free(entry.key);
+            }
+        }
+    }
+
+    // Verify all 1000 items are present and correct
+    i = 0;
+    while (i < 1000) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        defer std.testing.allocator.free(key);
+
+        const value_ptr = map.get(key);
+        try std.testing.expect(value_ptr != null);
+        try std.testing.expectEqual(i, value_ptr.?.*);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1000), map.count);
+
+    // Initial capacity is 8.
+    // It should resize multiple times and have enough capacity for 1000 items with 3/4 load factor.
+    // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
+    try std.testing.expect(map.entries.len >= 2048);
+}
