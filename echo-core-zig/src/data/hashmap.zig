@@ -194,33 +194,32 @@ test "HashMap resize logic" {
     var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
     defer map.deinit();
 
-    // Insert enough items to trigger resize (8 * 3 / 4 = 6)
-    try map.put("item1", 1);
-    try map.put("item2", 2);
-    try map.put("item3", 3);
-    try map.put("item4", 4);
-    try map.put("item5", 5);
-    try map.put("item6", 6);
-    try map.put("item7", 7);
-    try map.put("item8", 8);
-    try map.put("item9", 9);
-    try map.put("item10", 10);
+    var keys = try std.ArrayList([]const u8).initCapacity(std.testing.allocator, 100);
+    defer {
+        for (keys.items) |key| {
+            std.testing.allocator.free(key);
+        }
+        keys.deinit();
+    }
 
-    // Verify all items are still present and values are correct
-    try std.testing.expectEqual(@as(i32, 1), map.get("item1").?.*);
-    try std.testing.expectEqual(@as(i32, 2), map.get("item2").?.*);
-    try std.testing.expectEqual(@as(i32, 3), map.get("item3").?.*);
-    try std.testing.expectEqual(@as(i32, 4), map.get("item4").?.*);
-    try std.testing.expectEqual(@as(i32, 5), map.get("item5").?.*);
-    try std.testing.expectEqual(@as(i32, 6), map.get("item6").?.*);
-    try std.testing.expectEqual(@as(i32, 7), map.get("item7").?.*);
-    try std.testing.expectEqual(@as(i32, 8), map.get("item8").?.*);
-    try std.testing.expectEqual(@as(i32, 9), map.get("item9").?.*);
-    try std.testing.expectEqual(@as(i32, 10), map.get("item10").?.*);
+    // Insert 100 items to trigger multiple resizes
+    var i: i32 = 0;
+    while (i < 100) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "item{d}", .{i});
+        try keys.append(key);
+        try map.put(key, i);
+    }
+
+    // Verify all 100 items are still present and values are correct
+    i = 0;
+    while (i < 100) : (i += 1) {
+        const key = keys.items[@as(usize, @intCast(i))];
+        try std.testing.expectEqual(i, map.get(key).?.*);
+    }
 
     // Verify count is correct
-    try std.testing.expectEqual(@as(usize, 10), map.count);
+    try std.testing.expectEqual(@as(usize, 100), map.count);
 
-    // Verify it actually resized by checking the underlying slice capacity (power of two > 10)
-    try std.testing.expect(map.entries.len >= 16);
+    // Verify it actually resized multiple times
+    try std.testing.expect(map.entries.len >= 128);
 }
