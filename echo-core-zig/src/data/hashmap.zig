@@ -294,3 +294,40 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap resize load factor boundary" {
+    // Initial capacity is 8
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // The load factor limit is entries.len * 3 / 4.
+    // 8 * 3 / 4 = 6. So on the 6th insertion, resize() should be triggered.
+
+    // Insert 5 items
+    try map.put("k1", 1);
+    try map.put("k2", 2);
+    try map.put("k3", 3);
+    try map.put("k4", 4);
+    try map.put("k5", 5);
+
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+    try std.testing.expectEqual(@as(usize, 5), map.count);
+
+    // Insert 6th item. The load factor is exactly reached (count is now 6, capacity limit is 6).
+    try map.put("k6", 6);
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // Insert 7th item, should trigger resize to 16 because count (6) is >= 8 * 3 / 4.
+    try map.put("k7", 7);
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+
+    // Verify all keys are still present
+    try std.testing.expectEqual(@as(i32, 1), map.get("k1").?.*);
+    try std.testing.expectEqual(@as(i32, 2), map.get("k2").?.*);
+    try std.testing.expectEqual(@as(i32, 3), map.get("k3").?.*);
+    try std.testing.expectEqual(@as(i32, 4), map.get("k4").?.*);
+    try std.testing.expectEqual(@as(i32, 5), map.get("k5").?.*);
+    try std.testing.expectEqual(@as(i32, 6), map.get("k6").?.*);
+    try std.testing.expectEqual(@as(i32, 7), map.get("k7").?.*);
+}
