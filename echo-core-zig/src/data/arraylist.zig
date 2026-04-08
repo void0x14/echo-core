@@ -109,3 +109,24 @@ test "ArrayList get out of bounds" {
     try std.testing.expectEqual(@as(?*const i32, null), list.get(1));
     try std.testing.expectEqual(@as(?*const i32, null), list.get(100));
 }
+
+test "ArrayList clear then pop returns null" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(1);
+    try list.append(2);
+    list.clear();
+
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+}
+
+test "ArrayList get after pop returns out of bounds" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(100);
+    try std.testing.expectEqual(@as(?i32, 100), list.pop());
+
+    try std.testing.expectEqual(@as(?*const i32, null), list.get(0));
+}
