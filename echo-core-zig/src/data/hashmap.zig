@@ -294,3 +294,52 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap exact resize threshold trigger" {
+    // Start with capacity 8
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    var keys = try std.ArrayList([]const u8).initCapacity(std.testing.allocator, 10);
+    defer {
+        for (keys.items) |key| {
+            std.testing.allocator.free(key);
+        }
+        keys.deinit();
+    }
+
+    // Insert items up to load factor threshold.
+    // For capacity 8, threshold is 8 * 3 / 4 = 6.
+    // Insert 6 items, count becomes 6.
+    var i: i32 = 0;
+    while (i < 6) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "thresh_{d}", .{i});
+        try keys.append(key);
+        try map.put(key, i);
+    }
+
+    // Array should not have resized yet
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+
+    // Inserting 7th item when count is 6 should trigger resize
+    // because count (6) >= capacity (8) * 3 / 4 (6)
+    const trigger_key = try std.fmt.allocPrint(std.testing.allocator, "thresh_6", .{});
+    try keys.append(trigger_key);
+    try map.put(trigger_key, 6);
+
+    // Verify it resized to 16
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+
+    // Verify all items are intact after resize
+    i = 0;
+    while (i <= 6) : (i += 1) {
+        const key = keys.items[@as(usize, @intCast(i))];
+        const val = map.get(key);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(i, val.?.*);
+    }
+}
