@@ -294,3 +294,36 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap exact resize boundary" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // Initial capacity is 8
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    try map.put("a", 1);
+    try map.put("b", 2);
+    try map.put("c", 3);
+    try map.put("d", 4);
+    try map.put("e", 5);
+    try map.put("f", 6);
+
+    // Still capacity 8
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // 7th item triggers resize
+    try map.put("g", 7);
+
+    // Now capacity should be 16
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+
+    // Verify all 7 items still exist
+    try std.testing.expectEqual(@as(i32, 1), map.get("a").?.*);
+    try std.testing.expectEqual(@as(i32, 2), map.get("b").?.*);
+    try std.testing.expectEqual(@as(i32, 3), map.get("c").?.*);
+    try std.testing.expectEqual(@as(i32, 4), map.get("d").?.*);
+    try std.testing.expectEqual(@as(i32, 5), map.get("e").?.*);
+    try std.testing.expectEqual(@as(i32, 6), map.get("f").?.*);
+    try std.testing.expectEqual(@as(i32, 7), map.get("g").?.*);
+}
