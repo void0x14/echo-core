@@ -294,3 +294,58 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap resize load factor boundary" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // Initial length should be 8.
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    var keys = try std.ArrayList([]const u8).initCapacity(std.testing.allocator, 8);
+    defer {
+        for (keys.items) |key| {
+            std.testing.allocator.free(key);
+        }
+        keys.deinit();
+    }
+
+    // Insert 5 items. The threshold is 8 * 3 / 4 = 6.
+    // So 5 items should not trigger a resize.
+    var i: i32 = 0;
+    while (i < 5) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "item{d}", .{i});
+        try keys.append(key);
+        try map.put(key, i * 10);
+    }
+    try std.testing.expectEqual(@as(usize, 5), map.count);
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // Insert 1 more item. This brings count to 6.
+    // The next put will evaluate the threshold before adding.
+    // At count 5, 5 >= 6 is false. The 6th item is added without resize.
+    const key_6 = try std.fmt.allocPrint(std.testing.allocator, "item5", .{});
+    try keys.append(key_6);
+    try map.put(key_6, 50);
+
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // Inserting the 7th item. Before adding, count (6) >= threshold (6) is true.
+    // This triggers resize. Length becomes 16.
+    const key_7 = try std.fmt.allocPrint(std.testing.allocator, "item6", .{});
+    try keys.append(key_7);
+    try map.put(key_7, 60);
+
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+
+    // Verify all items are intact
+    i = 0;
+    while (i < 7) : (i += 1) {
+        const key = keys.items[@as(usize, @intCast(i))];
+        const val = map.get(key);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(i * 10, val.?.*);
+    }
+}
