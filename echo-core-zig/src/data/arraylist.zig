@@ -109,3 +109,32 @@ test "ArrayList get out of bounds" {
     try std.testing.expectEqual(@as(?*const i32, null), list.get(1));
     try std.testing.expectEqual(@as(?*const i32, null), list.get(100));
 }
+
+test "ArrayList clear and pop" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(10);
+    try list.append(20);
+    try list.append(30);
+
+    list.clear();
+    try std.testing.expectEqual(@as(usize, 0), list.len);
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+}
+
+test "ArrayList pop string slices" {
+    var list = ArrayList([]const u8).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append("hello");
+    try list.append("world");
+
+    const popped_world = list.pop().?;
+    try std.testing.expectEqualStrings("world", popped_world);
+
+    const popped_hello = list.pop().?;
+    try std.testing.expectEqualStrings("hello", popped_hello);
+
+    try std.testing.expectEqual(@as(?[]const u8, null), list.pop());
+}
