@@ -294,3 +294,42 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap resize beyond initial capacity" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // Map has initial capacity 8. At 3/4 load factor (6 items), it should resize to 16.
+    // Inserting 9 items guarantees it crosses both the resize threshold and the initial physical capacity.
+
+    // Store keys to free them later, as HashMap doesn't take ownership of dynamically allocated keys.
+    var keys = try std.ArrayList([]const u8).initCapacity(std.testing.allocator, 9);
+    defer {
+        for (keys.items) |key| {
+            std.testing.allocator.free(key);
+        }
+        keys.deinit();
+    }
+
+    var i: i32 = 0;
+    while (i < 9) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "test_key_{d}", .{i});
+        try keys.append(key);
+        try map.put(key, i);
+    }
+
+    // Verify all 9 items are present and values are correct
+    i = 0;
+    while (i < 9) : (i += 1) {
+        const key = keys.items[@as(usize, @intCast(i))];
+        const val_ptr = map.get(key);
+        try std.testing.expect(val_ptr != null);
+        try std.testing.expectEqual(i, val_ptr.?.*);
+    }
+
+    // Verify count is 9
+    try std.testing.expectEqual(@as(usize, 9), map.count);
+
+    // Initial size is 8. After inserting 6 items it resizes to 16.
+    try std.testing.expect(map.entries.len >= 16);
+}
