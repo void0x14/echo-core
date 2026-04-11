@@ -1001,6 +1001,7 @@ test "Engine.greedyNextToken correctly identifies token with max logit" {
     defer eng.deinit(std.testing.allocator);
 
     // Populate logits with known values
+    @memset(eng.logits, -100.0);
     eng.logits[0] = 0.1;
     eng.logits[1] = 0.5;
     eng.logits[2] = 2.0; // max
