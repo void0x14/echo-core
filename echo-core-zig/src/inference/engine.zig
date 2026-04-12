@@ -10,7 +10,7 @@ const kv_cache = @import("../kv_cache/cache.zig");
 const math = @import("../core/math.zig");
 const gguf = @import("../gguf/reader.zig");
 
-const ArrayList = std.array_list.Managed;
+const ArrayList = std.ArrayList;
 
 /// Helper: Cast byte slice to fp16 slice
 fn fp16SliceFromBytes(bytes: []u8) []types.fp16_t {
@@ -1015,4 +1015,26 @@ test "Engine.greedyNextToken correctly identifies token with max logit" {
     // Test early in the slice
     eng.logits[0] = 10.0;
     try std.testing.expectEqual(@as(u32, 0), eng.greedyNextToken());
+}
+
+test "Engine.greedyNextToken correctly identifies max logit with negative values" {
+    const cfg = makeTinyConfig(0, 0);
+    var eng = try Engine.init(cfg, null, std.testing.allocator);
+    defer eng.deinit(std.testing.allocator);
+
+    // When testing negative logits, we must fully initialize the slice first
+    // to overwrite the 0xaa debug memory filler which evaluates to ~ -3.03e-13.
+    // Otherwise, uninitialized memory might be greater than our negative test values.
+    @memset(eng.logits, -100.0);
+
+    eng.logits[0] = -10.5;
+    eng.logits[1] = -5.2; // max
+    eng.logits[2] = -20.1;
+    eng.logits[3] = -8.4;
+
+    try std.testing.expectEqual(@as(u32, 1), eng.greedyNextToken());
+
+    // Change max to another negative value
+    eng.logits[3] = -2.1; // new max
+    try std.testing.expectEqual(@as(u32, 3), eng.greedyNextToken());
 }
