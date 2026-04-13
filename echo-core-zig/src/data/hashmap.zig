@@ -225,19 +225,30 @@ test "HashMap resize logic" {
 }
 
 test "HashMap resize multiple times (stress test)" {
-    var map = try HashMap(usize, usize).init(std.testing.allocator, 8);
+    var map = try HashMap([]const u8, usize).init(std.testing.allocator, 8);
     defer map.deinit();
 
     const num_items: usize = 1000;
 
+    var keys = try std.ArrayList([]const u8).initCapacity(std.testing.allocator, num_items);
+    defer {
+        for (keys.items) |key| {
+            std.testing.allocator.free(key);
+        }
+        keys.deinit();
+    }
+
     // Insert enough items to trigger multiple resizes
     for (0..num_items) |i| {
-        try map.put(i, i * 2);
+        const key = try std.fmt.allocPrint(std.testing.allocator, "stress_item_{d}", .{i});
+        try keys.append(key);
+        try map.put(key, i * 2);
     }
 
     // Verify all items are still present and values are correct
     for (0..num_items) |i| {
-        const val = map.get(i);
+        const key = keys.items[i];
+        const val = map.get(key);
         try std.testing.expect(val != null);
         try std.testing.expectEqual(@as(usize, i * 2), val.?.*);
     }
@@ -293,4 +304,45 @@ test "HashMap multiple resizes and collisions" {
     // It should resize multiple times and have enough capacity for 1000 items with 3/4 load factor.
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
+}
+
+test "HashMap exact resize boundary" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    var keys = try std.ArrayList([]const u8).initCapacity(std.testing.allocator, 7);
+    defer {
+        for (keys.items) |key| {
+            std.testing.allocator.free(key);
+        }
+        keys.deinit();
+    }
+
+    // Insert 6 items. Capacity should remain 8. (load factor 6/8 = 75%)
+    var i: i32 = 0;
+    while (i < 6) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "boundary_{d}", .{i});
+        try keys.append(key);
+        try map.put(key, i);
+    }
+
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // Inserting the 7th item triggers resize.
+    const key = try std.fmt.allocPrint(std.testing.allocator, "boundary_{d}", .{6});
+    try keys.append(key);
+    try map.put(key, 6);
+
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+
+    // Verify all items are preserved
+    for (keys.items, 0..) |k, idx| {
+        const val = map.get(k);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(@as(i32, @intCast(idx)), val.?.*);
+    }
 }
