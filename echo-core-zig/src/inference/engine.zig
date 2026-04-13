@@ -1015,4 +1015,9 @@ test "Engine.greedyNextToken correctly identifies token with max logit" {
     // Test early in the slice
     eng.logits[0] = 10.0;
     try std.testing.expectEqual(@as(u32, 0), eng.greedyNextToken());
+
+    // Check negative numbers and uninitialized memory patterns
+    @memset(eng.logits, -100.0);
+    eng.logits[3] = -50.0;
+    try std.testing.expectEqual(@as(u32, 3), eng.greedyNextToken());
 }
