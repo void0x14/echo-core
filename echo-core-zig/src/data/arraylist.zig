@@ -109,3 +109,40 @@ test "ArrayList get out of bounds" {
     try std.testing.expectEqual(@as(?*const i32, null), list.get(1));
     try std.testing.expectEqual(@as(?*const i32, null), list.get(100));
 }
+
+test "ArrayList pop complex types" {
+    var list = ArrayList([]const u8).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append("hello");
+    try list.append("world");
+
+    try std.testing.expectEqual(list.len, 2);
+
+    const pop1 = list.pop();
+    try std.testing.expectEqualStrings("world", pop1.?);
+    try std.testing.expectEqual(list.len, 1);
+
+    const pop2 = list.pop();
+    try std.testing.expectEqualStrings("hello", pop2.?);
+    try std.testing.expectEqual(list.len, 0);
+
+    try std.testing.expectEqual(@as(?[]const u8, null), list.pop());
+}
+
+test "ArrayList get after pop returns null" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(42);
+    try std.testing.expectEqual(list.len, 1);
+
+    // Element is accessible before pop
+    const val_ptr = list.get(0);
+    try std.testing.expectEqual(@as(i32, 42), val_ptr.?.*);
+
+    _ = list.pop();
+
+    // Element is out of bounds after pop
+    try std.testing.expectEqual(@as(?*const i32, null), list.get(0));
+}
