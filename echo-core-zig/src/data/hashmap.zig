@@ -294,3 +294,48 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap resize exact trigger" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    var keys = try std.ArrayList([]const u8).initCapacity(std.testing.allocator, 7);
+    defer {
+        for (keys.items) |key| {
+            std.testing.allocator.free(key);
+        }
+        keys.deinit();
+    }
+
+    // Insert 6 items first
+    var i: i32 = 0;
+    while (i < 6) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        try keys.append(key);
+        try map.put(key, i);
+    }
+
+    // Verify it hasn't resized yet
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // Insert the 7th item, this should trigger the resize
+    const key_7 = try std.fmt.allocPrint(std.testing.allocator, "key_6", .{});
+    try keys.append(key_7);
+    try map.put(key_7, 6);
+
+    // Verify it has resized
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+
+    // Verify all 7 items are present and correct
+    i = 0;
+    while (i < 7) : (i += 1) {
+        const key = keys.items[@as(usize, @intCast(i))];
+        const value_ptr = map.get(key);
+        try std.testing.expect(value_ptr != null);
+        try std.testing.expectEqual(i, value_ptr.?.*);
+    }
+}
