@@ -294,3 +294,52 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap trigger resize by inserting more items than initial capacity" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // Initial capacity should be 8
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // Insert 6 items (3/4 of 8)
+    var i: i32 = 0;
+    while (i < 6) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        defer std.testing.allocator.free(key);
+
+        const stored_key = try std.testing.allocator.dupe(u8, key);
+        errdefer std.testing.allocator.free(stored_key);
+        try map.put(stored_key, i);
+    }
+    defer {
+        for (map.entries) |entry_opt| {
+            if (entry_opt) |entry| {
+                std.testing.allocator.free(entry.key);
+            }
+        }
+    }
+
+    // Capacity should still be 8
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+
+    // Insert 7th item to trigger resize
+    const key7 = try std.testing.allocator.dupe(u8, "key_6");
+    errdefer std.testing.allocator.free(key7);
+    try map.put(key7, 6);
+
+    // Capacity should now be 16
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+
+    // Verify all 7 items are retrievable
+    i = 0;
+    while (i < 7) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        defer std.testing.allocator.free(key);
+        const value_ptr = map.get(key);
+        try std.testing.expect(value_ptr != null);
+        try std.testing.expectEqual(i, value_ptr.?.*);
+    }
+}
