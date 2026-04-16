@@ -1000,6 +1000,9 @@ test "Engine.greedyNextToken correctly identifies token with max logit" {
     var eng = try Engine.init(cfg, null, std.testing.allocator);
     defer eng.deinit(std.testing.allocator);
 
+    // Initialize all logits to a small value
+    @memset(eng.logits, -100.0);
+
     // Populate logits with known values
     eng.logits[0] = 0.1;
     eng.logits[1] = 0.5;
@@ -1015,4 +1018,18 @@ test "Engine.greedyNextToken correctly identifies token with max logit" {
     // Test early in the slice
     eng.logits[0] = 10.0;
     try std.testing.expectEqual(@as(u32, 0), eng.greedyNextToken());
+
+    // Test negative values
+    @memset(eng.logits, -100.0);
+    eng.logits[0] = -10.0;
+    eng.logits[1] = -5.0; // max
+    eng.logits[2] = -20.0;
+    eng.logits[3] = -8.0;
+    try std.testing.expectEqual(@as(u32, 1), eng.greedyNextToken());
+
+    // Test ties
+    @memset(eng.logits, 0.0);
+    eng.logits[1] = 5.0;
+    eng.logits[2] = 5.0;
+    try std.testing.expectEqual(@as(u32, 1), eng.greedyNextToken());
 }
