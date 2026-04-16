@@ -109,3 +109,19 @@ test "ArrayList get out of bounds" {
     try std.testing.expectEqual(@as(?*const i32, null), list.get(1));
     try std.testing.expectEqual(@as(?*const i32, null), list.get(100));
 }
+
+test "ArrayList pop with strings" {
+    var list = ArrayList([]const u8).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append("hello");
+    try list.append("world");
+
+    try std.testing.expectEqualStrings("world", list.pop().?);
+    try std.testing.expectEqual(list.len, 1);
+
+    try std.testing.expectEqualStrings("hello", list.pop().?);
+    try std.testing.expectEqual(list.len, 0);
+
+    try std.testing.expectEqual(@as(?[]const u8, null), list.pop());
+}
