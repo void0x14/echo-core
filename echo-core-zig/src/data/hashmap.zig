@@ -190,6 +190,61 @@ test "HashMap remove preserves probe chain" {
     try std.testing.expectEqual(@as(i32, 2), map.get(second.?).?.*);
 }
 
+test "HashMap exact load factor boundary" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // Initial capacity is 8
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // Load factor is 3/4. For capacity 8, resize is triggered when count >= 6.
+    // Insert 5 items (count will be 5, below threshold 6)
+    var i: i32 = 0;
+    while (i < 5) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        errdefer std.testing.allocator.free(key);
+        try map.put(key, i);
+    }
+    defer {
+        for (map.entries) |entry_opt| {
+            if (entry_opt) |entry| {
+                std.testing.allocator.free(entry.key);
+            }
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 5), map.count);
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len); // Should not have resized
+
+    // Insert the 6th item. The threshold is 8 * 3 / 4 = 6.
+    // Before this insertion, count is 5 (5 >= 6 is false), so resize is not triggered.
+    const key5 = try std.fmt.allocPrint(std.testing.allocator, "key_5", .{});
+    errdefer std.testing.allocator.free(key5);
+    try map.put(key5, 5);
+
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len); // Still should not have resized
+
+    // Insert the 7th item.
+    // Before insertion, count is 6. 6 >= 8 * 3 / 4 (which is 6) is true, so resize is triggered.
+    const key6 = try std.fmt.allocPrint(std.testing.allocator, "key_6", .{});
+    errdefer std.testing.allocator.free(key6);
+    try map.put(key6, 6);
+
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len); // Should have resized to 16
+
+    // Verify all 7 items are still present and values are correct
+    i = 0;
+    while (i < 7) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        defer std.testing.allocator.free(key);
+        const val = map.get(key);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(i, val.?.*);
+    }
+}
+
 test "HashMap resize logic" {
     var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
     defer map.deinit();
