@@ -190,6 +190,36 @@ test "HashMap remove preserves probe chain" {
     try std.testing.expectEqual(@as(i32, 2), map.get(second.?).?.*);
 }
 
+test "HashMap exact resize boundary" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // For capacity 8, the resize threshold is 8 * 3 / 4 = 6.
+    // Inserting 6 items should not trigger a resize.
+    try map.put("1", 1);
+    try map.put("2", 2);
+    try map.put("3", 3);
+    try map.put("4", 4);
+    try map.put("5", 5);
+    try map.put("6", 6);
+
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // Inserting the 7th item should trigger a resize to 16.
+    try map.put("7", 7);
+
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+
+    // Verify all items are still accessible
+    try std.testing.expectEqual(@as(i32, 1), map.get("1").?.*);
+    try std.testing.expectEqual(@as(i32, 6), map.get("6").?.*);
+    try std.testing.expectEqual(@as(i32, 7), map.get("7").?.*);
+}
+
 test "HashMap resize logic" {
     var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
     defer map.deinit();
@@ -293,4 +323,37 @@ test "HashMap multiple resizes and collisions" {
     // It should resize multiple times and have enough capacity for 1000 items with 3/4 load factor.
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
+}
+
+test "HashMap OOM during resize" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const allocator = failing_allocator.allocator();
+
+    var map = try HashMap([]const u8, i32).init(allocator, 8);
+    defer map.deinit();
+
+    // 1st allocation happens in init (succeeds)
+
+    // Fill the map up to the resize threshold
+    try map.put("1", 1);
+    try map.put("2", 2);
+    try map.put("3", 3);
+    try map.put("4", 4);
+    try map.put("5", 5);
+    try map.put("6", 6);
+
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+
+    // 7th item should trigger resize. We set the fail_index to 1,
+    // so the second allocation (which is the resize array allocation) will fail with OutOfMemory
+    const err = map.put("7", 7);
+    try std.testing.expectError(error.OutOfMemory, err);
+
+    // The map should still be in a valid state and contain the original 6 items
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    try std.testing.expectEqual(@as(i32, 1), map.get("1").?.*);
+    try std.testing.expectEqual(@as(i32, 6), map.get("6").?.*);
+    try std.testing.expect(map.get("7") == null);
 }
