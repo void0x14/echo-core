@@ -1016,3 +1016,24 @@ test "Engine.greedyNextToken correctly identifies token with max logit" {
     eng.logits[0] = 10.0;
     try std.testing.expectEqual(@as(u32, 0), eng.greedyNextToken());
 }
+
+test "Engine.greedyNextToken correctly handles all negative logits" {
+    const cfg = makeTinyConfig(0, 0);
+    var eng = try Engine.init(cfg, null, std.testing.allocator);
+    defer eng.deinit(std.testing.allocator);
+
+    // Initialize all to a large negative number
+    @memset(eng.logits, -100.0);
+
+    // Populate logits with negative values
+    eng.logits[0] = -50.0;
+    eng.logits[1] = -20.0;
+    eng.logits[2] = -5.0; // max
+    eng.logits[3] = -10.0;
+
+    try std.testing.expectEqual(@as(u32, 2), eng.greedyNextToken());
+
+    // Change max
+    eng.logits[0] = -1.0; // new max
+    try std.testing.expectEqual(@as(u32, 0), eng.greedyNextToken());
+}
