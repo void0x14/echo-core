@@ -249,6 +249,41 @@ test "HashMap resize multiple times (stress test)" {
     try std.testing.expect(map.entries.len >= 2048);
 }
 
+test "HashMap simple resize" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // 75% load factor on capacity 8 triggers a resize upon inserting 7th item
+    // Insert 7 items to trigger at least one resize
+    var keys = try std.ArrayList([]const u8).initCapacity(std.testing.allocator, 7);
+    defer {
+        for (keys.items) |key| {
+            std.testing.allocator.free(key);
+        }
+        keys.deinit();
+    }
+
+    var i: i32 = 0;
+    while (i < 7) : (i += 1) {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        try keys.append(key);
+        try map.put(key, i);
+    }
+
+    // Verify capacity increased
+    try std.testing.expect(map.entries.len >= 16);
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+
+    // Verify all 7 items are still present
+    i = 0;
+    while (i < 7) : (i += 1) {
+        const key = keys.items[@as(usize, @intCast(i))];
+        const value_ptr = map.get(key);
+        try std.testing.expect(value_ptr != null);
+        try std.testing.expectEqual(i, value_ptr.?.*);
+    }
+}
+
 test "HashMap multiple resizes and collisions" {
     var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
     defer map.deinit();
