@@ -294,3 +294,26 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap OOM during resize" {
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var map = try HashMap([]const u8, i32).init(failing_allocator.allocator(), 8);
+    defer map.deinit();
+
+    // Insert items up to the threshold (8 * 3 / 4 = 6)
+    try map.put("1", 1);
+    try map.put("2", 2);
+    try map.put("3", 3);
+    try map.put("4", 4);
+    try map.put("5", 5);
+    try map.put("6", 6);
+
+    // The 7th insertion triggers resize, which will fail with OOM
+    try std.testing.expectError(error.OutOfMemory, map.put("7", 7));
+
+    // Verify map state is unchanged and valid
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+    try std.testing.expectEqual(@as(i32, 1), map.get("1").?.*);
+    try std.testing.expectEqual(@as(i32, 6), map.get("6").?.*);
+    try std.testing.expect(map.get("7") == null);
+}
