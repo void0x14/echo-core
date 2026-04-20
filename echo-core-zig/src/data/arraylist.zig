@@ -109,3 +109,38 @@ test "ArrayList get out of bounds" {
     try std.testing.expectEqual(@as(?*const i32, null), list.get(1));
     try std.testing.expectEqual(@as(?*const i32, null), list.get(100));
 }
+
+test "ArrayList pop happy path" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(42);
+    try list.append(84);
+
+    try std.testing.expectEqual(@as(usize, 2), list.len);
+    try std.testing.expectEqual(@as(?i32, 84), list.pop());
+    try std.testing.expectEqual(@as(usize, 1), list.len);
+    try std.testing.expectEqual(@as(?i32, 42), list.pop());
+    try std.testing.expectEqual(@as(usize, 0), list.len);
+}
+
+test "ArrayList consecutive empty pops" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+    try std.testing.expectEqual(@as(usize, 0), list.len);
+}
+
+test "ArrayList pop after clear" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(1);
+    try list.append(2);
+    list.clear();
+
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+    try std.testing.expectEqual(@as(usize, 0), list.len);
+}
