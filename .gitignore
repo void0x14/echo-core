@@ -15,3 +15,5 @@ compile_commands.json
 __pycache__/
 *.pyo
 user-documents/
+# Zig build cache
+echo-core-zig/zig-cache/

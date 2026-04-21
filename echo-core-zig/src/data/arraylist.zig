@@ -109,3 +109,71 @@ test "ArrayList get out of bounds" {
     try std.testing.expectEqual(@as(?*const i32, null), list.get(1));
     try std.testing.expectEqual(@as(?*const i32, null), list.get(100));
 }
+
+test "ArrayList clear" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(1);
+    try list.append(2);
+
+    try std.testing.expectEqual(list.len, 2);
+    try std.testing.expectEqual(list.capacity, 8);
+
+    list.clear();
+
+    try std.testing.expectEqual(list.len, 0);
+    try std.testing.expectEqual(list.capacity, 8);
+}
+
+test "ArrayList capacity growth" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try std.testing.expectEqual(list.capacity, 0);
+
+    try list.append(1);
+    try std.testing.expectEqual(list.capacity, 8);
+
+    var i: i32 = 2;
+    while (i <= 8) : (i += 1) {
+        try list.append(i);
+    }
+
+    try std.testing.expectEqual(list.len, 8);
+    try std.testing.expectEqual(list.capacity, 8);
+
+    try list.append(9);
+    try std.testing.expectEqual(list.len, 9);
+    try std.testing.expectEqual(list.capacity, 16);
+}
+
+test "ArrayList pop after clear returns null" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(1);
+    try list.append(2);
+
+    list.clear();
+
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+}
+
+test "ArrayList happy path pop" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try list.append(42);
+    try list.append(100);
+
+    try std.testing.expectEqual(list.len, 2);
+
+    const popped = list.pop();
+    try std.testing.expectEqual(popped, 100);
+    try std.testing.expectEqual(list.len, 1);
+
+    const popped2 = list.pop();
+    try std.testing.expectEqual(popped2, 42);
+    try std.testing.expectEqual(list.len, 0);
+}
