@@ -294,3 +294,82 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap resize OutOfMemory handling" {
+    var failing_alloc = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+
+    // The first allocation is done in `init`
+    var map = try HashMap([]const u8, usize).init(failing_alloc.allocator(), 8);
+    defer map.deinit();
+
+    // Capacity is 8. Resize happens at count >= 6.
+    for (0..6) |i| {
+        // use std.testing.allocator to allocate string keys
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        // we don't free here to allow HashMap to hold the slice
+        try map.put(key, i * 10);
+    }
+    defer {
+        // free allocated strings
+        for (map.entries) |entry_opt| {
+            if (entry_opt) |entry| {
+                std.testing.allocator.free(entry.key);
+            }
+        }
+    }
+
+    // The 7th insertion triggers `resize` which will fail due to OOM
+    const fail_key = try std.fmt.allocPrint(std.testing.allocator, "key_6", .{});
+    defer std.testing.allocator.free(fail_key); // since it fails, it is not kept
+    try std.testing.expectError(error.OutOfMemory, map.put(fail_key, 60));
+
+    // Verify all previously inserted items are still present and unmodified
+    for (0..6) |i| {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        defer std.testing.allocator.free(key);
+
+        const val = map.get(key);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(@as(usize, i * 10), val.?.*);
+    }
+
+    // Verify count is still 6
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+}
+
+test "HashMap single resize happy path" {
+    var map = try HashMap([]const u8, usize).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // Capacity is 8. Resize happens at count >= 6.
+    // We insert 7 items to trigger exactly one resize.
+    for (0..7) |i| {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        // we don't free here to allow HashMap to hold the slice
+        try map.put(key, i * 10);
+    }
+    defer {
+        // free allocated strings
+        for (map.entries) |entry_opt| {
+            if (entry_opt) |entry| {
+                std.testing.allocator.free(entry.key);
+            }
+        }
+    }
+
+    // Verify all 7 items are still present and unmodified
+    for (0..7) |i| {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        defer std.testing.allocator.free(key);
+
+        const val = map.get(key);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(@as(usize, i * 10), val.?.*);
+    }
+
+    // Verify count is 7
+    try std.testing.expectEqual(@as(usize, 7), map.count);
+
+    // Verify capacity increased to 16
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+}
