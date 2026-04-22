@@ -249,6 +249,47 @@ test "HashMap resize multiple times (stress test)" {
     try std.testing.expect(map.entries.len >= 2048);
 }
 
+test "HashMap exact boundary resize logic" {
+    var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
+    defer map.deinit();
+
+    // With capacity 8, load factor 3/4 = 6 items
+    // Inserting 6 items should not resize
+    try map.put("1", 1);
+    try map.put("2", 2);
+    try map.put("3", 3);
+    try map.put("4", 4);
+    try map.put("5", 5);
+    try map.put("6", 6);
+
+    try std.testing.expectEqual(@as(usize, 8), map.entries.len);
+
+    // Inserting 7th item should trigger resize
+    try map.put("7", 7);
+    try std.testing.expectEqual(@as(usize, 16), map.entries.len);
+}
+
+test "HashMap Out-Of-Memory during resize" {
+    // Allocation 0: map.entries in init
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var map = try HashMap([]const u8, i32).init(failing_allocator.allocator(), 8);
+    defer map.deinit();
+
+    try map.put("1", 1);
+    try map.put("2", 2);
+    try map.put("3", 3);
+    try map.put("4", 4);
+    try map.put("5", 5);
+    try map.put("6", 6);
+
+    try std.testing.expectError(error.OutOfMemory, map.put("7", 7));
+
+    // Verify state remains consistent after failure
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+    try std.testing.expectEqual(@as(i32, 1), map.get("1").?.*);
+    try std.testing.expectEqual(@as(i32, 6), map.get("6").?.*);
+}
+
 test "HashMap multiple resizes and collisions" {
     var map = try HashMap([]const u8, i32).init(std.testing.allocator, 8);
     defer map.deinit();
