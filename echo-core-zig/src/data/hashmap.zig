@@ -294,3 +294,47 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap resize OutOfMemory" {
+    // Wrap the standard allocator with a FailingAllocator
+    // .fail_index = 1 allows the initial capacity allocation in init() to succeed,
+    // but the next allocation (which happens during resize) will fail.
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const allocator = failing_allocator.allocator();
+
+    var map = try HashMap([]const u8, usize).init(allocator, 8);
+    defer map.deinit();
+
+    // With a capacity of 8 and a 75% load factor, the map will trigger a resize on the 7th insertion (count == 6)
+
+    // Create an array to keep track of dynamically allocated string keys.
+    var keys: [7][]const u8 = undefined;
+
+    // Successfully insert 6 elements
+    for (0..6) |i| {
+        const key = try std.fmt.allocPrint(std.testing.allocator, "key_{d}", .{i});
+        keys[i] = key;
+        try map.put(key, i);
+    }
+
+    // Now insert the 7th element, which will trigger the failing resize
+    const key_7 = try std.fmt.allocPrint(std.testing.allocator, "key_6", .{});
+    keys[6] = key_7;
+
+    const result = map.put(key_7, 6);
+    try std.testing.expectError(error.OutOfMemory, result);
+
+    // Verify map is in a consistent state and original items are present
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+
+    for (0..6) |i| {
+        const val = map.get(keys[i]);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(i, val.?.*);
+    }
+
+    // Clean up all dynamically allocated keys
+    for (0..7) |i| {
+        std.testing.allocator.free(keys[i]);
+    }
+}
