@@ -294,3 +294,33 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap resize OutOfMemory" {
+    // Fail on the second allocation (which happens during the first resize)
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    const alloc = failing_allocator.allocator();
+
+    var map = try HashMap(usize, usize).init(alloc, 8);
+    defer map.deinit();
+
+    // Capacity is 8. Resize triggers at 8 * 3 / 4 = 6 elements.
+    // Insert 6 elements, should succeed without resizing.
+    var i: usize = 0;
+    while (i < 6) : (i += 1) {
+        try map.put(i, i * 2);
+    }
+
+    // This 7th insertion will trigger a resize, which should fail due to OOM.
+    const result = map.put(6, 12);
+    try std.testing.expectError(error.OutOfMemory, result);
+
+    // Verify the map is still functional with original contents after OOM.
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+
+    i = 0;
+    while (i < 6) : (i += 1) {
+        const val = map.get(i);
+        try std.testing.expect(val != null);
+        try std.testing.expectEqual(i * 2, val.?.*);
+    }
+}
