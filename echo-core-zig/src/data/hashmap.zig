@@ -294,3 +294,34 @@ test "HashMap multiple resizes and collisions" {
     // 1000 / 0.75 = 1333.33 -> next power of 2 is 2048
     try std.testing.expect(map.entries.len >= 2048);
 }
+
+test "HashMap resize Out-Of-Memory handling" {
+    // init() makes 1 allocation for initial capacity (fail_index = 0).
+    var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1 });
+    var map = try HashMap([]const u8, usize).init(failing_allocator.allocator(), 8);
+    defer map.deinit();
+
+    // Capacity is 8. Threshold is 8 * 3 / 4 = 6.
+    try map.put("key0", 0);
+    try map.put("key1", 1);
+    try map.put("key2", 2);
+    try map.put("key3", 3);
+    try map.put("key4", 4);
+    try map.put("key5", 5);
+
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+
+    // 7th insert will trigger resize. The resize allocation (fail_index = 1) will fail.
+    const err = map.put("key6", 6);
+    try std.testing.expectError(error.OutOfMemory, err);
+
+    // Verify map is still usable and previous entries are preserved
+    try std.testing.expectEqual(@as(usize, 6), map.count);
+
+    try std.testing.expectEqual(@as(usize, 0), map.get("key0").?.*);
+    try std.testing.expectEqual(@as(usize, 1), map.get("key1").?.*);
+    try std.testing.expectEqual(@as(usize, 2), map.get("key2").?.*);
+    try std.testing.expectEqual(@as(usize, 3), map.get("key3").?.*);
+    try std.testing.expectEqual(@as(usize, 4), map.get("key4").?.*);
+    try std.testing.expectEqual(@as(usize, 5), map.get("key5").?.*);
+}
