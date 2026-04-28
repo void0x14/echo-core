@@ -109,3 +109,22 @@ test "ArrayList get out of bounds" {
     try std.testing.expectEqual(@as(?*const i32, null), list.get(1));
     try std.testing.expectEqual(@as(?*const i32, null), list.get(100));
 }
+
+test "ArrayList pop does not shrink capacity" {
+    var list = ArrayList(i32).init(std.testing.allocator);
+    defer list.deinit();
+
+    try std.testing.expectEqual(list.capacity, 0);
+
+    try list.append(10);
+    try std.testing.expectEqual(list.capacity, 8);
+    try std.testing.expectEqual(list.len, 1);
+
+    const popped = list.pop();
+    try std.testing.expectEqual(popped, 10);
+    try std.testing.expectEqual(list.capacity, 8);
+    try std.testing.expectEqual(list.len, 0);
+
+    try std.testing.expectEqual(@as(?i32, null), list.pop());
+    try std.testing.expectEqual(list.capacity, 8);
+}
