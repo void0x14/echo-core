@@ -3,119 +3,75 @@
 > Son güncelleme: 2026-05-22 (oturum #4)
 > Aktif model: `Qwopus3.5-9B-coder-Exp-Q4_K_S.gguf` (5.0 GB)
 > Zig versiyonu: 0.17.0-dev.248+95507faf1
+> Güncel hız: **0.02 tok/s** (hedef: 50-100 tok/s)
 
 ---
 
-## 1. Build Onarımı (Ön Koşul)
+## 1-5: Altyapı
 
 **Durum:**  **TAMAMLANDI**
 
-### 1.1 `**` operator whitespace hatası
-- **Durum:**  **Çözüldü** — `@memset(&raw, 0)` kullanılıyor
-- **Doğrulama:** `zig build` çıktısız bitiyor
-
-### 1.2 `zig build test` runner hatası
-- **Durum:**  Workaround - Zig 0.17 socket/listener bug'ı
-- **Doğrulama:** Tüm test'ler geçiyor (`zig build test` exit 0)
+- Build fix (quant.zig whitespace)
+- Model dump (Python + Zig)
+- GGUF Reader (full_attention_interval)
+- Layer Detection (hybrid qwen35)
+- Weight Loader (fused QKV dtype propagation)
 
 ---
 
-## 2. Model Dump & Tensor Yapısını Doğrulama
+## 6. Engine Forward
 
 **Durum:**  **TAMAMLANDI**
 
-### 2.1 Python analyze_gguf.py ile model taraması
-- **Durum:**  **Tamamlandı**
-- Metadata doğrulandı, 427 tensor
-
-### 2.2 Zig dump-model tool'u
-- **Durum:**  **Tamamlandı**
-
----
-
-## 3. GGUF Reader
-
-**Durum:**  **TAMAMLANDI**
-
----
-
-## 4. WeightLayout — Hybrid Layer Detection
-
-**Durum:**  **TAMAMLANDI**
-
----
-
-## 5. WeightLoader
-
-**Durum:**  **TAMAMLANDI**
-
----
-
-## 6. Engine Forward — İlk Gerçek Inference
-
-**Durum:**  **ÇALIŞIYOR**
-
-### 6.1 Engine.init
--  Çalışıyor
-
-### 6.2 Engine.forward(tek token)
--  Anlamlı çıktı üretiyor (NaN yok)
-
-### 6.3 Engine.generate(cümle)
--  NaN fix + anlamlı çıktı
-
-### 6.4 Tokenizer entegrasyonu
--  Çalışıyor
+-  Engine.init çalışıyor
+-  forward (tek token) anlamlı çıktı
+-  generate (cümle) anlamlı çıktı
+-  Tokenizer çalışıyor
 
 ---
 
 ## 7. Tool Executables
 
-**Durum:**  **KISMİ**
-- dump-model:  Tamamlandı
-- analyze-gguf:  İptal (Python alternatifi mevcut)
+**Durum:**  **TAMAMLANDI**
+- dump-model:  Tamam
+- analyze-gguf:  Python alternatifi
 
 ---
 
-## 8. REPL — İnteraktif Test
+## 8. REPL
 
-**Durum:**  **HAZIR** (main.zig'de mevcut, NaN fix sonrası çalışır)
-
----
-
-## 9. Performans & OOM Testi
-
-**Durum:**  BLOKE (Q6_K generic dequant ~30sn/token, Q6_K matvec kernel gerekli)
+**Durum:**  **TAMAMLANDI**
+- main.zig'de mevcut, çalışıyor
+- :quit, :reset, :stats komutları
 
 ---
 
-## Özet
+## 9. Performans (OPTIMIZATION)
 
-| # | Görev | Durum |
-|---|-------|-------|
-| 1 | Build Fix |  |
-| 2 | Model Dump |  |
-| 3 | GGUF Reader |  |
-| 4 | Layer Detection |  |
-| 5 | Weight Loader |  |
-| 6 | Engine Forward |  |
-| 7 | Tool Fix |  |
-| 8 | REPL |  |
-| 9 | Benchmark |  |
+**Durum:**  **BLOKE — Q6_K AVX2 kernel gerekli**
 
-## Fix'ler (oturum #4)
+### 9.1 Benchmark (oturum #4)
+```
+prefill: 166241ms (4 token) = 0.02 tok/s
+decode:  41117ms (1 token) = 0.02 tok/s
+```
 
-1. **NaN root cause: Attention layer output proj offset mismatch** — `WeightLayout.o_proj_offset` SSM QKV boyutuna göre hesaplanmıştı (18874368 bayt), ama attention layer QKV'si daha küçük (7077888 bayt). Weight loading `info.o_offset` kullanıyordu, engine `layout.o_proj_offset` kullanıyordu. Çözüm: loading'de `layout.*_offset` kullanıldı.
-2. **matvecGenericDequant loop fix** — Sadece 2 row işleniyordu (batch_size=2), kalan tüm row'lar atlanıyordu. Şimdi tüm M row batch'ler halinde işleniyor.
-3. **qwen_linear duplicate z projection** — Aynı z projeksiyonu 2 kere yapılıyordu. İkinci gereksiz çağrı kaldırıldı.
-4. **Bütün DEBUG print'ler temizlendi** — reader.zig, engine.zig, memory.zig, inference.zig, qwen_linear.zig
+### 9.2 Q6_K bottleneck analysis
+- output.weight: Q6_K, shape [151665, 4096]
+- suan: generic dequant → fp16 → f32 → scalar dot
+- tahmini AVX2 kazanimi: ~40000ms → ~5ms
+
+---
 
 ## Bloker
 
-Yok. Model anlamlı çıktı üretiyor. Q6_K output proj yavaş (~30sn/token), optimize matvecQ6K kernel gerekli.
+**Q6_K output projection** — suanki hizin ~99%'i bu.
+Cozum: Zig `@Vector` + inline asm ile AVX2 kernel.
+
+---
 
 ## Bağımlılık Grafiği
 
 ```
-1-5 ✅ → 6. Engine Forward ✅ → 8. REPL ✅ → 9. Benchmark ⏳
+1-8 ✅ → 9. Performance (Q6_K AVX2) → 50-100 tok/s
 ```
