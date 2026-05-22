@@ -19,6 +19,19 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn dumpModel(model_path: []const u8, allocator: std.mem.Allocator) !void {
+    const TensorInfo = gguf.TensorInfo;
+
+    const printShape = struct {
+        fn call(name: []const u8, info: *const TensorInfo) void {
+            std.debug.print("  {s}: shape=", .{name});
+            for (info.shape, 0..) |dim, j| {
+                if (j > 0) std.debug.print("x", .{});
+                std.debug.print("{d}", .{dim});
+            }
+            std.debug.print(" dtype={s} size={d}\n", .{ @tagName(info.dtype), info.size });
+        }
+    }.call;
+
     var reader = try gguf.Reader.openWithAllocator(model_path, allocator);
     defer reader.deinit();
 
@@ -53,23 +66,26 @@ fn dumpModel(model_path: []const u8, allocator: std.mem.Allocator) !void {
     std.debug.print("Total size: {d:.2} GB\n", .{@as(f64, @floatFromInt(all_bytes)) / (1024.0 * 1024.0 * 1024.0)});
 
     var it2 = reader.tensors.iterator();
-    var type_counts = std.AutoHashMap(gguf.GGMLType, usize).init(allocator);
-    defer type_counts.deinit();
     while (it2.next()) |entry| {
-        const tname = @tagName(entry.value_ptr.dtype);
-        const gop = try type_counts.getOrPut(entry.value_ptr.dtype);
-        if (!gop.found_existing) gop.value_ptr.* = 0;
-        gop.value_ptr.* += 1;
-
-        if (!std.mem.eql(u8, tname, "f32") and !std.mem.eql(u8, tname, "q4_k")) {
-            std.debug.print("  {s: >50} -> {s}\n", .{ entry.key_ptr.*, tname });
+        const name = entry.key_ptr.*;
+        const info = entry.value_ptr;
+        if (std.mem.indexOf(u8, name, "ssm_conv1d") != null) {
+            printShape(name, info);
         }
-    }
-    std.debug.print("\n=== TYPE COUNTS ===\n", .{});
-    var key_it = type_counts.keyIterator();
-    while (key_it.next()) |key| {
-        const tname = @tagName(key.*);
-        const count = type_counts.get(key.*).?;
-        std.debug.print("  {s: >10}: {d}\n", .{ tname, count });
+        if (std.mem.eql(u8, name, "blk.0.ssm_out.weight")) {
+            printShape(name, info);
+        }
+        if (std.mem.eql(u8, name, "blk.0.ssm_alpha.weight") or std.mem.eql(u8, name, "blk.0.ssm_beta.weight")) {
+            printShape(name, info);
+        }
+        if (std.mem.eql(u8, name, "blk.0.ssm_a")) {
+            printShape(name, info);
+        }
+        if (std.mem.eql(u8, name, "blk.0.ssm_dt.bias")) {
+            printShape(name, info);
+        }
+        if (std.mem.eql(u8, name, "blk.0.ssm_norm.weight")) {
+            printShape(name, info);
+        }
     }
 }

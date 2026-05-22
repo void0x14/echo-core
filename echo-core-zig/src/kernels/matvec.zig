@@ -82,9 +82,9 @@ pub fn matvecDispatchQuant(
         .f16 => matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .f32 => matvecF32Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .q8_0 => matvecQ80(W, x, y, M, K),
-        .q4_k => matvecQ4K(W, x, y, M, K),
-        .q5_k => matvecQ5K(W, x, y, M, K),
-        .q2_k => matvecQ2K(W, x, y, M, K),
+        .q4_k => if (K >= 256) matvecQ4K(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
+        .q5_k => if (K >= 256) matvecQ5K(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
+        .q2_k => if (K >= 256) matvecQ2K(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
         .q6_k => {
             std.debug.print("WARN: Q6_K matvec not optimized, using generic dequant path\n", .{});
             matvecGenericDequant(W, x, y, M, K, dtype);

@@ -3,6 +3,7 @@ const config = @import("core_config");
 const types = @import("../core/types.zig");
 const math = @import("../core/math.zig");
 const matvec = @import("matvec.zig");
+const quant = @import("quant.zig");
 const gguf = @import("../gguf/reader.zig");
 
 pub const TensorView = struct {
@@ -158,26 +159,25 @@ pub fn forward(
         hidden,
         weights.z.dtype,
     );
-    matvec.matvecDispatchQuant(
-        config.Intel13500H_Tiles.TILE_K,
-        config.Intel13500H_Tiles.TILE_M,
-        weights.alpha.bytes.ptr,
-        input.ptr,
-        temps.alpha.ptr,
-        num_v_heads,
-        hidden,
-        weights.alpha.dtype,
-    );
-    matvec.matvecDispatchQuant(
-        config.Intel13500H_Tiles.TILE_K,
-        config.Intel13500H_Tiles.TILE_M,
-        weights.beta.bytes.ptr,
-        input.ptr,
-        temps.beta.ptr,
-        num_v_heads,
-        hidden,
-        weights.beta.dtype,
-    );
+    // alpha/beta projections: tensors stored as [hidden, N] (transposed layout)
+    // Q4_K matvec assumes contiguous blocks per row, but these tensors have
+    // small K (num_v_heads=32) → dequantize to FP16 and use FP16 matvec
+    {
+        var alpha_fp16: [4096 * 32]types.fp16_t = undefined;
+        const n_weights = hidden * num_v_heads;
+        quant.dequantizeRow(weights.alpha.bytes.ptr, alpha_fp16[0..].ptr, n_weights, weights.alpha.dtype);
+        @memset(temps.alpha[0..num_v_heads], 0);
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+            @ptrCast(alpha_fp16[0..].ptr), input.ptr, temps.alpha.ptr, num_v_heads, hidden, .f16);
+    }
+    {
+        var beta_fp16: [4096 * 32]types.fp16_t = undefined;
+        const n_weights = hidden * num_v_heads;
+        quant.dequantizeRow(weights.beta.bytes.ptr, beta_fp16[0..].ptr, n_weights, weights.beta.dtype);
+        @memset(temps.beta[0..num_v_heads], 0);
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+            @ptrCast(beta_fp16[0..].ptr), input.ptr, temps.beta.ptr, num_v_heads, hidden, .f16);
+    }
 
     // Shift older depthwise-conv states and insert current projection at the front.
     if (conv_kernel > 1) {
@@ -269,3 +269,101 @@ pub fn forward(
         weights.out.dtype,
     );
 }
+
+test "qwen_linear no NaN small dims" {
+    const hidden: u32 = 64;
+    const conv_kernel: u32 = 4;
+    const head_k_dim: u32 = 8;
+    const head_v_dim: u32 = 8;
+    const num_k_heads: u32 = 2;
+    const num_v_heads: u32 = 4;
+    const key_dim = head_k_dim * num_k_heads;
+    const value_dim = head_v_dim * num_v_heads;
+    const conv_dim = key_dim * 2 + value_dim;
+
+    const cfg = config.ModelConfig{
+        .vocab_size = 1000,
+        .hidden_dim = hidden,
+        .num_heads = num_v_heads,
+        .num_kv_heads = num_k_heads,
+        .head_dim = head_k_dim,
+        .num_layers = 1,
+        .num_ssm_layers = 1,
+        .ffn_hidden_dim = hidden * 3,
+        .max_seq_len = 128,
+        .ffn_type = .gated_swi_glu,
+        .norm_type = .rms_norm,
+        .pos_encoding = .rope,
+        .use_kv_quantization = false,
+        .full_attention_interval = 0,
+        .ssm_conv_kernel = conv_kernel,
+        .ssm_inner_size = value_dim,
+        .ssm_num_groups = num_k_heads,
+        .ssm_dt_rank = num_v_heads,
+        .ssm_dt_scale = 1.0,
+    };
+
+    var input: [64]f32 = undefined;
+    var output: [64]f32 = undefined;
+    var state = QwenLinearState.init(conv_dim, conv_kernel, num_v_heads, head_v_dim, head_v_dim, std.testing.allocator) catch unreachable;
+    defer state.deinit(std.testing.allocator);
+
+    // Fake weights as fp16
+    var qkv_fp16: [64 * 48]types.fp16_t = undefined;
+    var z_fp16: [64 * 32]types.fp16_t = undefined;
+    var alpha_fp16: [64 * num_v_heads]types.fp16_t = undefined;
+    var beta_fp16: [64 * num_v_heads]types.fp16_t = undefined;
+    var conv1d_fp16: [conv_kernel * conv_dim]types.fp16_t = undefined;
+    var a_f32: [num_v_heads]f32 = undefined;
+    var dt_f32: [num_v_heads]f32 = undefined;
+    var norm_f16: [head_v_dim * 2]types.fp16_t = undefined;
+    var out_fp16: [64 * value_dim]types.fp16_t = undefined;
+
+    // Init with small values
+    var seed: u32 = 42;
+    inline for (.{ &qkv_fp16, &z_fp16, &alpha_fp16, &beta_fp16, &conv1d_fp16 }) |arr_ptr| {
+        for (arr_ptr) |*v| {
+            v.* = types.fp32_to_fp16(@as(f32, @floatFromInt(seed & 0xFF)) / 128.0 - 1.0);
+            seed += 1;
+        }
+    }
+    for (&a_f32) |*v| { v.* = @as(f32, @floatFromInt(seed & 0x0F)) / 8.0 - 1.0; seed += 1; }
+    for (&dt_f32) |*v| { v.* = @as(f32, @floatFromInt(seed & 0x0F)) / 8.0 - 1.0; seed += 1; }
+    for (&norm_f16) |*v| { v.* = types.fp32_to_fp16(1.0); }
+    for (&out_fp16) |*v| { v.* = types.fp32_to_fp16(@as(f32, @floatFromInt(seed & 0xFF)) / 128.0 - 1.0); seed += 1; }
+
+    for (&input, 0..) |*v, i| { v.* = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(input.len)); }
+    @memset(&output, 0);
+
+    var temps_qkv: [2048]f32 = undefined;
+    var temps_conv: [2048]f32 = undefined;
+    var temps_z: [256]f32 = undefined;
+    var temps_core: [256]f32 = undefined;
+    var temps_alpha: [128]f32 = undefined;
+    var temps_beta: [128]f32 = undefined;
+
+    forward(cfg, &input, &output, &state, .{
+        .qkv = .{ .bytes = std.mem.sliceAsBytes(qkv_fp16[0..]), .dtype = .f16 },
+        .z = .{ .bytes = std.mem.sliceAsBytes(z_fp16[0..]), .dtype = .f16 },
+        .alpha = .{ .bytes = std.mem.sliceAsBytes(alpha_fp16[0..]), .dtype = .f16 },
+        .beta = .{ .bytes = std.mem.sliceAsBytes(beta_fp16[0..]), .dtype = .f16 },
+        .conv1d = .{ .bytes = std.mem.sliceAsBytes(conv1d_fp16[0..]), .dtype = .f16 },
+        .a_log = .{ .bytes = std.mem.sliceAsBytes(a_f32[0..]), .dtype = .f32 },
+        .dt_bias = .{ .bytes = std.mem.sliceAsBytes(dt_f32[0..]), .dtype = .f32 },
+        .norm = .{ .bytes = std.mem.sliceAsBytes(norm_f16[0..]), .dtype = .f16 },
+        .out = .{ .bytes = std.mem.sliceAsBytes(out_fp16[0..]), .dtype = .f16 },
+    }, .{
+        .mixed_qkv = temps_qkv[0..2048],
+        .conv_out = temps_conv[0..2048],
+        .z = temps_z[0..256],
+        .core = temps_core[0..256],
+        .alpha = temps_alpha[0..128],
+        .beta = temps_beta[0..128],
+    });
+
+    for (output) |v| {
+        try std.testing.expect(!std.math.isNan(v));
+        try std.testing.expect(!std.math.isInf(v));
+    }
+}
+
