@@ -416,7 +416,7 @@ pub const Engine = struct {
         const output_proj_size = self.weight_layout.ssm_region_offset - self.weight_layout.output_proj_offset;
         const output_proj_bytes = self.weight_pool[output_proj_byte_offset..][0..output_proj_size];
         const output_dtype = dtypeForGlobal(self.weight_dtypes, 2);
-        try parallel.parallelMatvec(output_proj_bytes.ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, output_dtype);
+        parallel.parallelMatvec(output_proj_bytes.ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, output_dtype);
 
         self.seq_pos += 1;
         return self.logits;
@@ -559,9 +559,9 @@ pub const Engine = struct {
         @memset(self.q_proj, 0);
         @memset(self.k_proj, 0);
         @memset(self.v_proj, 0);
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, q_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[k_proj_offset..].ptr, input.ptr, self.k_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 2));
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[v_proj_offset..].ptr, input.ptr, self.v_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 3));
+        parallel.parallelMatvec(self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, q_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
+        parallel.parallelMatvec(self.weight_pool[k_proj_offset..].ptr, input.ptr, self.k_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 2));
+        parallel.parallelMatvec(self.weight_pool[v_proj_offset..].ptr, input.ptr, self.v_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 3));
 
         // Apply Q/K head norms if weights are non-zero
         const q_norm_byte_offset = layer_base + self.weight_layout.attn_q_norm_offset;
@@ -641,7 +641,7 @@ pub const Engine = struct {
         }
 
         @memset(self.attn_out, 0);
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[o_proj_offset..].ptr, self.attn_accum.ptr, self.attn_out.ptr, hidden, q_dim, dtypeForTensor(self.weight_dtypes, layer_idx, 4));
+        parallel.parallelMatvec(self.weight_pool[o_proj_offset..].ptr, self.attn_accum.ptr, self.attn_out.ptr, hidden, q_dim, dtypeForTensor(self.weight_dtypes, layer_idx, 4));
         @memcpy(output, self.attn_out);
     }
 
@@ -786,17 +786,17 @@ pub const Engine = struct {
         switch (self.config.ffn_type) {
             .dense => {
                 @memset(self.ffn_scratch[0..ffn_h], 0);
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_scratch.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 6));
+                parallel.parallelMatvec(self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_scratch.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 6));
                 for (self.ffn_scratch[0..ffn_h]) |*value| value.* = math.relu(value.*);
                 @memset(output[0..hidden], 0);
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w2_offset..].ptr, self.ffn_scratch.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx, 7));
+                parallel.parallelMatvec(self.weight_pool[w2_offset..].ptr, self.ffn_scratch.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx, 7));
             },
             .gated_swi_glu, .gated_gelu => {
                 const w3_offset = self.current_layer_base + self.weight_layout.ffn_weight3_offset;
                 @memset(self.ffn_gate_buf[0..ffn_h], 0);
                 @memset(self.ffn_up_buf[0..ffn_h], 0);
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_gate_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 6));
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w2_offset..].ptr, input.ptr, self.ffn_up_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 7));
+                parallel.parallelMatvec(self.weight_pool[w1_offset..].ptr, input.ptr, self.ffn_gate_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 6));
+                parallel.parallelMatvec(self.weight_pool[w2_offset..].ptr, input.ptr, self.ffn_up_buf.ptr, ffn_h, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 7));
 
                 for (0..ffn_h) |i| {
                     self.ffn_gate_buf[i] = switch (self.config.ffn_type) {
@@ -807,7 +807,7 @@ pub const Engine = struct {
                 }
 
                 @memset(output[0..hidden], 0);
-                matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, self.weight_pool[w3_offset..].ptr, self.ffn_gate_buf.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx, 8));
+                parallel.parallelMatvec(self.weight_pool[w3_offset..].ptr, self.ffn_gate_buf.ptr, output.ptr, hidden, ffn_h, dtypeForTensor(self.weight_dtypes, layer_idx, 8));
             },
         }
     }

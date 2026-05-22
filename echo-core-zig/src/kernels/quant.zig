@@ -8,6 +8,12 @@ pub const block_q8_0 = extern struct {
     qs: [32]i8,
 };
 
+pub const block_q8_K = extern struct {
+    d: f32,
+    qs: [256]i8,
+    bsums: [16]i16,
+};
+
 pub const block_q4_K = extern struct {
     d: u16,
     dmin: u16,
@@ -418,6 +424,7 @@ test "block sizes match C++" {
     try std.testing.expectEqual(@sizeOf(block_q4_K), 144);
     try std.testing.expectEqual(@as(usize, 176), @sizeOf(block_q5_K));
     try std.testing.expectEqual(@as(usize, 210), @sizeOf(block_q6_K));
+    try std.testing.expectEqual(@as(usize, 292), @sizeOf(block_q8_K));
     try std.testing.expectEqual(@as(usize, 74), @sizeOf(block_iq2_xs));
     try std.testing.expectEqual(@as(usize, 136), @sizeOf(block_iq4_xs));
 }
