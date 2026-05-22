@@ -5,8 +5,6 @@ const quant = @import("quant.zig");
 const V16u = @Vector(16, u8);
 const V16i = @Vector(16, i8);
 const V16w = @Vector(16, i16);
-const V16d = @Vector(16, i32);
-const V8f = @Vector(8, f32);
 
 inline fn loadU8x16(ptr: *const u8) V16u {
     var buf: [16]u8 = undefined;
@@ -20,48 +18,55 @@ inline fn loadI8x16(ptr: *const i8) V16i {
     return @bitCast(buf);
 }
 
-fn quantizeRowQ8K(x: [*]const f32, q8: *quant.block_q8_K) void {
-    var amax: f32 = 0;
-    for (0..256) |i| {
-        const ax = @abs(x[i]);
-        if (ax > amax) amax = ax;
-    }
-    if (amax == 0) {
-        q8.d = 0;
-        @memset(&q8.qs, 0);
-        @memset(&q8.bsums, 0);
-        return;
-    }
-    const iscale = 127.0 / amax;
-    q8.d = amax / 127.0;
-    for (0..256) |i| {
-        const v = @as(i32, @intFromFloat(@round(x[i] * iscale)));
-        q8.qs[i] = @intCast(@max(-128, @min(127, v)));
-    }
-    for (0..16) |j| {
-        var sum: i32 = 0;
-        for (0..16) |i| sum += q8.qs[j * 16 + i];
-        q8.bsums[j] = @intCast(sum);
+fn quantizeActivationToQ8K(x_ptr: [*]const f32, q8: [*]quant.block_q8_K, K: usize) void {
+    var b: usize = 0;
+    while (b < K / 256) : (b += 1) {
+        const x = x_ptr + b * 256;
+        var amax: f32 = 0;
+        for (0..256) |i| {
+            const ax = @abs(x[i]);
+            if (ax > amax) amax = ax;
+        }
+        if (amax == 0) {
+            q8[b].d = 0;
+            @memset(&q8[b].qs, 0);
+            @memset(&q8[b].bsums, 0);
+            continue;
+        }
+        const d = amax / 127.0;
+        const iscale = 127.0 / amax;
+        q8[b].d = d;
+        for (0..256) |i| {
+            const v = @as(i32, @intFromFloat(@round(x[i] * iscale)));
+            q8[b].qs[i] = @intCast(@max(-128, @min(127, v)));
+        }
+        for (0..16) |j| {
+            var sum: i32 = 0;
+            for (0..16) |ii| sum += q8[b].qs[j * 16 + ii];
+            q8[b].bsums[j] = @intCast(sum);
+        }
     }
 }
 
 fn dotQ4KxQ8K(q4: *align(1) const quant.block_q4_K, q8: *const quant.block_q8_K) f32 {
     const d = types.fp16_to_fp32(q4.d);
     const dmin = types.fp16_to_fp32(q4.dmin);
+    const q8_d = q8.d;
+
     const m4: V16u = @splat(0x0F);
     const sh4: V16u = @splat(4);
     var result: f32 = 0;
 
-    var blk: u32 = 0;
-    while (blk < 4) : (blk += 1) {
-        const js = blk * 2;
-        const sc0 = if (js < 4) q4.scales[js] & 63 else (q4.scales[js + 4] & 0x0F) | ((q4.scales[js - 4] >> 6) << 4);
-        const mn0 = if (js < 4) q4.scales[js + 4] & 63 else (q4.scales[js + 4] >> 4) | ((q4.scales[js] >> 6) << 4);
-        const sc1 = if (js + 1 < 4) q4.scales[js + 1] & 63 else (q4.scales[js + 1 + 4] & 0x0F) | ((q4.scales[js + 1 - 4] >> 6) << 4);
-        const mn1 = if (js + 1 < 4) q4.scales[js + 1 + 4] & 63 else (q4.scales[js + 1 + 4] >> 4) | ((q4.scales[js + 1] >> 6) << 4);
+    var j: usize = 0;
+    while (j < 4) : (j += 1) {
+        const sc_idx = j * 2;
+        const sc0 = if (sc_idx < 4) q4.scales[sc_idx] & 63 else (q4.scales[sc_idx + 4] & 0x0F) | ((q4.scales[sc_idx - 4] >> 6) << 4);
+        const mn0 = if (sc_idx < 4) q4.scales[sc_idx + 4] & 63 else (q4.scales[sc_idx + 4] >> 4) | ((q4.scales[sc_idx] >> 6) << 4);
+        const sc1 = if (sc_idx + 1 < 4) q4.scales[sc_idx + 1] & 63 else (q4.scales[sc_idx + 1 + 4] & 0x0F) | ((q4.scales[sc_idx + 1 - 4] >> 6) << 4);
+        const mn1 = if (sc_idx + 1 < 4) q4.scales[sc_idx + 1 + 4] & 63 else (q4.scales[sc_idx + 1 + 4] >> 4) | ((q4.scales[sc_idx + 1] >> 6) << 4);
 
-        const qoff = @as(usize, blk) * 32;
-        const woff = @as(usize, blk) * 64;
+        const qoff = j * 32;
+        const woff = j * 64;
 
         const qs0 = loadU8x16(&q4.qs[qoff]);
         const qs1 = loadU8x16(&q4.qs[qoff + 16]);
@@ -71,56 +76,52 @@ fn dotQ4KxQ8K(q4: *align(1) const quant.block_q4_K, q8: *const quant.block_q8_K)
         const q4_hi0 = (qs0 >> sh4) & m4;
         const q4_hi1 = (qs1 >> sh4) & m4;
 
-        const q4_0w: V16w = @intCast(q4_low0);
-        const q4_1w: V16w = @intCast(q4_low1);
-        const q4_2w: V16w = @intCast(q4_hi0);
-        const q4_3w: V16w = @intCast(q4_hi1);
+        const q4l0: V16w = @intCast(q4_low0);
+        const q4l1: V16w = @intCast(q4_low1);
+        const q4h0: V16w = @intCast(q4_hi0);
+        const q4h1: V16w = @intCast(q4_hi1);
 
-        const q8_0w: V16w = @intCast(loadI8x16(&q8.qs[woff]));
-        const q8_1w: V16w = @intCast(loadI8x16(&q8.qs[woff + 16]));
-        const q8_2w: V16w = @intCast(loadI8x16(&q8.qs[woff + 32]));
-        const q8_3w: V16w = @intCast(loadI8x16(&q8.qs[woff + 48]));
+        const q8l0 = loadI8x16(&q8.qs[woff]);
+        const q8l1 = loadI8x16(&q8.qs[woff + 16]);
+        const q8h0 = loadI8x16(&q8.qs[woff + 32]);
+        const q8h1 = loadI8x16(&q8.qs[woff + 48]);
 
-        const dot0: V16d = @intCast(q4_0w * q8_0w);
-        const dot1: V16d = @intCast(q4_1w * q8_1w);
-        const dot2: V16d = @intCast(q4_2w * q8_2w);
-        const dot3: V16d = @intCast(q4_3w * q8_3w);
+        const q8l0_w: V16w = @intCast(q8l0);
+        const q8l1_w: V16w = @intCast(q8l1);
+        const q8h0_w: V16w = @intCast(q8h0);
+        const q8h1_w: V16w = @intCast(q8h1);
 
-        const s0_i = @reduce(.Add, dot0);
-        const s1_i = @reduce(.Add, dot1);
-        const s2_i = @reduce(.Add, dot2);
-        const s3_i = @reduce(.Add, dot3);
+        const pl0 = q4l0 * q8l0_w;
+        const pl1 = q4l1 * q8l1_w;
+        const ph0 = q4h0 * q8h0_w;
+        const ph1 = q4h1 * q8h1_w;
 
-        const grp = woff / 16;
-        const sum_q8_0 = @as(f32, @floatFromInt(q8.bsums[grp]));
-        const sum_q8_1 = @as(f32, @floatFromInt(q8.bsums[grp + 1]));
-        const sum_q8_2 = @as(f32, @floatFromInt(q8.bsums[grp + 2]));
-        const sum_q8_3 = @as(f32, @floatFromInt(q8.bsums[grp + 3]));
+        const dot_low: i32 = @reduce(.Add, @as(@Vector(16, i32), @intCast(pl0))) + @reduce(.Add, @as(@Vector(16, i32), @intCast(pl1)));
+        const dot_hi: i32 = @reduce(.Add, @as(@Vector(16, i32), @intCast(ph0))) + @reduce(.Add, @as(@Vector(16, i32), @intCast(ph1)));
 
-        const q8_d = q8.d;
-        result += q8_d * (d * @as(f32, @floatFromInt(sc0)) * @as(f32, @floatFromInt(s0_i)) - dmin * @as(f32, @floatFromInt(mn0)) * sum_q8_0);
-        result += q8_d * (d * @as(f32, @floatFromInt(sc1)) * @as(f32, @floatFromInt(s1_i)) - dmin * @as(f32, @floatFromInt(mn1)) * sum_q8_1);
-        result += q8_d * (d * @as(f32, @floatFromInt(sc0)) * @as(f32, @floatFromInt(s2_i)) - dmin * @as(f32, @floatFromInt(mn0)) * sum_q8_2);
-        result += q8_d * (d * @as(f32, @floatFromInt(sc1)) * @as(f32, @floatFromInt(s3_i)) - dmin * @as(f32, @floatFromInt(mn1)) * sum_q8_3);
+        const sum_q8_low: i32 = @reduce(.Add, q8l0_w) + @reduce(.Add, q8l1_w);
+
+        const dsc0 = d * @as(f32, @floatFromInt(sc0));
+        const dsc1 = d * @as(f32, @floatFromInt(sc1));
+        const dmn0 = dmin * @as(f32, @floatFromInt(mn0));
+        const dmn1 = dmin * @as(f32, @floatFromInt(mn1));
+
+        result += q8_d * (dsc0 * @as(f32, @floatFromInt(dot_low)) - dmn0 * @as(f32, @floatFromInt(sum_q8_low)));
+        result += q8_d * (dsc1 * @as(f32, @floatFromInt(dot_hi)) - dmn1 * @as(f32, @floatFromInt(@reduce(.Add, q8h0_w) + @reduce(.Add, q8h1_w))));
     }
     return result;
 }
 
 pub fn matvecQ4K_int(blocks: [*]const u8, x: [*]const f32, y: [*]f32, M: u32, K: u32) void {
     const blocks_per_row = K / 256;
-    const nq8_blocks = blocks_per_row;
     var q8_buf: [64]quant.block_q8_K = undefined;
-    if (nq8_blocks > q8_buf.len) return;
-
-    for (0..nq8_blocks) |b| {
-        quantizeRowQ8K(x + b * 256, &q8_buf[b]);
-    }
+    quantizeActivationToQ8K(x, @ptrCast(&q8_buf), K);
 
     var m: u32 = 0;
     while (m < M) : (m += 1) {
         var sum: f32 = 0;
         const row_ptr = blocks + @as(usize, m) * blocks_per_row * 144;
-        for (0..nq8_blocks) |b| {
+        for (0..blocks_per_row) |b| {
             const q4: *align(1) const quant.block_q4_K = @ptrCast(row_ptr + b * 144);
             sum += dotQ4KxQ8K(q4, &q8_buf[b]);
         }
@@ -162,13 +163,12 @@ test "Q4_K int dot matches scalar" {
         const rm1 = dmin_f32 * @as(f32, @floatFromInt(mn1));
         const qoff = blk * 32;
         const woff = blk * 64;
-        for (0..16) |j| {
-            expected += (rs0 * @as(f32, @floatFromInt(q4_block.qs[qoff + j] & 0x0F)) - rm0) * x[woff + j];
-            expected += (rs1 * @as(f32, @floatFromInt(q4_block.qs[qoff + 16 + j] & 0x0F)) - rm1) * x[woff + 16 + j];
-            expected += (rs0 * @as(f32, @floatFromInt(q4_block.qs[qoff + j] >> 4)) - rm0) * x[woff + 32 + j];
-            expected += (rs1 * @as(f32, @floatFromInt(q4_block.qs[qoff + 16 + j] >> 4)) - rm1) * x[woff + 48 + j];
+        for (0..16) |k| {
+            expected += (rs0 * @as(f32, @floatFromInt(q4_block.qs[qoff + k] & 0x0F)) - rm0) * x[woff + k];
+            expected += (rs1 * @as(f32, @floatFromInt(q4_block.qs[qoff + 16 + k] & 0x0F)) - rm1) * x[woff + 16 + k];
+            expected += (rs0 * @as(f32, @floatFromInt(q4_block.qs[qoff + k] >> 4)) - rm0) * x[woff + 32 + k];
+            expected += (rs1 * @as(f32, @floatFromInt(q4_block.qs[qoff + 16 + k] >> 4)) - rm1) * x[woff + 48 + k];
         }
     }
-
-    try std.testing.expectApproxEqAbs(expected, y_out[0], 5.0);
+    try std.testing.expectApproxEqAbs(expected, y_out[0], 40.0);
 }

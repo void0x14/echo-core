@@ -5,6 +5,7 @@ const quant = @import("quant.zig");
 const avx2_q6k = @import("avx2_q6k.zig");
 const avx2_q4k = @import("avx2_q4k.zig");
 const avx2_q5k = @import("avx2_q5k.zig");
+const int_dot = @import("int_dot.zig");
 const gguf = @import("../gguf/reader.zig");
 
 pub fn matvecFp16Fp32(

@@ -3,6 +3,7 @@ const config = @import("core_config");
 const types = @import("../core/types.zig");
 const math = @import("../core/math.zig");
 const matvec = @import("matvec.zig");
+const parallel = @import("parallel.zig");
 const quant = @import("quant.zig");
 const gguf = @import("../gguf/reader.zig");
 
@@ -148,26 +149,8 @@ pub fn forward(
     @memset(temps.beta[0..num_v_heads], 0);
     @memset(temps.core[0..value_dim], 0);
 
-    matvec.matvecDispatchQuant(
-        config.Intel13500H_Tiles.TILE_K,
-        config.Intel13500H_Tiles.TILE_M,
-        weights.qkv.bytes.ptr,
-        input.ptr,
-        temps.mixed_qkv.ptr,
-        conv_dim,
-        hidden,
-        weights.qkv.dtype,
-    );
-    matvec.matvecDispatchQuant(
-        config.Intel13500H_Tiles.TILE_K,
-        config.Intel13500H_Tiles.TILE_M,
-        weights.z.bytes.ptr,
-        input.ptr,
-        temps.z.ptr,
-        value_dim,
-        hidden,
-        weights.z.dtype,
-    );
+    parallel.parallelMatvec(weights.qkv.bytes.ptr, input.ptr, temps.mixed_qkv.ptr, conv_dim, hidden, weights.qkv.dtype);
+    parallel.parallelMatvec(weights.z.bytes.ptr, input.ptr, temps.z.ptr, value_dim, hidden, weights.z.dtype);
     // alpha/beta projections: tensors stored as [hidden, N] (transposed layout)
     // Q4_K matvec assumes contiguous blocks per row, but these tensors have
     // small K (num_v_heads=32) → dequantize to FP16 and use FP16 matvec
@@ -177,16 +160,14 @@ pub fn forward(
         const alpha_fp16 = @as([*]types.fp16_t, @ptrCast(@alignCast(state.dequant_scratch.ptr)))[0..n_weights];
         quant.dequantizeRow(weights.alpha.bytes.ptr, alpha_fp16.ptr, n_weights, weights.alpha.dtype);
         @memset(temps.alpha[0..num_v_heads], 0);
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
-            @ptrCast(alpha_fp16.ptr), input.ptr, temps.alpha.ptr, num_v_heads, hidden, .f16);
+        parallel.parallelMatvec(@ptrCast(alpha_fp16.ptr), input.ptr, temps.alpha.ptr, num_v_heads, hidden, .f16);
     }
     {
         const n_weights = hidden * num_v_heads;
         const beta_fp16 = state.dequant_scratch[n_weights..];
         quant.dequantizeRow(weights.beta.bytes.ptr, beta_fp16.ptr, n_weights, weights.beta.dtype);
         @memset(temps.beta[0..num_v_heads], 0);
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
-            @ptrCast(beta_fp16.ptr), input.ptr, temps.beta.ptr, num_v_heads, hidden, .f16);
+        parallel.parallelMatvec(@ptrCast(beta_fp16.ptr), input.ptr, temps.beta.ptr, num_v_heads, hidden, .f16);
     }
 
     // Shift older depthwise-conv states and insert current projection at the front.
@@ -268,9 +249,7 @@ pub fn forward(
     }
 
     @memset(output[0..hidden], 0);
-    matvec.matvecDispatchQuant(
-        config.Intel13500H_Tiles.TILE_K,
-        config.Intel13500H_Tiles.TILE_M,
+    parallel.parallelMatvec(
         weights.out.bytes.ptr,
         temps.core.ptr,
         output.ptr,

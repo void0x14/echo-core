@@ -3,6 +3,7 @@ const config = @import("core_config");
 const types = @import("../core/types.zig");
 const math = @import("../core/math.zig");
 const matvec = @import("matvec.zig");
+const parallel = @import("parallel.zig");
 const gguf = @import("../gguf/reader.zig");
 
 /// SSM state for a single layer
@@ -169,7 +170,7 @@ pub fn ssmForward(
     @memset(tmp_x, 0);
     @memset(tmp_z, 0);
     if (ssm_x_dtype != .f16) {
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+        parallel.parallelMatvec(
             ssm_x_w, input.ptr, tmp_x.ptr, hidden_dim, hidden_dim, ssm_x_dtype);
     } else {
         matvec.matvecDispatch(ssm_x_w, input.ptr, tmp_x.ptr, hidden_dim, hidden_dim, .{});
@@ -195,15 +196,15 @@ pub fn ssmForward(
 
     // Step 3: Project to dt, B, C
     @memset(tmp_dt, 0);
-    matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+    parallel.parallelMatvec(
         ssm_dt_w, conv_out[0..hidden_dim].ptr, tmp_dt.ptr, dt_rank, hidden_dim, ssm_dt_dtype);
 
     @memset(tmp_B, 0);
-    matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+    parallel.parallelMatvec(
         ssm_B_w, conv_out[0..hidden_dim].ptr, tmp_B.ptr, ssm_inner, hidden_dim, ssm_B_dtype);
 
     @memset(tmp_C, 0);
-    matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+    parallel.parallelMatvec(
         ssm_C_w, conv_out[0..hidden_dim].ptr, tmp_C.ptr, ssm_inner, hidden_dim, ssm_C_dtype);
 
     // Step 4: Apply selective scan for each group
@@ -254,7 +255,7 @@ pub fn ssmForward(
 
     // Step 6: Output projection
     @memset(output, 0);
-    matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+    parallel.parallelMatvec(
         ssm_out_w, scan_out[0..hidden_dim].ptr, output.ptr, hidden_dim, hidden_dim, ssm_out_dtype);
 }
 
