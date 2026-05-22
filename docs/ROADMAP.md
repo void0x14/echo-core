@@ -1,6 +1,6 @@
 # echo-core — Proje Yol Haritası
 
-> Son güncelleme: 2026-05-22 (oturum #2)
+> Son güncelleme: 2026-05-22 (oturum #3)
 > Aktif model: `Qwopus3.5-9B-coder-Exp-Q4_K_S.gguf` (5.0 GB)
 > Zig versiyonu: 0.17.0-dev.248+95507faf1
 
@@ -8,7 +8,7 @@
 
 ## 1. Build Onarımı (Ön Koşul)
 
-**Durum:** ** TAMAMLANDI**
+**Durum:**  **TAMAMLANDI**
 
 ### 1.1 `**` operator whitespace hatası
 - **Durum:**  **Çözüldü** — `@memset(&raw, 0)` kullanılıyor
@@ -23,7 +23,7 @@
 
 ## 2. Model Dump & Tensor Yapısını Doğrulama
 
-**Durum:** ** TAMAMLANDI**
+**Durum:**  **TAMAMLANDI**
 
 ### 2.1 Python analyze_gguf.py ile model taraması
 - **Durum:**  **Tamamlandı**
@@ -42,12 +42,13 @@
 ### 2.2 Zig dump-model tool'u aktifleştir
 - **Durum:**  **Tamamlandı** — `dump_model_main.zig` ile yeniden yazıldı, modül import düzeltildi
 - **Doğrulama:** `zig build` → `./zig-out/bin/dump-model model.gguf` çalışıyor
+- Tensor tipleri: 241×q4_k, 177×f32, 8×q5_k, 1×q6_k
 
 ---
 
 ## 3. GGUF Reader — Gerçek Model Load Testi
 
-**Durum:** ** TAMAMLANDI**
+**Durum:**  **TAMAMLANDI**
 
 ### 3.1 Model metadata okuma testi
 - **Durum:**  **Tamamlandı** — dump-model tool ile gerçek model dosyası açıldı, metadata doğrulandı
@@ -71,93 +72,112 @@
 
 ## 4. WeightLayout — Hybrid Layer Detection
 
-**Durum:** ** TAMAMLANDI**
+**Durum:**  **TAMAMLANDI**
 
 ### 4.1 Tensor isimlerinden layer type detection
 - **Durum:**  **Tamamlandı**
 - `classifyLayerType()` → `full_attention_interval > 0` ise `qwen35LayerType()` kullanır
-- Hibrit olmayan modellerde tensor name-based detection (ssm_alpha/beta/norm kontrolü)
-- **Pattern:** 32 layer → 24 SSM + 8 Attention (every 4th)
+- Layer 0-2,4-6,8-10,...: qwen_linear (24 adet)
+- Layer 3,7,11,15,19,23,27,31: attention (8 adet)
+- Pattern: `(layer_idx + 1) % 4 == 0 → .attention`
 
 ### 4.2 num_ssm_layers hesaplaması
 - **Durum:**  **Tamamlandı**
 - `num_ssm_layers = num_layers - (num_layers / full_attention_interval)`
-- 32 - (32/4) = 24 SSM layer
-- `classifyLayerType` artık `cfg.full_attention_interval` parametresi alıyor
+- 32 - (32/4) = 24 qwen_linear/ssm layer
+
+### 4.3 Fused QKV offset fix
+- **Durum:**  **Tamamlandı**
+- `memory.zig:357-365` — K/V offset'leri fused QKV data region'ın içine bakacak şekilde override
+- `k_proj_offset = q_proj_offset + q_dim × row_size`
+- `v_proj_offset = q_proj_offset + (q_dim + kv_dim) × row_size`
 
 ---
 
 ## 5. WeightLoader — Tensörleri Weight Pool'a Yükleme
 
-**Durum:**  **BAŞLATMADI**
+**Durum:**  **TAMAMLANDI** (temel işlev çalışıyor)
 
-### 5.1 Attention layer tensörlerini yükle
-- **Durum:**  Bekliyor
+### 5.1 Tüm tensor'leri load
+- **Durum:**  Çalışıyor — 427 tensor yüklendi, weight pool 5.3 GB
+- **Debug çıktısı:** "Weights loaded successfully"
 
-### 5.2 SSM/QwenLinear layer tensörlerini yükle
-- **Durum:**  Bekliyor
-- **Bağımlılık:** 4.1  (çözüldü)
+### 5.2 Fused QKV dtype propagation
+- **Durum:**  **Tamamlandı**
+- `inference.zig:910-915` — K/V ayrı tensor olarak bulunamazsa, fused QKV dtype'ı K/V slot'larına kopyalanır
+- **Öncesi:** K/V dtype'ları .f16 kalıyordu → attention yanlış compute
+- **Sonrası:** K/V dtype'ları fused QKV'nin gerçek dtype'ı (q5_k/q4_k) oluyor
+
+### 5.3 SSM tensor dtype'ları
+- **Durum:**  **Dtype'lar doğru yükleniyor** — slot 11-18 doğru dtype'ları alıyor
+- **Ama SSM path (.ssm layer'lar) hala matvecDispatch (dtype'siz) kullanıyordu → FIX EDILDI**
+- **qwen_linear path dtype'ları doğru geçiyor**
 
 ---
 
 ## 6. Engine Forward — İlk Gerçek Inference
 
-**Durum:**  **BAŞLATMADI**
+**Durum:**  **KISMİ — NaN sorunu var**
 
 ### 6.1 Engine.init(gerçek model)
-- **Durum:**  Bekliyor
-- **Bağımlılık:** 5.1, 5.2
+- **Durum:**  Çalışıyor
+- Weight pool allocation: 5.3 GB başarılı
+- KV cache, SSM states, temp buffers initialize ediliyor
 
 ### 6.2 Engine.forward(tek token)
-- **Durum:**  Bekliyor
+- **Durum:**  Çalışıyor (token embedding → 32 layer → final norm → output proj)
+- **Ama:** output logits NaN
+- **Tespit edilen:** `ssmForward()` dtype'siz matvec kullanıyordu → FIX EDILDI
+- **SSM path fix:** ssmForward artık dtype alıp `matvecDispatchQuant` kullanıyor
+- **qwen_linear path:** dtype'lar doğru geçiyor, `matvecDispatchQuant` kullanılıyor
 
 ### 6.3 Engine.generate(cümle)
-- **Durum:**  Bekliyor
+- **Durum:**  **Çalışmıyor** — logits NaN → argmax hep 0 dönüyor → "Merhaba" çıktısı
+- **Öncesi:** K/V dtype bug'ı + SSM dtype bug'ı → NaN
+- **Şimdi:** dtype fix'leri yapıldı, ama hala NaN
+- **Şüpheli:** qwen_linear conv1d boyut uyumsuzluğu — conv_dim=8192 ama conv weight hidden_dim=4096
+- **Q6_K output proj:** generic dequant yolu kullanılıyor, doğru ama yavaş
 
 ### 6.4 Tokenizer entegrasyonu
-- **Durum:**  Bekliyor
+- **Durum:**  **KISMİ** — tokenizer çalışıyor ama generate loop'u NaN yüzünden test edilemedi
 
 ---
 
 ## 7. Tool Executables Fix
 
-**Durum:** ** KISMİ**
+**Durum:**  **KISMİ**
 
 ### 7.1 dump-model tool
 - **Durum:**  **Tamamlandı**
 - `dump_model_main.zig` olarak yeniden yazıldı
 - Module import sistemi düzeltildi (tüm dosyalar `@import("core_config")` kullanıyor)
-- `zig build` + `./zig-out/bin/dump-model model.gguf` çalışıyor
+- Tensor tipi sayımı eklendi (q4_k/f32/q5_k/q6_k dumping)
 
 ### 7.2 analyze-gguf tool
-- **Durum:**  **İptal** — Zig 0.17 API uyumsuzluğu (`std.fs.cwd()`, `argsAlloc`, eski ArrayList API). 
-- **Alternatif:** Python script (`analyze_gguf.py`) kullanılabilir
+- **Durum:**  **İptal** — Zig 0.17 API uyumsuzluğu. Python alternatifi mevcut.
 
 ---
 
 ## 8. REPL — İnteraktif Test
 
-**Durum:**  **BAŞLATMADI**
+**Durum:**  **BLOKE** — 6.3 NaN sorununu bekliyor
 
 ### 8.1 REPL başlatma
-- **Durum:**  Bekliyor
+- **Durum:** Bekliyor
 - **Bağımlılık:** 6.3
-
-### 8.2 REPL generate
-- **Durum:**  Bekliyor
 
 ---
 
 ## 9. Performans & OOM Testi
 
-**Durum:**  **BAŞLATMADI**
+**Durum:**  **BLOKE** — 8'i bekliyor
 
 ### 9.1 Benchmark
-- **Durum:**  Bekliyor
-- **Bağımlılık:** 8.1
+- **Durum:** Bekliyor
+- **Not:** Mevcut Q6_K generic dequant yolu ~40sn/token, Q6_K matvec kernel gerekli
 
 ### 9.2 OOM stress test
-- **Durum:**  Bekliyor
+- **Durum:** Bekliyor
 
 ---
 
@@ -169,11 +189,27 @@
 | 2 | Model Dump |  | Python + Zig dump-model |
 | 3 | GGUF Reader |  | full_attention_interval eklendi |
 | 4 | Layer Detection |  | classifyLayerType güncellendi |
-| 5 | Weight Loader |  | Sıradaki görev |
-| 6 | Engine Forward |  | 5'i bekliyor |
+| 5 | Weight Loader |  | Fused QKV dtype propagation eklendi |
+| 6 | Engine Forward |  | init+forward OK, generate NaN |
 | 7 | Tool Fix |  | dump-model , analyze-gguf  |
-| 8 | REPL |  | 6'yı bekliyor |
+| 8 | REPL |  | 6.3 NaN blokesi |
 | 9 | Benchmark |  | 8'i bekliyor |
+
+## Yapılan Fix'ler (oturum #3)
+
+1. **matvecQ5K kernel** — 176-byte bloklar, qh high-bit handling
+2. **matvecGenericDequant** — Q6_K/Q3_K/IQ tipleri için generic dequant fallback
+3. **Fused QKV K/V dtype propagation** — K/V slot'larına fused tensor'ın dtype'ı kopyalanıyor
+4. **SSM dtype pass-through** — ssmForward artık dtype alıp matvecDispatchQuant kullanıyor
+5. **qwen_linear dtype'ları** — doğru slot mapping ile yükleniyor ve kullanılıyor
+
+## Bloker: NaN in logits
+
+- **Semptom:** Tüm logit'ler NaN → sampleGreedy hep 0 dönüyor
+- **Dtype fix'leri yapıldı** ama NaN devam ediyor
+- **En olası neden:** qwen_linear conv1d boyut uyumsuzluğu — conv_dim=8192 kullanılıyor ama conv weight hidden_dim=4096
+- **Alternatif şüphe:** token embedding stride, SSM state init, final norm dtype
+- **Öneri:** 1-token prefill sonrası gizli state'i NaN-check ile izle
 
 ## Bağımlılık Grafiği
 
@@ -183,16 +219,15 @@
       └─ 7. Tool Fix ⚠️
           └─ 3. GGUF Reader Test ✅
               └─ 4. Layer Detection ✅
-                  ├─ 5. Weight Loader ❌ ← BURADASIN
-                  │    └─ 6. Engine Forward ❌
-                  │         └─ 8. REPL ❌
-                  │              └─ 9. Benchmark ❌
+                  ├─ 5. Weight Loader ✅
+                  │    └─ 6. Engine Forward ⚠️
+                  │         └─ 8. REPL 🔴
+                  │              └─ 9. Benchmark 🔴
                   └─ 7. Tool Fix (bağımsız dal)
 ```
 
-## Sıradaki İş — Weight Loader (5.1 + 5.2)
+## Sıradaki İş — NaN Fix (6.2/6.3)
 
-**Aktif model ile weight loader'ı test et:**
-1. `loadWeightsFromReader` ile gerçek model tensörlerini weight pool'a kopyala
-2. SSM tensor mapping'lerini doğrula (`ssm_a`, `ssm_alpha.weight`, `ssm_beta.weight`)
-3. Fused QKV (`attn_qkv.weight`) tensör yüklemesini doğrula
+1. **qwen_linear conv1d dim fix** — weight_idx formülünde conv_dim yerine hidden_dim kullanımını araştır
+2. **1-token prefill + hidden_state dump** — NaN'nin hangi layer'da başladığını izle
+3. **Q6_K matvec kernel** — output.weight için optimize matvecQ6K yaz (öncelik düşük, doğrulukla ilgili değil)
