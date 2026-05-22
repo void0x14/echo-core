@@ -15,6 +15,9 @@ pub const ModelConfig = extern struct {
     pos_encoding: PosEncoding,
     use_kv_quantization: bool,
 
+    // Hybrid model configuration
+    full_attention_interval: u32,
+
     // SSM configuration
     ssm_conv_kernel: u32,
     ssm_inner_size: u32,
@@ -90,6 +93,7 @@ test "ModelConfig basic creation" {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = true,
+        .full_attention_interval = 0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,
@@ -111,5 +115,5 @@ test "ModelConfig enum values and ABI assumptions" {
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.NormType));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.PosEncoding));
     try std.testing.expectEqual(@sizeOf(c_int), @sizeOf(ModelConfig.LayerType));
-    try std.testing.expectEqual(@as(usize, 72), @sizeOf(ModelConfig));
+    try std.testing.expectEqual(@as(usize, 76), @sizeOf(ModelConfig));
 }

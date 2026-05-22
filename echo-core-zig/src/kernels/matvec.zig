@@ -1,6 +1,6 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
-const config = @import("../core/config.zig");
+const config = @import("core_config");
 const quant = @import("quant.zig");
 const gguf = @import("../gguf/reader.zig");
 
@@ -82,17 +82,20 @@ pub fn matvecDispatchQuant(
         .f16 => matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .f32 => matvecF32Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .q8_0 => matvecQ80(W, x, y, M, K),
-        .q6_k => {
-            // Q6_K not yet optimized - treat as fp16 for now
-            std.debug.print("WARN: Q6_K not optimized, treating as FP16 (may produce incorrect results)\n", .{});
-            matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K);
-        },
         .q4_k => matvecQ4K(W, x, y, M, K),
+        .q5_k => matvecQ5K(W, x, y, M, K),
         .q2_k => matvecQ2K(W, x, y, M, K),
+        .q6_k => {
+            std.debug.print("WARN: Q6_K matvec not optimized, using generic dequant path\n", .{});
+            matvecGenericDequant(W, x, y, M, K, dtype);
+        },
+        .q3_k => {
+            std.debug.print("WARN: Q3_K matvec not optimized, using generic dequant path\n", .{});
+            matvecGenericDequant(W, x, y, M, K, dtype);
+        },
         .iq2_xs, .iq4_xs => {
-            // IQ types not yet optimized - treat as fp16 for now
-            std.debug.print("WARN: {s} not optimized, treating as FP16 (may produce incorrect results)\n", .{@tagName(dtype)});
-            matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K);
+            std.debug.print("WARN: {s} matvec not optimized, using generic dequant path\n", .{@tagName(dtype)});
+            matvecGenericDequant(W, x, y, M, K, dtype);
         },
         else => {
             std.debug.print("WARN: unsupported dtype {s}, falling back to FP16 (may produce incorrect results)\n", .{@tagName(dtype)});
@@ -193,6 +196,90 @@ pub fn matvecQ4K(
                     sum += (rs0 * @as(f32, @floatFromInt(qs[qoff + j] >> 4)) - rm0) * x_blk[woff + 32 + j];
                     sum += (rs1 * @as(f32, @floatFromInt(qs[qoff + 16 + j] >> 4)) - rm1) * x_blk[woff + 48 + j];
                 }
+            }
+        }
+        y[m] += sum;
+    }
+}
+
+fn matvecGenericDequant(
+    blocks: [*]const u8,
+    x: [*]const f32,
+    y: [*]f32,
+    M: u32,
+    K: u32,
+    dtype: gguf.GGMLType,
+) void {
+    var fp16_buf: [8192]types.fp16_t = undefined;
+    const max_row = @min(@as(usize, M), fp16_buf.len / @as(usize, K));
+    var m: u32 = 0;
+    while (m < max_row) : (m += 1) {
+        const row_fp16 = fp16_buf[0..K];
+        const row_ptr = blocks + @as(usize, m) * quant.rowQuantizedBytes(K, dtype);
+        quant.dequantizeRow(row_ptr, @ptrCast(row_fp16.ptr), K, dtype);
+        var sum: f32 = 0;
+        for (0..K) |i| {
+            sum += types.fp16_to_fp32(row_fp16[i]) * x[i];
+        }
+        y[m] += sum;
+    }
+}
+
+pub fn matvecQ5K(
+    blocks: [*]const u8,
+    x: [*]const f32,
+    y: [*]f32,
+    M: u32,
+    K: u32,
+) void {
+    const blocks_per_row = K / 256;
+    const block_stride = 176;
+
+    var m: u32 = 0;
+    while (m < M) : (m += 1) {
+        var sum: f32 = 0;
+        const row_ptr = blocks + @as(usize, m) * blocks_per_row * block_stride;
+
+        var b: u32 = 0;
+        while (b < blocks_per_row) : (b += 1) {
+            const bp = row_ptr + b * block_stride;
+            const d = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+            const dmin = types.fp16_to_fp32(std.mem.readInt(u16, bp[2..4], .little));
+            const scales = bp[4..];
+            const qh = bp[16..];
+            const qs = bp[48..];
+            const x_blk = x + b * 256;
+
+            var mask1: u8 = 1;
+            var mask2: u8 = 2;
+            var ql_off: usize = 0;
+
+            var blk: u32 = 0;
+            while (blk < 4) : (blk += 1) {
+                const js = blk * 2;
+                const sc0: u8 = if (js < 4) scales[js] & 63 else (scales[js + 4] & 0x0F) | ((scales[js - 4] >> 6) << 4);
+                const mn0: u8 = if (js < 4) scales[js + 4] & 63 else (scales[js + 4] >> 4) | ((scales[js] >> 6) << 4);
+                const sc1: u8 = if (js + 1 < 4) scales[js + 1] & 63 else (scales[js + 1 + 4] & 0x0F) | ((scales[js + 1 - 4] >> 6) << 4);
+                const mn1: u8 = if (js + 1 < 4) scales[js + 1 + 4] & 63 else (scales[js + 1 + 4] >> 4) | ((scales[js + 1] >> 6) << 4);
+
+                const rs0 = d * @as(f32, @floatFromInt(sc0));
+                const rm0 = dmin * @as(f32, @floatFromInt(mn0));
+                const rs1 = d * @as(f32, @floatFromInt(sc1));
+                const rm1 = dmin * @as(f32, @floatFromInt(mn1));
+
+                const woff = blk * 64;
+
+                for (0..32) |l| {
+                    const q = qs[ql_off + l];
+                    const hi1: u8 = if ((qh[l] & mask1) != 0) 16 else 0;
+                    const hi2: u8 = if ((qh[l] & mask2) != 0) 16 else 0;
+                    sum += (rs0 * @as(f32, @floatFromInt((q & 0x0F) + hi1)) - rm0) * x_blk[woff + l];
+                    sum += (rs1 * @as(f32, @floatFromInt((q >> 4) + hi2)) - rm1) * x_blk[woff + 32 + l];
+                }
+
+                ql_off += 32;
+                mask1 <<= 2;
+                mask2 <<= 2;
             }
         }
         y[m] += sum;

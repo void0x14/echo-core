@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const config_mod = @import("../core/config.zig");
+const config_mod = @import("core_config");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
@@ -299,6 +299,11 @@ pub const Reader = struct {
         self.config.norm_type = .rms_norm;
         self.config.pos_encoding = .rope;
         self.config.use_kv_quantization = false;
+
+        // Hybrid SSM/Attention configuration (for qwen35)
+        if (self.prefixedLookup("full_attention_interval")) |value| {
+            if (self.numericAsU64(value)) |v| self.config.full_attention_interval = @intCast(v);
+        }
 
         // SSM configuration (for Mamba-2, hybrid models like qwen35)
         self.config.ssm_conv_kernel = 4; // Default

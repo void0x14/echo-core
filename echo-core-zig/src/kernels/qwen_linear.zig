@@ -1,5 +1,5 @@
 const std = @import("std");
-const config = @import("../core/config.zig");
+const config = @import("core_config");
 const types = @import("../core/types.zig");
 const math = @import("../core/math.zig");
 const matvec = @import("matvec.zig");

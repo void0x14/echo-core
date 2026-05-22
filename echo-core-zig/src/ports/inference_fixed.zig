@@ -1,6 +1,6 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
-const config = @import("../core/config.zig");
+const config = @import("core_config");
 const memory = @import("../core/memory.zig");
 const engine = @import("../inference/engine.zig");
 const matvec = @import("../kernels/matvec.zig");

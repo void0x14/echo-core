@@ -1,7 +1,9 @@
 const std = @import("std");
+const config = @import("core_config");
 const types = @import("../core/types.zig");
 const math = @import("../core/math.zig");
 const matvec = @import("matvec.zig");
+const gguf = @import("../gguf/reader.zig");
 
 /// SSM state for a single layer
 /// Maintains convolution state and SSM recurrent state
@@ -134,37 +136,44 @@ pub fn ssmForward(
     conv_kernel: u32,
     dt_scale: f32,
 
-    // Input/output
     input: []const f32,
     output: []f32,
 
-    // SSM weights (pointers into weight pool)
-    ssm_out_w: [*]const u8, // [hidden_dim, hidden_dim] - output projection
-    ssm_x_w: [*]const u8, // [hidden_dim, hidden_dim] - x projection
-    ssm_dt_w: [*]const u8, // [dt_rank, hidden_dim] - dt projection
-    ssm_A: [*]const u8, // [ssm_inner] - diagonal state matrix
-    ssm_B_w: [*]const u8, // [ssm_inner, hidden_dim] - B projection
-    ssm_C_w: [*]const u8, // [ssm_inner, hidden_dim] - C projection
-    ssm_D: [*]const u8, // [hidden_dim] - skip connection
-    ssm_conv1d_w: [*]const u8, // [conv_kernel, hidden_dim] - conv weights
-    ssm_conv1d_b: [*]const u8, // [hidden_dim] - conv bias
+    ssm_out_w: [*]const u8,
+    ssm_x_w: [*]const u8,
+    ssm_dt_w: [*]const u8,
+    ssm_A: [*]const u8,
+    ssm_B_w: [*]const u8,
+    ssm_C_w: [*]const u8,
+    ssm_D: [*]const u8,
+    ssm_conv1d_w: [*]const u8,
+    ssm_conv1d_b: [*]const u8,
 
-    // State (mutable)
+    ssm_out_dtype: gguf.GGMLType,
+    ssm_x_dtype: gguf.GGMLType,
+    ssm_dt_dtype: gguf.GGMLType,
+    ssm_B_dtype: gguf.GGMLType,
+    ssm_C_dtype: gguf.GGMLType,
+
     state: *SSMState,
 
-    // Temporary buffers
-    tmp_x: []f32, // [hidden_dim]
-    tmp_z: []f32, // [hidden_dim]
-    tmp_dt: []f32, // [dt_rank]
-    tmp_B: []f32, // [ssm_inner]
-    tmp_C: []f32, // [ssm_inner]
+    tmp_x: []f32,
+    tmp_z: []f32,
+    tmp_dt: []f32,
+    tmp_B: []f32,
+    tmp_C: []f32,
 ) void {
     const state_per_group = hidden_dim / ssm_groups;
 
     // Step 1: Project input
     @memset(tmp_x, 0);
     @memset(tmp_z, 0);
-    matvec.matvecDispatch(ssm_x_w, input.ptr, tmp_x.ptr, hidden_dim, hidden_dim, .{});
+    if (ssm_x_dtype != .f16) {
+        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+            ssm_x_w, input.ptr, tmp_x.ptr, hidden_dim, hidden_dim, ssm_x_dtype);
+    } else {
+        matvec.matvecDispatch(ssm_x_w, input.ptr, tmp_x.ptr, hidden_dim, hidden_dim, .{});
+    }
 
     // Step 2: Apply convolution with SiLU
     // Extract conv weights and bias as fp16 slices
@@ -186,13 +195,16 @@ pub fn ssmForward(
 
     // Step 3: Project to dt, B, C
     @memset(tmp_dt, 0);
-    matvec.matvecDispatch(ssm_dt_w, conv_out[0..hidden_dim].ptr, tmp_dt.ptr, dt_rank, hidden_dim, .{});
+    matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+        ssm_dt_w, conv_out[0..hidden_dim].ptr, tmp_dt.ptr, dt_rank, hidden_dim, ssm_dt_dtype);
 
     @memset(tmp_B, 0);
-    matvec.matvecDispatch(ssm_B_w, conv_out[0..hidden_dim].ptr, tmp_B.ptr, ssm_inner, hidden_dim, .{});
+    matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+        ssm_B_w, conv_out[0..hidden_dim].ptr, tmp_B.ptr, ssm_inner, hidden_dim, ssm_B_dtype);
 
     @memset(tmp_C, 0);
-    matvec.matvecDispatch(ssm_C_w, conv_out[0..hidden_dim].ptr, tmp_C.ptr, ssm_inner, hidden_dim, .{});
+    matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+        ssm_C_w, conv_out[0..hidden_dim].ptr, tmp_C.ptr, ssm_inner, hidden_dim, ssm_C_dtype);
 
     // Step 4: Apply selective scan for each group
     var scan_out: [8192]f32 = undefined; // [hidden_dim]
@@ -242,7 +254,8 @@ pub fn ssmForward(
 
     // Step 6: Output projection
     @memset(output, 0);
-    matvec.matvecDispatch(ssm_out_w, scan_out[0..hidden_dim].ptr, output.ptr, hidden_dim, hidden_dim, .{});
+    matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
+        ssm_out_w, scan_out[0..hidden_dim].ptr, output.ptr, hidden_dim, hidden_dim, ssm_out_dtype);
 }
 
 /// Initialize SSM A matrix with log-spaced values (typical Mamba initialization)

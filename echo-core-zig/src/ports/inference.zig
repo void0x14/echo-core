@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const config = @import("../core/config.zig");
+const config = @import("core_config");
 const memory = @import("../core/memory.zig");
 const types = @import("../core/types.zig");
 const engine = @import("../inference/engine.zig");
@@ -109,26 +109,31 @@ fn detectActualDimensions(cfg: *config.ModelConfig, reader: *const gguf.Reader) 
     }
 
     // Count actual SSM layers in the model for proper memory allocation
-    // Hybrid models like Qwen 3.5 have only a few SSM layers among many attention layers
-    var ssm_layer_count: u32 = 0;
-    var layer_idx: u32 = 0;
-    while (layer_idx < cfg.num_layers) : (layer_idx += 1) {
-        var tensor_name_buf: [64]u8 = undefined;
-        const tensor_name = std.fmt.bufPrint(&tensor_name_buf, "blk.{d}.ssm_out.weight", .{layer_idx}) catch continue;
-        if (reader.findTensorBySuffix(tensor_name)) |_| {
-            ssm_layer_count += 1;
-        }
-    }
-
-    if (ssm_layer_count > 0 and ssm_layer_count < cfg.num_layers) {
-        std.debug.print("INFO: Detected hybrid model with {d} SSM layers out of {d} total layers\n", .{ ssm_layer_count, cfg.num_layers });
-        cfg.num_ssm_layers = ssm_layer_count;
-    } else if (ssm_layer_count == 0) {
-        // No SSM layers detected - pure attention model
-        cfg.num_ssm_layers = 0;
+    // Hybrid models like Qwen 3.5 have SSM operators in every layer
+    // but only use SSM as the primary path in non-attention layers
+    if (cfg.full_attention_interval > 0 and cfg.num_layers > 0) {
+        const hybrid_ssm_count = cfg.num_layers - (cfg.num_layers / cfg.full_attention_interval);
+        std.debug.print("INFO: Hybrid model with full_attention_interval={d}, SSM layers={d}\n", .{ cfg.full_attention_interval, hybrid_ssm_count });
+        cfg.num_ssm_layers = hybrid_ssm_count;
     } else {
-        // All layers have SSM - pure SSM model (Mamba-style)
-        cfg.num_ssm_layers = cfg.num_layers;
+        var ssm_layer_count: u32 = 0;
+        var layer_idx_u: u32 = 0;
+        while (layer_idx_u < cfg.num_layers) : (layer_idx_u += 1) {
+            var tensor_name_buf: [64]u8 = undefined;
+            const tensor_name = std.fmt.bufPrint(&tensor_name_buf, "blk.{d}.ssm_out.weight", .{layer_idx_u}) catch continue;
+            if (reader.findTensorBySuffix(tensor_name)) |_| {
+                ssm_layer_count += 1;
+            }
+        }
+
+        if (ssm_layer_count > 0 and ssm_layer_count < cfg.num_layers) {
+            std.debug.print("INFO: Detected hybrid model with {d} SSM layers out of {d} total layers\n", .{ ssm_layer_count, cfg.num_layers });
+            cfg.num_ssm_layers = ssm_layer_count;
+        } else if (ssm_layer_count == 0) {
+            cfg.num_ssm_layers = 0;
+        } else {
+            cfg.num_ssm_layers = cfg.num_layers;
+        }
     }
 }
 
@@ -304,16 +309,18 @@ fn isScalarTensorType(dtype: gguf.GGMLType) bool {
     };
 }
 
-fn isMatmulTensorType(dtype: gguf.GGMLType) bool {
+fn isEmbeddingTensorType(dtype: gguf.GGMLType) bool {
     return switch (dtype) {
-        .f16, .f32, .q8_0, .q4_k, .q2_k => true,
+        .f16, .f32, .q8_0, .q4_k, .q5_k, .q6_k, .q2_k, .q3_k => true,
         else => false,
     };
 }
 
-fn isEmbeddingTensorType(dtype: gguf.GGMLType) bool {
+fn isMatmulTensorType(dtype: gguf.GGMLType) bool {
     return switch (dtype) {
-        .f16, .f32, .q8_0 => true,
+        .f16, .f32, .q8_0, .q4_k, .q5_k, .q6_k, .q2_k, .q3_k,
+        .iq2_xs, .iq4_xs, .iq3_s, .iq2_s, .iq1_s, .iq4_nl,
+        => true,
         else => false,
     };
 }
@@ -715,7 +722,11 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
     }.call;
 
     const classifyLayerType = struct {
-        fn call(r: *const gguf.Reader, layer_idx: usize) config.ModelConfig.LayerType {
+        fn call(r: *const gguf.Reader, layer_idx: usize, full_attn_interval: u32) config.ModelConfig.LayerType {
+            if (full_attn_interval > 0) {
+                return qwen35LayerType(layer_idx, full_attn_interval);
+            }
+
             var ssm_out_buf: [96]u8 = undefined;
             const ssm_out = tensorSuffixForLayer(&ssm_out_buf, layer_idx, "ssm_out.weight") catch return .attention;
             if (findTensorNameBySuffix(r, ssm_out) == null) return .attention;
@@ -880,7 +891,7 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
         const info = layer_info[layer_idx];
         const layer_base = info.base_offset;
         const slot_base: usize = 1 + layer_idx * 19;
-        const layer_type = classifyLayerType(reader, layer_idx);
+        const layer_type = classifyLayerType(reader, layer_idx, cfg.full_attention_interval);
         eng.weight_layout.layer_types[layer_idx] = layer_type;
 
         _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_norm.weight"), eng.weight_pool[layer_base + info.norm_offset ..][0..info.norm_size], slot_base + 0, eng.weight_dtypes);
@@ -888,11 +899,20 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
         var alias_buf: [96]u8 = undefined;
         const attn_q_suffix = try tensorSuffixForLayer(&name_buf, layer_idx, "attn_q.weight");
         const attn_qkv_suffix = try tensorSuffixForLayer(&alias_buf, layer_idx, "attn_qkv.weight");
-        _ = try loadTensorWithAliasIfPresent(reader, attn_q_suffix, attn_qkv_suffix, eng.weight_pool[layer_base + info.q_offset ..][0..info.q_size], slot_base + 1, eng.weight_dtypes);
+        const q_loaded = try loadTensorWithAliasIfPresent(reader, attn_q_suffix, attn_qkv_suffix, eng.weight_pool[layer_base + info.q_offset ..][0..info.q_size], slot_base + 1, eng.weight_dtypes);
 
-        _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_k.weight"), eng.weight_pool[layer_base + info.k_offset ..][0..info.k_size], slot_base + 2, eng.weight_dtypes);
+        const k_loaded = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_k.weight"), eng.weight_pool[layer_base + info.k_offset ..][0..info.k_size], slot_base + 2, eng.weight_dtypes);
 
-        _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_v.weight"), eng.weight_pool[layer_base + info.v_offset ..][0..info.v_size], slot_base + 3, eng.weight_dtypes);
+        const v_loaded = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_v.weight"), eng.weight_pool[layer_base + info.v_offset ..][0..info.v_size], slot_base + 3, eng.weight_dtypes);
+
+        // Fused QKV: if Q was loaded but K/V were not (they're part of fused tensor),
+        // propagate the fused QKV dtype to K/V slots so matvecDispatchQuant uses correct dtype.
+        if (q_loaded and !k_loaded) {
+            eng.weight_dtypes[slot_base + 2] = eng.weight_dtypes[slot_base + 1];
+        }
+        if (q_loaded and !v_loaded) {
+            eng.weight_dtypes[slot_base + 3] = eng.weight_dtypes[slot_base + 1];
+        }
 
         const attn_output_suffix = try tensorSuffixForLayer(&name_buf, layer_idx, "attn_output.weight");
         const attn_gate_suffix = try tensorSuffixForLayer(&alias_buf, layer_idx, "attn_gate.weight");

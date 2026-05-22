@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) void {
     });
     echo_core_module.addImport("core_config", core_config_mod);
     echo_core_module.addImport("gguf", gguf_mod);
+    echo_core_module.addImport("config", core_config_mod);
 
     // Test files to run
     const test_files = [_][]const u8{
@@ -38,13 +39,13 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run all tests");
     for (test_files) |test_file| {
-        const test_exe = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path(test_file),
-                .target = target,
-                .optimize = optimize,
-            }),
+        const test_mod = b.createModule(.{
+            .root_source_file = b.path(test_file),
+            .target = target,
+            .optimize = optimize,
         });
+        test_mod.addImport("core_config", core_config_mod);
+        const test_exe = b.addTest(.{ .root_module = test_mod });
         const run_test = b.addRunArtifact(test_exe);
         test_step.dependOn(&run_test.step);
     }
@@ -56,43 +57,28 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    // NOTE: Tool executables temporarily disabled due to module/import path issues
-    // These need separate refactoring to fix relative imports
-    //
-    // // Dump model tool
-    // const dump_model_exe = b.addExecutable(.{
-    //     .name = "dump-model",
-    //     .root_module = b.createModule(.{
-    //         .root_source_file = b.path("src/tools/dump_model.zig"),
-    //         .target = target,
-    //         .optimize = optimize,
-    //     }),
-    // });
-    // dump_model_exe.root_module.addImport("gguf", gguf_mod);
-    // b.installArtifact(dump_model_exe);
-    //
-    // // Analyze GGUF tool
-    // const analyze_exe = b.addExecutable(.{
-    //     .name = "analyze-gguf",
-    //     .root_module = b.createModule(.{
-    //         .root_source_file = b.path("src/tools/analyze_gguf.zig"),
-    //         .target = target,
-    //         .optimize = optimize,
-    //     }),
-    // });
-    // analyze_exe.root_module.addImport("gguf", gguf_mod);
-    // analyze_exe.root_module.addImport("core_config", core_config_mod);
-    // b.installArtifact(analyze_exe);
+    // Dump model tool
+    const dump_model_mod = b.createModule(.{
+        .root_source_file = b.path("src/tools/dump_model_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dump_model_mod.addImport("core_config", core_config_mod);
+    dump_model_mod.addImport("gguf", gguf_mod);
+    b.installArtifact(b.addExecutable(.{
+        .name = "dump-model",
+        .root_module = dump_model_mod,
+    }));
 
-    // Analyze GGUF tool - standalone, no module dependencies
-    // Temporarily disabled due to Zig 0.16 API changes
-    // const analyze_exe = b.addExecutable(.{
-    //     .name = "analyze-gguf",
-    //     .root_module = b.createModule(.{
-    //         .root_source_file = b.path("src/tools/analyze_gguf.zig"),
-    //         .target = target,
-    //         .optimize = optimize,
-    //     }),
+    // Analyze GGUF tool - standalone, needs Zig 0.17 API refactor
+    // Temporarily disabled until old std.fs API calls are updated
+    // const analyze_mod = b.createModule(.{
+    //     .root_source_file = b.path("src/tools/analyze_gguf.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
     // });
-    // b.installArtifact(analyze_exe);
+    // b.installArtifact(b.addExecutable(.{
+    //     .name = "analyze-gguf",
+    //     .root_module = analyze_mod,
+    // }));
 }

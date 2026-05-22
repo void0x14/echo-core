@@ -1,6 +1,6 @@
 const std = @import("std");
 const types = @import("types.zig");
-const config = @import("config.zig");
+const config = @import("core_config");
 const gguf = @import("../gguf/reader.zig");
 
 /// Compute byte size for a tensor given its shape and dtype
@@ -347,10 +347,22 @@ pub const WeightLayout = struct {
         offset += getLayerTensorBytes(reader_opt, "attn_q.weight", hidden * q_dim);
 
         layout.k_proj_offset = offset;
-        offset += getLayerTensorBytes(reader_opt, "attn_k.weight", hidden * kv_dim);
-
         layout.v_proj_offset = offset;
-        offset += getLayerTensorBytes(reader_opt, "attn_v.weight", hidden * kv_dim);
+        offset += getLayerTensorBytes(reader_opt, "attn_k.weight", hidden * kv_dim);
+        const v_extra = getLayerTensorBytes(reader_opt, "attn_v.weight", hidden * kv_dim);
+        offset += v_extra;
+
+        // If fused QKV exists, K and V are part of the QKV tensor.
+        // Override offsets to point into the QKV data region.
+        if (reader_opt) |reader| {
+            var name_buf_qkv: [64]u8 = undefined;
+            const qkv_name = std.fmt.bufPrint(&name_buf_qkv, "blk.0.attn_qkv.weight", .{}) catch "";
+            if (reader.tensors.get(qkv_name)) |tensor| {
+                const row_size = computeTensorQuantizedBytes(&.{@as(u64, hidden)}, tensor.dtype);
+                layout.k_proj_offset = layout.q_proj_offset + @as(usize, q_dim) * row_size;
+                layout.v_proj_offset = layout.q_proj_offset + @as(usize, q_dim + kv_dim) * row_size;
+            }
+        }
 
         layout.o_proj_offset = offset;
         offset += getLayerTensorBytes(reader_opt, "attn_output.weight", q_dim * hidden);
@@ -689,6 +701,7 @@ test "WeightLayout uses actual output tensor bytes" {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .full_attention_interval = 0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,
@@ -728,6 +741,7 @@ test "WeightLayout compute" {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .full_attention_interval = 0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,

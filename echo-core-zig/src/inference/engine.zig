@@ -1,5 +1,5 @@
 const std = @import("std");
-const config = @import("../core/config.zig");
+const config = @import("core_config");
 const memory = @import("../core/memory.zig");
 const types = @import("../core/types.zig");
 const matvec = @import("../kernels/matvec.zig");
@@ -23,6 +23,13 @@ fn rowByteSize(cols: u32, dtype: gguf.GGMLType) usize {
         .f16 => cols * @sizeOf(types.fp16_t),
         .f32 => cols * @sizeOf(f32),
         .q8_0 => (cols / 32) * 34,
+        .q4_k => (cols / 256) * 144,
+        .q5_k => (cols / 256) * 176,
+        .q6_k => (cols / 256) * 210,
+        .q2_k => (cols / 256) * 84,
+        .q3_k => (cols / 256) * 110,
+        .iq4_xs => (cols / 256) * 136,
+        .iq2_xs => (cols / 256) * 74,
         else => cols * @sizeOf(types.fp16_t),
     };
 }
@@ -46,6 +53,35 @@ fn loadEmbeddingRowToF32(src: []const u8, dtype: gguf.GGMLType, cols: u32, dst: 
                 const qs = @as([*]const i8, @ptrCast(bp.ptr + 2));
                 for (0..32) |j| {
                     dst[block_idx * 32 + j] = d * @as(f32, @floatFromInt(qs[j]));
+                }
+            }
+        },
+        .q4_k => {
+            const blocks_per_row = cols / 256;
+            for (0..blocks_per_row) |b| {
+                const bp = src[b * 144 ..][0..144];
+                const d = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+                const dmin = types.fp16_to_fp32(std.mem.readInt(u16, bp[2..4], .little));
+                const scales = bp[4..];
+                const qs = bp[16..];
+                for (0..4) |blk| {
+                    const js = blk * 2;
+                    const sc0: u8 = if (js < 4) scales[js] & 63 else (scales[js + 4] & 0x0F) | ((scales[js - 4] >> 6) << 4);
+                    const mn0: u8 = if (js < 4) scales[js + 4] & 63 else (scales[js + 4] >> 4) | ((scales[js] >> 6) << 4);
+                    const sc1: u8 = if (js + 1 < 4) scales[js + 1] & 63 else (scales[js + 1 + 4] & 0x0F) | ((scales[js + 1 - 4] >> 6) << 4);
+                    const mn1: u8 = if (js + 1 < 4) scales[js + 1 + 4] & 63 else (scales[js + 1 + 4] >> 4) | ((scales[js + 1] >> 6) << 4);
+                    const rs0 = d * @as(f32, @floatFromInt(sc0));
+                    const rm0 = dmin * @as(f32, @floatFromInt(mn0));
+                    const rs1 = d * @as(f32, @floatFromInt(sc1));
+                    const rm1 = dmin * @as(f32, @floatFromInt(mn1));
+                    const qoff = blk * 32;
+                    const woff = blk * 64;
+                    for (0..16) |j| {
+                        dst[b * 256 + woff + j] = rs0 * @as(f32, @floatFromInt(qs[qoff + j] & 0x0F)) - rm0;
+                        dst[b * 256 + woff + 16 + j] = rs1 * @as(f32, @floatFromInt(qs[qoff + 16 + j] & 0x0F)) - rm1;
+                        dst[b * 256 + woff + 32 + j] = rs0 * @as(f32, @floatFromInt(qs[qoff + j] >> 4)) - rm0;
+                        dst[b * 256 + woff + 48 + j] = rs1 * @as(f32, @floatFromInt(qs[qoff + 16 + j] >> 4)) - rm1;
+                    }
                 }
             }
         },
@@ -666,6 +702,11 @@ pub const Engine = struct {
             self.weight_pool.ptr + ssm_D_offset,
             self.weight_pool.ptr + ssm_conv1d_offset,
             self.weight_pool.ptr + ssm_conv1d_bias_offset,
+            dtypeForLayerSlot(self.weight_dtypes, layer_idx, 11), // ssm_out
+            dtypeForLayerSlot(self.weight_dtypes, layer_idx, 12), // ssm_x
+            dtypeForLayerSlot(self.weight_dtypes, layer_idx, 13), // ssm_dt
+            dtypeForLayerSlot(self.weight_dtypes, layer_idx, 15), // ssm_B
+            dtypeForLayerSlot(self.weight_dtypes, layer_idx, 16), // ssm_C
             &self.ssm_states[layer_idx],
             self.ssm_tmp_x,
             self.ssm_tmp_z,
@@ -679,7 +720,7 @@ pub const Engine = struct {
         const hidden = self.config.hidden_dim;
         const layer_base = self.weight_layout.layer_offsets[layer_idx];
         const qkv_offset = layer_base + self.weight_layout.q_proj_offset;
-        const qkv_end = layer_base + self.weight_layout.k_proj_offset;
+        const qkv_end = layer_base + self.weight_layout.o_proj_offset;
         const z_offset = layer_base + self.weight_layout.o_proj_offset;
         const z_end = layer_base + self.weight_layout.ffn_norm_offset;
 
@@ -888,6 +929,7 @@ fn makeTinyConfig(num_layers: u32, max_seq_len: u32) config.ModelConfig {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .full_attention_interval = 0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 4,
         .ssm_num_groups = 1,

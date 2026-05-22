@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
+const gguf = @import("../gguf/reader.zig");
 const iq2_tables = @import("iq2_tables.zig");
 
 pub const block_q8_0 = extern struct {
@@ -422,7 +423,8 @@ test "block sizes match C++" {
 }
 
 test "Q6_K dequant basic shape" {
-    var raw: [210]u8 = [_]u8{0} ** 210;
+    var raw: [210]u8 = undefined;
+    @memset(&raw, 0);
     var dst: [256]types.fp16_t = undefined;
     dequantizeQ6KToFp16(&raw, &dst, dst.len);
 
@@ -433,7 +435,8 @@ test "Q6_K dequant basic shape" {
 }
 
 test "IQ2_XS dequant basic shape" {
-    var raw: [74]u8 = [_]u8{0} ** 74;
+    var raw: [74]u8 = undefined;
+    @memset(&raw, 0);
     var dst: [256]types.fp16_t = undefined;
     dequantizeIQ2XSToFp16(&raw, &dst, dst.len);
 
@@ -442,7 +445,8 @@ test "IQ2_XS dequant basic shape" {
 }
 
 test "Q5_K dequant basic shape" {
-    var raw: [176]u8 = [_]u8{0} ** 176;
+    var raw: [176]u8 = undefined;
+    @memset(&raw, 0);
     var dst: [256]types.fp16_t = undefined;
     dequantizeQ5KToFp16(&raw, &dst, dst.len);
 
@@ -451,7 +455,8 @@ test "Q5_K dequant basic shape" {
 }
 
 test "IQ4_XS dequant basic shape" {
-    var raw: [136]u8 = [_]u8{0} ** 136;
+    var raw: [136]u8 = undefined;
+    @memset(&raw, 0);
     var dst: [256]types.fp16_t = undefined;
     dequantizeIQ4XSToFp16(&raw, &dst, dst.len);
 
@@ -522,4 +527,41 @@ test "Q4_K dequant matches canonical scale packing" {
     }
 
     try std.testing.expectApproxEqAbs(expected, fused, 0.01);
+}
+
+pub fn rowQuantizedBytes(cols: usize, dtype: gguf.GGMLType) usize {
+    return switch (dtype) {
+        .f16 => cols * @sizeOf(types.fp16_t),
+        .f32 => cols * @sizeOf(f32),
+        .q8_0 => (cols / 32) * 34,
+        .q4_k => (cols / 256) * 144,
+        .q5_k => (cols / 256) * 176,
+        .q6_k => (cols / 256) * 210,
+        .q2_k => (cols / 256) * 84,
+        .q3_k => (cols / 256) * 110,
+        .iq4_xs => (cols / 256) * 136,
+        .iq2_xs => (cols / 256) * 74,
+        else => cols * @sizeOf(types.fp16_t),
+    };
+}
+
+pub fn dequantizeRow(src: [*]const u8, dst: [*]types.fp16_t, n_weights: usize, dtype: gguf.GGMLType) void {
+    switch (dtype) {
+        .f16 => {
+            const src_fp16: [*]const types.fp16_t = @ptrCast(@alignCast(src));
+            @memcpy(dst[0..n_weights], src_fp16[0..n_weights]);
+        },
+        .f32 => {
+            const src_f32: [*]const f32 = @ptrCast(@alignCast(src));
+            for (0..n_weights) |i| dst[i] = types.fp32_to_fp16(src_f32[i]);
+        },
+        .q8_0 => dequantizeQ80ToFp16(src, dst, n_weights),
+        .q4_k => dequantizeQ4KToFp16(src, dst, n_weights),
+        .q5_k => dequantizeQ5KToFp16(src, dst, n_weights),
+        .q6_k => dequantizeQ6KToFp16(src, dst, n_weights),
+        .q2_k => dequantizeQ2KToFp16(src, dst, n_weights),
+        .iq4_xs => dequantizeIQ4XSToFp16(src, dst, n_weights),
+        .iq2_xs => dequantizeIQ2XSToFp16(src, dst, n_weights),
+        else => unreachable,
+    }
 }

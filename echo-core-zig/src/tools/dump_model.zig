@@ -1,20 +1,22 @@
 const std = @import("std");
-const gguf = @import("gguf");
+const gguf = @import("../gguf/reader.zig");
 
-pub fn main() !void {
-    const allocator = std.heap.smp_allocator;
+pub fn main(init: std.process.Init) !void {
+    var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer args_it.deinit();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args = std.ArrayList([]const u8).init(init.gpa);
+    defer args.deinit();
+    while (args_it.next()) |arg| try args.append(arg);
 
-    if (args.len < 2) {
-        std.debug.print("Usage: {s} <model.gguf>\n", .{args[0]});
+    if (args.items.len < 2) {
+        std.debug.print("Usage: {s} <model.gguf>\n", .{args.items[0]});
         return error.MissingArgument;
     }
 
-    const model_path = args[1];
+    const model_path = args.items[1];
     
-    var reader = try gguf.Reader.openWithAllocator(model_path, allocator);
+    var reader = try gguf.Reader.openWithAllocator(model_path, init.gpa);
     defer reader.deinit();
 
     const cfg = reader.config;

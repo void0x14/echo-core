@@ -1,6 +1,6 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
-const config = @import("../core/config.zig");
+const config = @import("core_config");
 const quant = @import("../kernels/quant.zig");
 
 pub const KVCacheLayer = extern struct {
@@ -153,6 +153,7 @@ test "KVCache init" {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .full_attention_interval = 0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,
@@ -179,6 +180,7 @@ test "KVCache mode pointers and layer alignment" {
         .norm_type = .rms_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .full_attention_interval = 0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,
@@ -205,6 +207,7 @@ test "KVCache mode pointers and layer alignment" {
         .norm_type = .layer_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = true,
+        .full_attention_interval = 0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,
@@ -232,6 +235,7 @@ test "KVCache append fp32 stores values and reset clears seq len" {
         .norm_type = .layer_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = false,
+        .full_attention_interval = 0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,
@@ -274,6 +278,7 @@ test "KVCache append quantized stores int8 rows" {
         .norm_type = .layer_norm,
         .pos_encoding = .rope,
         .use_kv_quantization = true,
+        .full_attention_interval = 0,
         .ssm_conv_kernel = 4,
         .ssm_inner_size = 16,
         .ssm_num_groups = 1,
