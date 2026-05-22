@@ -2,10 +2,7 @@ const std = @import("std");
 const gguf = @import("../gguf/reader.zig");
 const matvec = @import("matvec.zig");
 
-pub const NUM_THREADS: u32 = 16;
-comptime {
-    if (NUM_THREADS > 64) @compileError("too many threads");
-}
+const NUM_THREADS: u32 = 16;
 
 const ThreadData = struct {
     W: [*]const u8,
