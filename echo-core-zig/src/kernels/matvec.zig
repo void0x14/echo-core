@@ -2,6 +2,9 @@ const std = @import("std");
 const types = @import("../core/types.zig");
 const config = @import("core_config");
 const quant = @import("quant.zig");
+const avx2_q6k = @import("avx2_q6k.zig");
+const avx2_q4k = @import("avx2_q4k.zig");
+const avx2_q5k = @import("avx2_q5k.zig");
 const gguf = @import("../gguf/reader.zig");
 
 pub fn matvecFp16Fp32(
@@ -82,13 +85,10 @@ pub fn matvecDispatchQuant(
         .f16 => matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .f32 => matvecF32Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .q8_0 => matvecQ80(W, x, y, M, K),
-        .q4_k => if (K >= 256) matvecQ4K(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
-        .q5_k => if (K >= 256) matvecQ5K(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
+        .q4_k => if (K >= 256) avx2_q4k.matvecQ4K_avx2(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
+        .q5_k => if (K >= 256) avx2_q5k.matvecQ5K_avx2(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
         .q2_k => if (K >= 256) matvecQ2K(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
-        .q6_k => {
-            std.debug.print("WARN: Q6_K matvec not optimized, using generic dequant path\n", .{});
-            matvecGenericDequant(W, x, y, M, K, dtype);
-        },
+        .q6_k => if (K >= 256) avx2_q6k.matvecQ6K_avx2(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
         .q3_k => {
             std.debug.print("WARN: Q3_K matvec not optimized, using generic dequant path\n", .{});
             matvecGenericDequant(W, x, y, M, K, dtype);

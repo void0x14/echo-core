@@ -8,6 +8,9 @@ const ssm = @import("../kernels/ssm.zig");
 const tokenizer = @import("../tokenizer/tokenizer.zig");
 const kv_cache = @import("../kv_cache/cache.zig");
 const math = @import("../core/math.zig");
+const avx2_softmax = @import("../kernels/avx2_softmax.zig");
+const avx2_norm = @import("../kernels/avx2_norm.zig");
+const parallel = @import("../kernels/parallel.zig");
 const gguf = @import("../gguf/reader.zig");
 
 const ArrayList = std.array_list.Managed;
@@ -413,7 +416,7 @@ pub const Engine = struct {
         const output_proj_size = self.weight_layout.ssm_region_offset - self.weight_layout.output_proj_offset;
         const output_proj_bytes = self.weight_pool[output_proj_byte_offset..][0..output_proj_size];
         const output_dtype = dtypeForGlobal(self.weight_dtypes, 2);
-        matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M, output_proj_bytes.ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, output_dtype);
+        try parallel.parallelMatvec(output_proj_bytes.ptr, self.hidden_state.ptr, self.logits.ptr, vocab, hidden, output_dtype);
 
         self.seq_pos += 1;
         return self.logits;
@@ -535,13 +538,7 @@ pub const Engine = struct {
     fn applyHeadNorm(proj: []f32, num_heads_for_proj: u32, head_dim: u32, norm_weight: []const types.fp16_t) void {
         for (0..num_heads_for_proj) |h| {
             const offset = h * head_dim;
-            var rms: f32 = 0;
-            for (0..head_dim) |i| rms += proj[offset + i] * proj[offset + i];
-            rms = @sqrt(rms / @as(f32, @floatFromInt(head_dim)) + 1e-6);
-            const inv_rms = 1.0 / rms;
-            for (0..head_dim) |i| {
-                proj[offset + i] = proj[offset + i] * inv_rms * types.fp16_to_fp32(norm_weight[i]);
-            }
+            avx2_norm.rmsNormAvx2(proj.ptr + offset, proj.ptr + offset, norm_weight.ptr, head_dim);
         }
     }
 
@@ -619,7 +616,7 @@ pub const Engine = struct {
                     }
                 }
 
-                math.softmax(self.scores[0..cache_len]);
+                avx2_softmax.softmaxAvx2(self.scores[0..cache_len]);
                 @memset(self.head_out[0..head_dim], 0);
 
                 if (self.config.use_kv_quantization) {
@@ -818,13 +815,7 @@ pub const Engine = struct {
     fn norm(self: *const Engine, input: []const f32, output: []f32, norm_weight: []const types.fp16_t) void {
         const hidden = self.config.hidden_dim;
         switch (self.config.norm_type) {
-            .rms_norm => {
-                var rms: f32 = 0;
-                for (0..hidden) |i| rms += input[i] * input[i];
-                rms = @sqrt(rms / @as(f32, @floatFromInt(hidden)) + 1e-6);
-                const inv_rms = 1.0 / rms;
-                for (0..hidden) |i| output[i] = input[i] * inv_rms * types.fp16_to_fp32(norm_weight[i]);
-            },
+            .rms_norm => avx2_norm.rmsNormAvx2(input.ptr, output.ptr, norm_weight.ptr, hidden),
             .layer_norm => {
                 var mean: f32 = 0;
                 for (0..hidden) |i| mean += input[i];

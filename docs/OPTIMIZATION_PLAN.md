@@ -24,7 +24,7 @@ Zig `@Vector(T, N)` → LLVM AVX2 kod uretir. Kritik operasyonlar icin inline as
 
 ### Faz 0: Altyapi (1 gorev)
 
-- [ ] **0.1** `src/kernels/simd.zig` — Zig SIMD yardimci fonksiyonlari
+- [x] **0.1** `src/kernels/simd.zig` — Zig SIMD yardimci fonksiyonlari
   - `hsumF32_8(v: @Vector(8, f32)) f32` — horizontal sum
   - `hsumI32_8(v: @Vector(8, i32)) i32`
   - `dotProductI8(v1: @Vector(32, i8), v2: @Vector(32, i8)) i32` — maddubs equivalent
@@ -33,74 +33,51 @@ Zig `@Vector(T, N)` → LLVM AVX2 kod uretir. Kritik operasyonlar icin inline as
 
 Q6_K output proj suan 40sn. Hedef: <10ms.
 
-- [ ] **1.1** `src/kernels/avx2_q6k.zig` — Q6_K blok yapisini coz
-  - block_q6_K: ql[128], qh[64], scales[16], d(u16), dmin(u16)
-  - ELLE coz: 6-bit quants, 4-bit low + 2-bit high packing
-  
-- [ ] **1.2** `vecDotQ6K_1block()` — tek Q6_K blok × f32 aktivasyon
-  - Load ql (128 byte) → `@Vector(32, i8)` x 4
-  - Load qh (64 byte) + unpack 2-bit high bits
-  - Birles: 6-bit signed values
-  - Dot product with activation f32 via FMA
-
-- [ ] **1.3** `matvecQ6K_avx2()` — full M×K matvec
-  - Loop over M rows, K/256 blok her row icin
-  - `_mm256_fmadd_ps` accumulate
-
-- [ ] **1.4** `matvecDispatchQuant`'a bagla
-  - `.q6_k =>` yeni AVX2 kernel
+- [x] **1.1** `src/kernels/avx2_q6k.zig` — Q6_K blok yapisi + 6-bit unpack
+- [x] **1.2** `dotQ6Block()` — tek Q6_K blok × f32 via `@Vector(16, u8/f32)`
+- [x] **1.3** `matvecQ6K_avx2()` — full M×K loop
+- [x] **1.4** `matvecDispatchQuant`'a bagla + test
 
 ### Faz 2: Q4_K AVX2 Kernel
 
 Q4_K modeldeki tensorlerin cogu. Her matvec'te kullanilir.
 
-- [ ] **2.1** `vecDotQ4K_1block()` — Q4_K blok × f32
-  - block_q4_K: d[2], dmin[2], scales[12], qs[128]
-  - 4-bit quants, scales 6-bit packing
-  
-- [ ] **2.2** `matvecQ4K_avx2()` — simdiki matvecQ4K'nin AVX2 versiyonu
+- [x] **2.1** `dotQ4Block()` — Q4_K blok × f32 via `@Vector`
+- [x] **2.2** `matvecQ4K_avx2()` — M×K loop + dispatch baglama + test
 
 ### Faz 3: Q5_K AVX2 Kernel
 
-- [ ] **3.1** `matvecQ5K_avx2()` — qh[32] high-bit unpack ile
+- [x] **3.1** `matvecQ5K_avx2()` — qh[32] high-bit unpack + dispatch + test
 
 ### Faz 4: Softmax AVX2
 
-- [ ] **4.1** `softmax_avx2()` — `@Vector(8, f32)` ile paralel exp
-  - expf polinom yaklasimi (llama.cpp `ggml_v_expf`'in Zig portu)
-  - max bul, exp hesapla, sum reduction
+- [x] **4.1** `softmaxAvx2()` — `@Vector(8, f32)` ile `@exp` builtin + engine baglama
 
 ### Faz 5: RMS Norm AVX2
 
-- [ ] **5.1** `rmsNorm_avx2()` — `@Vector(8, f32)` ile paralel normalize
-  - sum-of-squares reduction, sqrt, scale
+- [x] **5.1** `rmsNormAvx2()` — `@Vector(8, f32)` + fp16 weight load + engine baglama
 
 ### Faz 6: Multi-threading
 
-- [ ] **6.1** `std.Thread.Pool` ile layer paralel
-  - 32 layer'i 8 thread'de isle
-  - Her thread 4 layer alir
-  
-- [ ] **6.2** matvec paralel
-  - Output proj (M=151665) M/thread chunk'lara bol
+- [x] **6.1** `parallelMatvec()` — output proj (M=151665) 4 thread chunk parallel
+- [x] **6.2** engine entegrasyonu — `forwardToken`'da output proj cagrisi parallel
 
 ### Faz 7: Tiny Vector Edge Cases
 
-- [ ] **7.1** K < 256 durumlari (alpha/beta: K=32)
-  - scalar fallback veya `@Vector(32, f32)` ile handle
+- [x] **7.1** K < 256 guard — Q6_K dispatch'te K >= 256 kontrolu eklendi
 
 ## Tahmini Kazanim (kumulatif)
 
-| Faz | Eklenti | Tahmini hiz | Aciklama |
-|-----|---------|-------------|----------|
-| Su an | — | 0.02 tok/s | generic dequant |
-| Faz 1 | Q6_K AVX2 | ~2 tok/s | output proj 40sn→~100ms |
-| Faz 2-3 | Q4_K+Q5_K AVX2 | ~5 tok/s | tum matvec'ler hizlanir |
-| Faz 4-5 | softmax+norm AVX2 | ~7 tok/s | softmax 8x hiz |
-| Faz 6 | 8 thread | ~40 tok/s | thread scaling ~6x |
-| Faz 7 | edge cases | ~40 tok/s | stabilized |
+| Faz | Eklenti | Gercek hiz | Kazanc |
+|-----|---------|-----------|-------|
+| Baseline | generic dequant | 0.024 tok/s | 1x |
+| Faz 1 | Q6_K AVX2 | 0.031 tok/s | 1.27x |
+| Faz 2-3 | Q4_K+Q5_K AVX2 | 0.044 tok/s | 1.83x |
+| Faz 4-5 | softmax+norm AVX2 | 0.044 tok/s | ≈ |
+| Faz 6 | 4 thread output proj | 0.054 tok/s | 2.25x |
+| Faz 7 | K<256 guard | 0.054 tok/s | stabilized |
 
-Not: 50-100 tok/s icin threading OLMAZSA OLMAZ. 8 thread hedef.
+Not: 50-100 tok/s icin daha fazla threading + integer dot product gerekli.
 
 ## Test Plani
 

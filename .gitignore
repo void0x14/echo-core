@@ -15,3 +15,7 @@ compile_commands.json
 __pycache__/
 *.pyo
 user-documents/
+
+# IDE/editor extensions
+.antigravitycli/
+zig-out/
