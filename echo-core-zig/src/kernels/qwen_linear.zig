@@ -35,6 +35,7 @@ pub const TempBuffers = struct {
 pub const QwenLinearState = struct {
     conv_state: []f32,
     recurrent_state: []f32,
+    dequant_scratch: []types.fp16_t,
 
     pub fn init(
         conv_dim: u32,
@@ -42,6 +43,7 @@ pub const QwenLinearState = struct {
         num_v_heads: u32,
         head_k_dim: u32,
         head_v_dim: u32,
+        hidden_dim: u32,
         allocator: std.mem.Allocator,
     ) !QwenLinearState {
         const conv_state = try allocator.alloc(f32, conv_dim * conv_kernel);
@@ -52,15 +54,20 @@ pub const QwenLinearState = struct {
         errdefer allocator.free(recurrent_state);
         @memset(recurrent_state, 0);
 
+        const dequant_scratch = try allocator.alloc(types.fp16_t, hidden_dim * num_v_heads * 2);
+        errdefer allocator.free(dequant_scratch);
+
         return .{
             .conv_state = conv_state,
             .recurrent_state = recurrent_state,
+            .dequant_scratch = dequant_scratch,
         };
     }
 
     pub fn deinit(self: *QwenLinearState, allocator: std.mem.Allocator) void {
         allocator.free(self.conv_state);
         allocator.free(self.recurrent_state);
+        allocator.free(self.dequant_scratch);
     }
 
     pub fn reset(self: *QwenLinearState) void {
@@ -108,7 +115,9 @@ pub fn forward(
     state: *QwenLinearState,
     weights: Weights,
     temps: TempBuffers,
+    layer_hint: u32,
 ) void {
+    _ = layer_hint;
     const hidden = cfg.hidden_dim;
     const value_dim = cfg.ssm_inner_size;
     const num_v_heads = cfg.ssm_dt_rank;
@@ -162,21 +171,22 @@ pub fn forward(
     // alpha/beta projections: tensors stored as [hidden, N] (transposed layout)
     // Q4_K matvec assumes contiguous blocks per row, but these tensors have
     // small K (num_v_heads=32) → dequantize to FP16 and use FP16 matvec
+    // Use state buffers to avoid stack overflow (each is ~256KB)
     {
-        var alpha_fp16: [4096 * 32]types.fp16_t = undefined;
         const n_weights = hidden * num_v_heads;
-        quant.dequantizeRow(weights.alpha.bytes.ptr, alpha_fp16[0..].ptr, n_weights, weights.alpha.dtype);
+        const alpha_fp16 = @as([*]types.fp16_t, @ptrCast(@alignCast(state.dequant_scratch.ptr)))[0..n_weights];
+        quant.dequantizeRow(weights.alpha.bytes.ptr, alpha_fp16.ptr, n_weights, weights.alpha.dtype);
         @memset(temps.alpha[0..num_v_heads], 0);
         matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
-            @ptrCast(alpha_fp16[0..].ptr), input.ptr, temps.alpha.ptr, num_v_heads, hidden, .f16);
+            @ptrCast(alpha_fp16.ptr), input.ptr, temps.alpha.ptr, num_v_heads, hidden, .f16);
     }
     {
-        var beta_fp16: [4096 * 32]types.fp16_t = undefined;
         const n_weights = hidden * num_v_heads;
-        quant.dequantizeRow(weights.beta.bytes.ptr, beta_fp16[0..].ptr, n_weights, weights.beta.dtype);
+        const beta_fp16 = state.dequant_scratch[n_weights..];
+        quant.dequantizeRow(weights.beta.bytes.ptr, beta_fp16.ptr, n_weights, weights.beta.dtype);
         @memset(temps.beta[0..num_v_heads], 0);
         matvec.matvecDispatchQuant(config.Intel13500H_Tiles.TILE_K, config.Intel13500H_Tiles.TILE_M,
-            @ptrCast(beta_fp16[0..].ptr), input.ptr, temps.beta.ptr, num_v_heads, hidden, .f16);
+            @ptrCast(beta_fp16.ptr), input.ptr, temps.beta.ptr, num_v_heads, hidden, .f16);
     }
 
     // Shift older depthwise-conv states and insert current projection at the front.
@@ -305,7 +315,7 @@ test "qwen_linear no NaN small dims" {
 
     var input: [64]f32 = undefined;
     var output: [64]f32 = undefined;
-    var state = QwenLinearState.init(conv_dim, conv_kernel, num_v_heads, head_v_dim, head_v_dim, std.testing.allocator) catch unreachable;
+    var state = QwenLinearState.init(conv_dim, conv_kernel, num_v_heads, head_v_dim, head_v_dim, hidden, std.testing.allocator) catch unreachable;
     defer state.deinit(std.testing.allocator);
 
     // Fake weights as fp16
@@ -359,7 +369,7 @@ test "qwen_linear no NaN small dims" {
         .core = temps_core[0..256],
         .alpha = temps_alpha[0..128],
         .beta = temps_beta[0..128],
-    });
+    }, 0);
 
     for (output) |v| {
         try std.testing.expect(!std.math.isNan(v));

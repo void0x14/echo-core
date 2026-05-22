@@ -391,8 +391,6 @@ pub const WeightLayout = struct {
 
         layout.per_layer_size = offset;
 
-        std.debug.print("DEBUG: per_layer_size={d} bytes ({d:.2} MB), num_layers={d}\n", .{ layout.per_layer_size, @as(f64, @floatFromInt(layout.per_layer_size)) / (1024.0 * 1024.0), config_.num_layers });
-
         // Calculate SSM per-layer size using actual tensor sizes if available
         const ssm_conv_kernel = config_.ssm_conv_kernel;
         const ssm_inner = config_.ssm_inner_size;
@@ -407,36 +405,26 @@ pub const WeightLayout = struct {
         layout.ssm_out_offset = ssm_offset;
         const ssm_out_bytes = getTensorBytes(reader_opt, "blk.0.ssm_out.weight", hidden * ssm_out_hidden_dim);
         ssm_offset += ssm_out_bytes;
-        std.debug.print("DEBUG: ssm_out: {d} bytes (fallback: {d})\n", .{ ssm_out_bytes, hidden * ssm_out_hidden_dim * sizeof_fp16 });
 
         layout.ssm_x_offset = ssm_offset;
-        // ssm_x doesn't exist in this model - use getLayerTensorBytes which will return 0
         const ssm_x_bytes = getLayerTensorBytes(reader_opt, "ssm_x.weight", hidden * hidden);
         ssm_offset += ssm_x_bytes;
-        std.debug.print("DEBUG: ssm_x: {d} bytes (fallback: {d})\n", .{ ssm_x_bytes, hidden * hidden * sizeof_fp16 });
 
         layout.ssm_dt_offset = ssm_offset;
         const ssm_dt_bytes = getTensorBytes(reader_opt, "blk.0.ssm_dt.weight", hidden * dt_rank);
         ssm_offset += ssm_dt_bytes;
-        std.debug.print("DEBUG: ssm_dt: {d} bytes (fallback: {d})\n", .{ ssm_dt_bytes, hidden * dt_rank * sizeof_fp16 });
 
         layout.ssm_A_offset = ssm_offset;
-        // ssm_A maps to ssm_a (lowercase, no .weight)
         const ssm_A_bytes = getLayerTensorBytes(reader_opt, "ssm_A.weight", ssm_inner);
         ssm_offset += ssm_A_bytes;
-        std.debug.print("DEBUG: ssm_A: {d} bytes (fallback: {d})\n", .{ ssm_A_bytes, ssm_inner * sizeof_fp16 });
 
         layout.ssm_B_offset = ssm_offset;
-        // ssm_B maps to ssm_beta.weight
         const ssm_B_bytes = getLayerTensorBytes(reader_opt, "ssm_B.weight", hidden * ssm_inner);
         ssm_offset += ssm_B_bytes;
-        std.debug.print("DEBUG: ssm_B: {d} bytes (fallback: {d})\n", .{ ssm_B_bytes, hidden * ssm_inner * sizeof_fp16 });
 
         layout.ssm_C_offset = ssm_offset;
-        // ssm_C maps to ssm_alpha.weight
         const ssm_C_bytes = getLayerTensorBytes(reader_opt, "ssm_C.weight", hidden * ssm_inner);
         ssm_offset += ssm_C_bytes;
-        std.debug.print("DEBUG: ssm_C: {d} bytes (fallback: {d})\n", .{ ssm_C_bytes, hidden * ssm_inner * sizeof_fp16 });
 
         layout.ssm_D_offset = ssm_offset;
         ssm_offset += getTensorBytes(reader_opt, "blk.0.ssm_D.weight", hidden);

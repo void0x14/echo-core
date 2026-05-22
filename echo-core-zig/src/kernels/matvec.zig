@@ -211,17 +211,22 @@ fn matvecGenericDequant(
     dtype: gguf.GGMLType,
 ) void {
     var fp16_buf: [8192]types.fp16_t = undefined;
-    const max_row = @min(@as(usize, M), fp16_buf.len / @as(usize, K));
+    const batch_size = @min(@as(usize, M), fp16_buf.len / @as(usize, K));
+    if (batch_size == 0) return;
     var m: u32 = 0;
-    while (m < max_row) : (m += 1) {
-        const row_fp16 = fp16_buf[0..K];
-        const row_ptr = blocks + @as(usize, m) * quant.rowQuantizedBytes(K, dtype);
-        quant.dequantizeRow(row_ptr, @ptrCast(row_fp16.ptr), K, dtype);
-        var sum: f32 = 0;
-        for (0..K) |i| {
-            sum += types.fp16_to_fp32(row_fp16[i]) * x[i];
+    while (m < M) {
+        const batch = @min(@as(usize, M - m), batch_size);
+        for (0..batch) |i| {
+            const row_fp16 = fp16_buf[i * K .. (i + 1) * K];
+            const row_ptr = blocks + @as(usize, m + i) * quant.rowQuantizedBytes(K, dtype);
+            quant.dequantizeRow(row_ptr, @ptrCast(row_fp16.ptr), K, dtype);
+            var sum: f32 = 0;
+            for (0..K) |j| {
+                sum += types.fp16_to_fp32(row_fp16[j]) * x[j];
+            }
+            y[m + i] += sum;
         }
-        y[m] += sum;
+        m += @intCast(batch);
     }
 }
 

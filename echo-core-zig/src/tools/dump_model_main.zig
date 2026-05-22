@@ -87,5 +87,8 @@ fn dumpModel(model_path: []const u8, allocator: std.mem.Allocator) !void {
         if (std.mem.eql(u8, name, "blk.0.ssm_norm.weight")) {
             printShape(name, info);
         }
+        if (std.mem.indexOf(u8, name, "post_attention_norm") != null) {
+            printShape(name, info);
+        }
     }
 }

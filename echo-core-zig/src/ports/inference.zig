@@ -164,18 +164,12 @@ pub const ModelLoader = struct {
         // Detect actual tensor dimensions before computing weight layout
         detectActualDimensions(&cfg, &reader);
 
-        std.debug.print("DEBUG: Initializing engine with config: hidden_dim={d}, num_layers={d}, num_ssm_layers={d}\n", .{ cfg.hidden_dim, cfg.num_layers, cfg.num_ssm_layers });
+
 
         var eng = try engine.Engine.init(cfg, &reader, allocator);
         errdefer eng.deinit(allocator);
 
-        std.debug.print("DEBUG: Engine initialized, weight_pool_size={d} bytes ({d:.2} MB)\n", .{ eng.weight_pool.len, @as(f64, @floatFromInt(eng.weight_pool.len)) / (1024.0 * 1024.0) });
-
-        @memset(eng.weight_pool, types.fp32_to_fp16(0));
-
-        std.debug.print("DEBUG: Loading weights from reader...\n", .{});
         try loadWeightsFromReader(&eng, &reader, allocator);
-        std.debug.print("DEBUG: Weights loaded successfully\n", .{});
 
         return .{
             .config = cfg,
@@ -916,25 +910,26 @@ fn loadWeightsFromReader(eng: *engine.Engine, reader: *const gguf.Reader, alloca
 
         const attn_output_suffix = try tensorSuffixForLayer(&name_buf, layer_idx, "attn_output.weight");
         const attn_gate_suffix = try tensorSuffixForLayer(&alias_buf, layer_idx, "attn_gate.weight");
-        _ = try loadTensorWithAliasIfPresent(reader, attn_output_suffix, attn_gate_suffix, eng.weight_pool[layer_base + info.o_offset ..][0..info.o_size], slot_base + 4, eng.weight_dtypes);
+        // Use layout offset (SSM-based) to match engine's read position
+        _ = try loadTensorWithAliasIfPresent(reader, attn_output_suffix, attn_gate_suffix, eng.weight_pool[layer_base + layout.o_proj_offset ..][0..info.o_size], slot_base + 4, eng.weight_dtypes);
 
         const ffn_norm_suffix = try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_norm.weight");
         const post_attn_norm_suffix = try tensorSuffixForLayer(&alias_buf, layer_idx, "post_attention_norm.weight");
-        _ = try loadTensorWithAliasIfPresent(reader, ffn_norm_suffix, post_attn_norm_suffix, eng.weight_pool[layer_base + info.ffn_norm_offset ..][0..info.ffn_norm_size], slot_base + 5, eng.weight_dtypes);
+        _ = try loadTensorWithAliasIfPresent(reader, ffn_norm_suffix, post_attn_norm_suffix, eng.weight_pool[layer_base + layout.ffn_norm_offset ..][0..info.ffn_norm_size], slot_base + 5, eng.weight_dtypes);
 
-        _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_q_norm.weight"), eng.weight_pool[layer_base + info.q_norm_offset ..][0..info.q_norm_size], slot_base + 9, eng.weight_dtypes);
+        _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_q_norm.weight"), eng.weight_pool[layer_base + layout.attn_q_norm_offset ..][0..info.q_norm_size], slot_base + 9, eng.weight_dtypes);
 
-        _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_k_norm.weight"), eng.weight_pool[layer_base + info.k_norm_offset ..][0..info.k_norm_size], slot_base + 10, eng.weight_dtypes);
+        _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "attn_k_norm.weight"), eng.weight_pool[layer_base + layout.attn_k_norm_offset ..][0..info.k_norm_size], slot_base + 10, eng.weight_dtypes);
 
         switch (cfg.ffn_type) {
             .dense => {
-                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_up.weight"), eng.weight_pool[layer_base + info.ffn_w1_offset ..][0..info.ffn_w1_size], slot_base + 6, eng.weight_dtypes);
-                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_down.weight"), eng.weight_pool[layer_base + info.ffn_w2_offset ..][0..info.ffn_w2_size], slot_base + 7, eng.weight_dtypes);
+                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_up.weight"), eng.weight_pool[layer_base + layout.ffn_weight1_offset ..][0..info.ffn_w1_size], slot_base + 6, eng.weight_dtypes);
+                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_down.weight"), eng.weight_pool[layer_base + layout.ffn_weight2_offset ..][0..info.ffn_w2_size], slot_base + 7, eng.weight_dtypes);
             },
             .gated_swi_glu, .gated_gelu => {
-                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_gate.weight"), eng.weight_pool[layer_base + info.ffn_w1_offset ..][0..info.ffn_w1_size], slot_base + 6, eng.weight_dtypes);
-                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_up.weight"), eng.weight_pool[layer_base + info.ffn_w2_offset ..][0..info.ffn_w2_size], slot_base + 7, eng.weight_dtypes);
-                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_down.weight"), eng.weight_pool[layer_base + info.ffn_w3_offset ..][0..info.ffn_w3_size], slot_base + 8, eng.weight_dtypes);
+                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_gate.weight"), eng.weight_pool[layer_base + layout.ffn_weight1_offset ..][0..info.ffn_w1_size], slot_base + 6, eng.weight_dtypes);
+                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_up.weight"), eng.weight_pool[layer_base + layout.ffn_weight2_offset ..][0..info.ffn_w2_size], slot_base + 7, eng.weight_dtypes);
+                _ = try loadTensorIfPresent(reader, try tensorSuffixForLayer(&name_buf, layer_idx, "ffn_down.weight"), eng.weight_pool[layer_base + layout.ffn_weight3_offset ..][0..info.ffn_w3_size], slot_base + 8, eng.weight_dtypes);
             },
         }
 

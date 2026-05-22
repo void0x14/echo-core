@@ -156,20 +156,15 @@ pub const Engine = struct {
     seq_pos: u32,
 
     pub fn init(cfg: config.ModelConfig, reader_opt: ?*const gguf.Reader, allocator: std.mem.Allocator) !Engine {
-        std.debug.print("DEBUG: Engine.init() - starting WeightLayout.compute()\n", .{});
         var layout = try memory.WeightLayout.compute(cfg, reader_opt, allocator);
         errdefer layout.deinit(allocator);
-        std.debug.print("DEBUG: WeightLayout.compute() completed - raw_pool_size={d} bytes ({d:.2} MB)\n", .{ layout.raw_pool_size, @as(f64, @floatFromInt(layout.raw_pool_size)) / (1024.0 * 1024.0) });
 
         const kv_dim = cfg.num_kv_heads * cfg.head_dim;
         const q_dim = cfg.num_heads * cfg.head_dim;
 
-        // Unified byte pool for all weights (quantized + fp16)
-        std.debug.print("DEBUG: Allocating weight_pool ({d:.2} MB)...\n", .{@as(f64, @floatFromInt(layout.raw_pool_size)) / (1024.0 * 1024.0)});
         const weight_pool = try allocator.alloc(u8, layout.raw_pool_size);
         errdefer allocator.free(weight_pool);
         @memset(weight_pool, 0);
-        std.debug.print("DEBUG: weight_pool allocated successfully\n", .{});
 
         // Per-tensor dtype tracking (default to fp16)
         // Slot layout: 1 token_embd + num_layers * (11 attention + 8 ssm) + final_norm + output_proj
@@ -469,13 +464,11 @@ pub const Engine = struct {
             self.norm(input, output, layer_norm);
             self.qwenLinearLayerForward(layer_idx, output, self.attn_proj);
             for (0..hidden) |i| output[i] = self.residual[i] + self.attn_proj[i];
-
             @memcpy(self.residual, output);
             self.norm(output, output, ffn_norm);
             self.ffn(layer_idx, output, self.ffn_out);
             for (0..hidden) |i| output[i] = self.residual[i] + self.ffn_out[i];
         } else {
-            // Standard attention layer path
             const layer_base = self.weight_layout.layer_offsets[layer_idx];
             self.current_layer_base = layer_base;
 
@@ -490,7 +483,6 @@ pub const Engine = struct {
             self.norm(input, output, layer_norm);
             self.attention(layer_idx, output, self.attn_proj);
             for (0..hidden) |i| output[i] = self.residual[i] + self.attn_proj[i];
-
             @memcpy(self.residual, output);
             self.norm(output, output, ffn_norm);
             self.ffn(layer_idx, output, self.ffn_out);
@@ -753,6 +745,7 @@ pub const Engine = struct {
                 num_v_heads,
                 if (num_k_heads > 0) key_dim / num_k_heads else 0,
                 head_v_dim,
+                self.config.hidden_dim,
                 self.allocator,
             ) catch unreachable;
         }
@@ -781,6 +774,7 @@ pub const Engine = struct {
                 .alpha = self.qwen_tmp_alpha,
                 .beta = self.qwen_tmp_beta,
             },
+            layer_idx,
         );
 
         _ = hidden;
