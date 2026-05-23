@@ -86,7 +86,7 @@ pub fn matvecDispatchQuant(
         .f16 => matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .f32 => matvecF32Fp32(TILE_K, TILE_M, W, x, y, M, K),
         .q8_0 => matvecQ80(W, x, y, M, K),
-        .q4_k => if (K >= 256) avx2_q4k.matvecQ4K_avx2(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
+        .q4_k => if (K >= 256) int_dot.matvecQ4K_int(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
         .q5_k => if (K >= 256) avx2_q5k.matvecQ5K_avx2(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
         .q2_k => if (K >= 256) matvecQ2K(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
         .q6_k => if (K >= 256) avx2_q6k.matvecQ6K_avx2(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),

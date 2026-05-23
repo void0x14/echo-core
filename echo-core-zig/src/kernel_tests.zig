@@ -7,8 +7,6 @@ const avx2_q4k = @import("kernels/avx2_q4k.zig");
 const avx2_q5k = @import("kernels/avx2_q5k.zig");
 const avx2_softmax = @import("kernels/avx2_softmax.zig");
 const avx2_norm = @import("kernels/avx2_norm.zig");
-const parallel = @import("kernels/parallel.zig");
-const int_dot = @import("kernels/int_dot.zig");
 
 test {
     std.testing.refAllDecls(quant);
@@ -19,6 +17,4 @@ test {
     std.testing.refAllDecls(avx2_q5k);
     std.testing.refAllDecls(avx2_softmax);
     std.testing.refAllDecls(avx2_norm);
-    std.testing.refAllDecls(parallel);
-    std.testing.refAllDecls(int_dot);
 }

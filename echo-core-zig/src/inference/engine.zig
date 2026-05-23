@@ -11,6 +11,8 @@ const math = @import("../core/math.zig");
 const avx2_softmax = @import("../kernels/avx2_softmax.zig");
 const avx2_norm = @import("../kernels/avx2_norm.zig");
 const parallel = @import("../kernels/parallel.zig");
+const int_dot = @import("../kernels/int_dot.zig");
+const quantK = @import("../kernels/quant.zig");
 const gguf = @import("../gguf/reader.zig");
 
 const ArrayList = std.array_list.Managed;
@@ -155,6 +157,7 @@ pub const Engine = struct {
     qwen_tmp_core: []f32,
     qwen_tmp_alpha: []f32,
     qwen_tmp_beta: []f32,
+    x_q8: []u8, // Pre-quantized Q8_K representation of x (K/256 * 292 bytes)
     current_layer_base: usize,
     seq_pos: u32,
 
@@ -245,6 +248,11 @@ pub const Engine = struct {
         const qwen_tmp_beta = try allocator.alloc(f32, if (cfg.ssm_dt_rank > 0) cfg.ssm_dt_rank else 1);
         errdefer allocator.free(qwen_tmp_beta);
 
+        const max_k: usize = @intCast(@max(cfg.hidden_dim, @max(cfg.ffn_hidden_dim, @max(cfg.num_heads * cfg.head_dim, cfg.num_kv_heads * cfg.head_dim))));
+        const x_q8_size = ((max_k + 255) / 256) * 292;
+        const x_q8 = try allocator.alloc(u8, x_q8_size);
+        errdefer allocator.free(x_q8);
+
         @memset(hidden_state, 0);
         @memset(residual, 0);
         @memset(attn_out, 0);
@@ -272,6 +280,7 @@ pub const Engine = struct {
         @memset(qwen_tmp_core, 0);
         @memset(qwen_tmp_alpha, 0);
         @memset(qwen_tmp_beta, 0);
+        @memset(x_q8, 0);
 
         return .{
             .allocator = allocator,
@@ -309,6 +318,7 @@ pub const Engine = struct {
             .qwen_tmp_core = qwen_tmp_core,
             .qwen_tmp_alpha = qwen_tmp_alpha,
             .qwen_tmp_beta = qwen_tmp_beta,
+            .x_q8 = x_q8,
             .current_layer_base = 0,
             .seq_pos = 0,
         };
@@ -346,6 +356,7 @@ pub const Engine = struct {
         allocator.free(self.qwen_tmp_core);
         allocator.free(self.qwen_tmp_alpha);
         allocator.free(self.qwen_tmp_beta);
+        allocator.free(self.x_q8);
 
         // Free SSM states
         for (self.ssm_states) |*state| {
@@ -559,9 +570,13 @@ pub const Engine = struct {
         @memset(self.q_proj, 0);
         @memset(self.k_proj, 0);
         @memset(self.v_proj, 0);
-        parallel.parallelMatvec(self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, q_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
-        parallel.parallelMatvec(self.weight_pool[k_proj_offset..].ptr, input.ptr, self.k_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 2));
-        parallel.parallelMatvec(self.weight_pool[v_proj_offset..].ptr, input.ptr, self.v_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 3));
+
+        const q8p: [*]quantK.block_q8_K = @ptrCast(@alignCast(self.x_q8.ptr));
+        int_dot.quantizeXToQ8K(input.ptr, q8p, hidden);
+
+        parallel.parallelMatvecQ4KPre(self.weight_pool[q_proj_offset..].ptr, q8p, self.q_proj.ptr, q_dim, hidden);
+        parallel.parallelMatvecQ4KPre(self.weight_pool[k_proj_offset..].ptr, q8p, self.k_proj.ptr, kv_dim, hidden);
+        parallel.parallelMatvecQ4KPre(self.weight_pool[v_proj_offset..].ptr, q8p, self.v_proj.ptr, kv_dim, hidden);
 
         // Apply Q/K head norms if weights are non-zero
         const q_norm_byte_offset = layer_base + self.weight_layout.attn_q_norm_offset;
@@ -641,7 +656,11 @@ pub const Engine = struct {
         }
 
         @memset(self.attn_out, 0);
-        parallel.parallelMatvec(self.weight_pool[o_proj_offset..].ptr, self.attn_accum.ptr, self.attn_out.ptr, hidden, q_dim, dtypeForTensor(self.weight_dtypes, layer_idx, 4));
+        {
+            const o_q8: [*]quantK.block_q8_K = @ptrCast(@alignCast(self.x_q8.ptr));
+            int_dot.quantizeXToQ8K(self.attn_accum.ptr, o_q8, q_dim);
+            parallel.parallelMatvecQ4KPre(self.weight_pool[o_proj_offset..].ptr, o_q8, self.attn_out.ptr, hidden, q_dim);
+        }
         @memcpy(output, self.attn_out);
     }
 
