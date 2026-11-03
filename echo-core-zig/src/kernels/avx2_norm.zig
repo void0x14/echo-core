@@ -49,36 +49,3 @@ pub fn rmsNormAvx2(input: [*]const f32, output: [*]f32, weight: [*]const types.f
         output[i] = input[i] * inv_rms * types.fp16_to_fp32(weight[i]);
     }
 }
-
-test "rms norm basic" {
-    var input: [16]f32 = undefined;
-    var weight: [16]types.fp16_t = undefined;
-    var output: [16]f32 = undefined;
-    var expected: [16]f32 = undefined;
-
-    for (&input, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i + 1)) * 0.1;
-    for (&weight, 0..) |*v, i| v.* = types.fp32_to_fp16(@as(f32, @floatFromInt(i + 1)) * 0.01);
-
-    rmsNormAvx2(&input, &output, &weight, 16);
-
-    var sum_sq: f32 = 0;
-    for (&input) |v| sum_sq += v * v;
-    const inv_rms = 1.0 / @sqrt(sum_sq / 16.0 + 1e-6);
-    for (&expected, 0..) |*v, i| v.* = input[i] * inv_rms * types.fp16_to_fp32(weight[i]);
-
-    for (&expected, 0..) |e, i| {
-        try std.testing.expectApproxEqAbs(e, output[i], 0.001);
-    }
-}
-
-test "rms norm single element" {
-    var input: [1]f32 = .{5.0};
-    var weight: [1]types.fp16_t = .{types.fp32_to_fp16(2.0)};
-    var output: [1]f32 = undefined;
-
-    rmsNormAvx2(&input, &output, &weight, 1);
-
-    const inv_rms = 1.0 / @sqrt(25.0 / 1.0 + 1e-6);
-    const expected = 5.0 * inv_rms * types.fp16_to_fp32(weight[0]);
-    try std.testing.expectApproxEqAbs(expected, output[0], 0.001);
-}

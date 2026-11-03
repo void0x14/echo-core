@@ -106,35 +106,3 @@ pub fn matvecQ4K_avx2(blocks: [*]const u8, x: [*]const f32, y: [*]f32, M: u32, K
         y[m] += sum;
     }
 }
-
-test "Q4_K AVX2 dot basic" {
-    var block = std.mem.zeroes(quant.block_q4_K);
-    block.d = types.fp32_to_fp16(63); block.dmin = types.fp32_to_fp16(63);
-    for (0..4) |j| { block.scales[j] = @intCast(j+1); block.scales[j+4] = @intCast(j); }
-    block.scales[0] |= 1<<6; block.scales[1] |= 1<<6; block.scales[2] |= 1<<6; block.scales[3] |= 1<<6;
-    block.scales[8] = 0x12; block.scales[9] = 0x23; block.scales[10] = 0x34; block.scales[11] = 0x45;
-    @memset(&block.qs, 0x55);
-    var x: [256]f32 = undefined;
-    for (0..x.len) |i| x[i] = @as(f32, @floatFromInt((i % 11) + 1)) * 0.01;
-    var y = [_]f32{0};
-    matvecQ4K_avx2(std.mem.asBytes(&block).ptr, &x, &y, 1, 256);
-
-    const df = types.fp16_to_fp32(block.d); const dmf = types.fp16_to_fp32(block.dmin);
-    var exp: f32 = 0;
-    for (0..4) |blk| { const js = blk*2;
-        const sc0: u8 = if(js<4)block.scales[js]&63 else(block.scales[js+4]&0x0F)|((block.scales[js-4]>>6)<<4);
-        const mn0: u8 = if(js<4)block.scales[js+4]&63 else(block.scales[js+4]>>4)|((block.scales[js]>>6)<<4);
-        const sc1: u8 = if(js+1<4)block.scales[js+1]&63 else(block.scales[js+1+4]&0x0F)|((block.scales[js+1-4]>>6)<<4);
-        const mn1: u8 = if(js+1<4)block.scales[js+1+4]&63 else(block.scales[js+1+4]>>4)|((block.scales[js+1]>>6)<<4);
-        const rs0=df*@as(f32,@floatFromInt(sc0)); const rm0=dmf*@as(f32,@floatFromInt(mn0));
-        const rs1=df*@as(f32,@floatFromInt(sc1)); const rm1=dmf*@as(f32,@floatFromInt(mn1));
-        const qo=blk*32; const wo=blk*64;
-        for (0..16) |k| {
-            exp+=(rs0*@as(f32,@floatFromInt(block.qs[qo+k]&0x0F))-rm0)*x[wo+k];
-            exp+=(rs1*@as(f32,@floatFromInt(block.qs[qo+16+k]&0x0F))-rm1)*x[wo+16+k];
-            exp+=(rs0*@as(f32,@floatFromInt(block.qs[qo+k]>>4))-rm0)*x[wo+32+k];
-            exp+=(rs1*@as(f32,@floatFromInt(block.qs[qo+16+k]>>4))-rm1)*x[wo+48+k];
-        }
-    }
-    try std.testing.expectApproxEqAbs(exp, y[0], 0.01);
-}

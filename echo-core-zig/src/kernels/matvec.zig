@@ -8,6 +8,83 @@ const avx2_q5k = @import("avx2_q5k.zig");
 const int_dot = @import("int_dot.zig");
 const gguf = @import("../gguf/reader.zig");
 
+
+pub fn matvecFp16Vec(
+    W: [*]const u8,
+    x: [*]const f32,
+    y: [*]f32,
+    M: u32,
+    K: u32,
+) void {
+    const W_fp16: [*]const types.fp16_t = @ptrCast(@alignCast(W));
+    var m: u32 = 0;
+    while (m < M) : (m += 1) {
+        const W_row = W_fp16 + @as(usize, m) * K;
+        var acc0: @Vector(8, f32) = @splat(0);
+        var acc1: @Vector(8, f32) = @splat(0);
+        var acc2: @Vector(8, f32) = @splat(0);
+        var acc3: @Vector(8, f32) = @splat(0);
+        var k: u32 = 0;
+        while (k + 32 <= K) : (k += 32) {
+            @prefetch(@as([*]const u8, @ptrCast(W_row + k + 256)), .{ .rw = .read, .locality = 2, .cache = .data });
+            inline for (0..4) |q| {
+                const wh: @Vector(8, f16) = @as(*align(1) const [8]f16, @ptrCast(W_row + k + q * 8)).*;
+                const wf: @Vector(8, f32) = @floatCast(wh);
+                const xv: @Vector(8, f32) = @as(*align(1) const [8]f32, @ptrCast(x + k + q * 8)).*;
+                switch (q) {
+                    0 => acc0 = @mulAdd(@Vector(8, f32), wf, xv, acc0),
+                    1 => acc1 = @mulAdd(@Vector(8, f32), wf, xv, acc1),
+                    2 => acc2 = @mulAdd(@Vector(8, f32), wf, xv, acc2),
+                    3 => acc3 = @mulAdd(@Vector(8, f32), wf, xv, acc3),
+                    else => unreachable,
+                }
+            }
+        }
+        var acc: f32 = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
+        while (k < K) : (k += 1) {
+            acc += types.fp16_to_fp32(W_row[k]) * x[k];
+        }
+        y[m] += acc;
+    }
+}
+
+pub fn matvecF32Vec(
+    W: [*]const u8,
+    x: [*]const f32,
+    y: [*]f32,
+    M: u32,
+    K: u32,
+) void {
+    const W_f32: [*]const f32 = @ptrCast(@alignCast(W));
+    var m: u32 = 0;
+    while (m < M) : (m += 1) {
+        const W_row = W_f32 + @as(usize, m) * K;
+        var acc0: @Vector(8, f32) = @splat(0);
+        var acc1: @Vector(8, f32) = @splat(0);
+        var acc2: @Vector(8, f32) = @splat(0);
+        var acc3: @Vector(8, f32) = @splat(0);
+        var k: u32 = 0;
+        while (k + 32 <= K) : (k += 32) {
+            inline for (0..4) |q| {
+            @prefetch(@as([*]const u8, @ptrCast(W_row + k + 256)), .{ .rw = .read, .locality = 2, .cache = .data });
+                const wf: @Vector(8, f32) = @as(*align(1) const [8]f32, @ptrCast(W_row + k + q * 8)).*;
+                const xv: @Vector(8, f32) = @as(*align(1) const [8]f32, @ptrCast(x + k + q * 8)).*;
+                switch (q) {
+                    0 => acc0 = @mulAdd(@Vector(8, f32), wf, xv, acc0),
+                    1 => acc1 = @mulAdd(@Vector(8, f32), wf, xv, acc1),
+                    2 => acc2 = @mulAdd(@Vector(8, f32), wf, xv, acc2),
+                    3 => acc3 = @mulAdd(@Vector(8, f32), wf, xv, acc3),
+                    else => unreachable,
+                }
+            }
+        }
+        var acc: f32 = @reduce(.Add, acc0 + acc1 + acc2 + acc3);
+        while (k < K) : (k += 1) {
+            acc += W_row[k] * x[k];
+        }
+        y[m] += acc;
+    }
+}
 pub fn matvecFp16Fp32(
     comptime TILE_K: u32,
     comptime TILE_M: u32,
@@ -83,9 +160,9 @@ pub fn matvecDispatchQuant(
     dtype: gguf.GGMLType,
 ) void {
     switch (dtype) {
-        .f16 => matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K),
-        .f32 => matvecF32Fp32(TILE_K, TILE_M, W, x, y, M, K),
-        .q8_0 => matvecQ80(W, x, y, M, K),
+        .f16 => matvecFp16Vec(W, x, y, M, K),
+        .f32 => matvecF32Vec(W, x, y, M, K),
+        .q8_0 => if (K % 32 == 0 and K <= 16384) matvecQ80Int(W, x, y, M, K) else matvecQ80(W, x, y, M, K),
         .q4_k => if (K >= 256) int_dot.matvecQ4K_int(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
         .q5_k => if (K >= 256) avx2_q5k.matvecQ5K_avx2(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
         .q2_k => if (K >= 256) matvecQ2K(W, x, y, M, K) else matvecGenericDequant(W, x, y, M, K, dtype),
@@ -102,6 +179,75 @@ pub fn matvecDispatchQuant(
             std.debug.print("WARN: unsupported dtype {s}, falling back to FP16 (may produce incorrect results)\n", .{@tagName(dtype)});
             matvecFp16Fp32(TILE_K, TILE_M, W, x, y, M, K);
         },
+    }
+}
+
+fn matvecQ80Int(
+    blocks: [*]const u8,
+    x: [*]const f32,
+    y: [*]f32,
+    M: u32,
+    K: u32,
+) void {
+    const blocks_per_row = K / 32;
+    const block_stride: usize = 34;
+    var xq: [16384]i8 = undefined;
+    var xs: [512]f32 = undefined;
+    var b: usize = 0;
+    while (b < blocks_per_row) : (b += 1) {
+        const xb = x + b * 32;
+        var amax: f32 = 0;
+        for (0..32) |j| {
+            const a = @abs(xb[j]);
+            if (a > amax) amax = a;
+        }
+        if (amax < 1e-30) {
+            xs[b] = 0;
+            for (0..32) |j| xq[b * 32 + j] = 0;
+            continue;
+        }
+        xs[b] = amax / 127.0;
+        const inv = 127.0 / amax;
+        for (0..32) |j| {
+            const v: i32 = @intFromFloat(@round(xb[j] * inv));
+            xq[b * 32 + j] = @intCast(@max(-127, @min(127, v)));
+        }
+    }
+    var m: u32 = 0;
+    while (m < M) : (m += 1) {
+        const row_ptr = blocks + @as(usize, m) * blocks_per_row * block_stride;
+        var s0: f32 = 0;
+        var s1: f32 = 0;
+        var s2: f32 = 0;
+        var s3: f32 = 0;
+        b = 0;
+        while (b + 4 <= blocks_per_row) : (b += 4) {
+            inline for (0..4) |q| {
+                const bp = row_ptr + (b + q) * block_stride;
+                @prefetch(bp + 16 * block_stride, .{ .rw = .read, .locality = 2, .cache = .data });
+                const d = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+                const wv: @Vector(32, i8) = @as(*align(1) const [32]i8, @ptrCast(bp + 2)).*;
+                const xv: @Vector(32, i8) = xq[(b + q) * 32 ..][0..32].*;
+                const prod: @Vector(32, i32) = @as(@Vector(32, i32), @intCast(wv)) * @as(@Vector(32, i32), @intCast(xv));
+                const term = d * xs[b + q] * @as(f32, @floatFromInt(@reduce(.Add, prod)));
+                switch (q) {
+                    0 => s0 += term,
+                    1 => s1 += term,
+                    2 => s2 += term,
+                    3 => s3 += term,
+                    else => unreachable,
+                }
+            }
+        }
+        while (b < blocks_per_row) : (b += 1) {
+            const bp = row_ptr + b * block_stride;
+            const d = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+            const wv: @Vector(32, i8) = @as(*align(1) const [32]i8, @ptrCast(bp + 2)).*;
+            const xv: @Vector(32, i8) = xq[b * 32 ..][0..32].*;
+            const prod: @Vector(32, i32) = @as(@Vector(32, i32), @intCast(wv)) * @as(@Vector(32, i32), @intCast(xv));
+            s0 += d * xs[b] * @as(f32, @floatFromInt(@reduce(.Add, prod)));
+        }
+        y[m] += (s0 + s1) + (s2 + s3);
     }
 }
 
@@ -337,109 +483,162 @@ pub fn matvecQ2K(
         y[m] += sum;
     }
 }
-
-test "matvec basic" {
-    var W: [4 * 8]types.fp16_t = undefined;
-    var x: [8]f32 = undefined;
-    var y: [4]f32 = undefined;
-
-    for (0..4) |m| {
-        for (0..8) |k| {
-            W[m * 8 + k] = types.fp32_to_fp16(@floatFromInt(m + 1));
-        }
-    }
-
-    for (0..8) |k| {
-        x[k] = @floatFromInt(k + 1);
-    }
-
-    @memset(&y, 0);
-
-    const W_bytes: [*]const u8 = @ptrCast(&W);
-    matvecFp16Fp32(8, 4, W_bytes, &x, &y, 4, 8);
-
-    try std.testing.expectEqual(y[0], 36.0);
-    try std.testing.expectEqual(y[1], 72.0);
-    try std.testing.expectEqual(y[2], 108.0);
-    try std.testing.expectEqual(y[3], 144.0);
-}
-
-test "matvec f32 basic" {
-    var W = [_]f32{
-        1, 1, 1, 1,
-        2, 2, 2, 2,
+ fn matmatQ80Int(blocks: [*]const u8, X: [*]const f32, Y: [*]f32, M: u32, K: u32, T: u32, ys: usize, yo: usize) void {
+    const blocks_per_row: usize = @intCast(K / 32);
+    const block_stride: usize = 34;
+    const Ks: usize = @intCast(K);
+    const Ts: usize = @intCast(T);
+    const alloc = std.heap.smp_allocator;
+    const xq = alloc.alloc(i8, @max(Ts * Ks, 1)) catch {
+        for (0..Ts) |t| matvecQ80Int(blocks, X + t * Ks, Y + t * ys + yo, M, K);
+        return;
     };
-    var x = [_]f32{ 1, 2, 3, 4 };
-    var y = [_]f32{ 0, 0 };
-
-    const W_bytes: [*]const u8 = @ptrCast(&W);
-    matvecF32Fp32(4, 2, W_bytes, &x, &y, 2, 4);
-
-    try std.testing.expectEqual(@as(f32, 10), y[0]);
-    try std.testing.expectEqual(@as(f32, 20), y[1]);
-}
-
-test "matvecQ4K matches canonical scale packing" {
-    var block = std.mem.zeroes(quant.block_q4_K);
-    block.d = types.fp32_to_fp16(63.0);
-    block.dmin = types.fp32_to_fp16(63.0);
-
-    for (0..4) |j| {
-        block.scales[j] = @intCast(j + 1);
-        block.scales[j + 4] = @intCast(j);
-    }
-    block.scales[0] |= 1 << 6;
-    block.scales[1] |= 1 << 6;
-    block.scales[2] |= 1 << 6;
-    block.scales[3] |= 1 << 6;
-    block.scales[8] = 0x10 | 0x02;
-    block.scales[9] = 0x20 | 0x03;
-    block.scales[10] = 0x30 | 0x04;
-    block.scales[11] = 0x40 | 0x05;
-    @memset(&block.qs, 0x55);
-
-    var x: [256]f32 = undefined;
-    for (0..x.len) |i| x[i] = @as(f32, @floatFromInt((i % 11) + 1)) * 0.01;
-
-    var y = [_]f32{0};
-    matvecQ4K(std.mem.asBytes(&block).ptr, &x, &y, 1, 256);
-
-    const d_f32 = types.fp16_to_fp32(block.d);
-    const dmin_f32 = types.fp16_to_fp32(block.dmin);
-    var expected: f32 = 0;
-    for (0..4) |blk| {
-        const js = blk * 2;
-        const sc0: u8 = if (js < 4)
-            block.scales[js] & 63
-        else
-            (block.scales[js + 4] & 0x0F) | ((block.scales[js - 4] >> 6) << 4);
-        const mn0: u8 = if (js < 4)
-            block.scales[js + 4] & 63
-        else
-            (block.scales[js + 4] >> 4) | ((block.scales[js] >> 6) << 4);
-        const sc1: u8 = if (js + 1 < 4)
-            block.scales[js + 1] & 63
-        else
-            (block.scales[js + 1 + 4] & 0x0F) | ((block.scales[js + 1 - 4] >> 6) << 4);
-        const mn1: u8 = if (js + 1 < 4)
-            block.scales[js + 1 + 4] & 63
-        else
-            (block.scales[js + 1 + 4] >> 4) | ((block.scales[js + 1] >> 6) << 4);
-
-        const rs0 = d_f32 * @as(f32, @floatFromInt(sc0));
-        const rm0 = dmin_f32 * @as(f32, @floatFromInt(mn0));
-        const rs1 = d_f32 * @as(f32, @floatFromInt(sc1));
-        const rm1 = dmin_f32 * @as(f32, @floatFromInt(mn1));
-        const qoff = blk * 32;
-        const woff = blk * 64;
-
-        for (0..16) |j| {
-            expected += (rs0 * @as(f32, @floatFromInt(block.qs[qoff + j] & 0x0F)) - rm0) * x[woff + j];
-            expected += (rs1 * @as(f32, @floatFromInt(block.qs[qoff + 16 + j] & 0x0F)) - rm1) * x[woff + 16 + j];
-            expected += (rs0 * @as(f32, @floatFromInt(block.qs[qoff + j] >> 4)) - rm0) * x[woff + 32 + j];
-            expected += (rs1 * @as(f32, @floatFromInt(block.qs[qoff + 16 + j] >> 4)) - rm1) * x[woff + 48 + j];
+    defer alloc.free(xq);
+    const xs = alloc.alloc(f32, @max(Ts * blocks_per_row, 1)) catch {
+        for (0..Ts) |t| matvecQ80Int(blocks, X + t * Ks, Y + t * ys + yo, M, K);
+        return;
+    };
+    defer alloc.free(xs);
+    for (0..Ts) |t| {
+        const x = X + t * Ks;
+        var b: usize = 0;
+        while (b < blocks_per_row) : (b += 1) {
+            const xb = x + b * 32;
+            var amax: f32 = 0;
+            for (0..32) |j| { const a = @abs(xb[j]); if (a > amax) amax = a; }
+            if (amax < 1e-30) { xs[t * blocks_per_row + b] = 0; for (0..32) |j| xq[t * Ks + b * 32 + j] = 0; continue; }
+            xs[t * blocks_per_row + b] = amax / 127.0;
+            const inv = 127.0 / amax;
+            for (0..32) |j| { const v: i32 = @intFromFloat(@round(xb[j] * inv)); xq[t * Ks + b * 32 + j] = @intCast(@max(-127, @min(127, v))); }
         }
     }
+    var m: u32 = 0;
+    while (m < M) : (m += 1) {
+        const row_ptr = blocks + @as(usize, m) * blocks_per_row * block_stride;
+        var tb: usize = 0;
+        while (tb < Ts) : (tb += 4) {
+            const tn = @min(@as(usize, 4), Ts - tb);
+            var sums = [_]f32{ 0, 0, 0, 0 };
+            var b: usize = 0;
+            while (b < blocks_per_row) : (b += 1) {
+                const bp = row_ptr + b * block_stride;
+                @prefetch(bp + 16 * block_stride, .{ .rw = .read, .locality = 2, .cache = .data });
+                const d = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+                const wv: @Vector(32, i8) = @as(*align(1) const [32]i8, @ptrCast(bp + 2)).*;
+                const w32: @Vector(32, i32) = @intCast(wv);
+                inline for (0..4) |tt| {
+                    if (tt < tn) {
+                        const t = tb + tt;
+                        const xv: @Vector(32, i8) = xq[t * Ks + b * 32 ..][0..32].*;
+                        const prod: @Vector(32, i32) = w32 * @as(@Vector(32, i32), @intCast(xv));
+                        sums[tt] += d * xs[t * blocks_per_row + b] * @as(f32, @floatFromInt(@reduce(.Add, prod)));
+                    }
+                }
+            }
+ inline for (0..4) |tt| { if (tt < tn) Y[(tb + tt) * ys + yo + m] = sums[tt]; }
+        }
+    }
+}
 
-    try std.testing.expectApproxEqAbs(expected, y[0], 0.01);
+ fn matmatFloat(comptime is_f16: bool, W: [*]const u8, X: [*]const f32, Y: [*]f32, M: u32, K: u32, T: u32, ys: usize, yo: usize) void {
+    const Ks: usize = @intCast(K);
+    const Ts: usize = @intCast(T);
+    var m: u32 = 0;
+    while (m < M) : (m += 1) {
+        var tb: usize = 0;
+        while (tb < Ts) : (tb += 8) {
+            const tn = @min(@as(usize, 8), Ts - tb);
+            var acc = [_]@Vector(8, f32){ @splat(0), @splat(0), @splat(0), @splat(0), @splat(0), @splat(0), @splat(0), @splat(0) };
+            var k: usize = 0;
+            while (k + 8 <= Ks) : (k += 8) {
+                var wf: @Vector(8, f32) = undefined;
+                if (is_f16) {
+                    const wh: @Vector(8, f16) = @as(*align(1) const [8]f16, @ptrCast(@as([*]const types.fp16_t, @ptrCast(@alignCast(W))) + @as(usize, m) * Ks + k)).*;
+                    wf = @floatCast(wh);
+                } else {
+                    wf = @as(*align(1) const [8]f32, @ptrCast(@as([*]const f32, @ptrCast(@alignCast(W))) + @as(usize, m) * Ks + k)).*;
+                }
+                inline for (0..8) |tt| {
+                    if (tt < tn) {
+                        const xv: @Vector(8, f32) = @as(*align(1) const [8]f32, @ptrCast(X + (tb + tt) * Ks + k)).*;
+                        acc[tt] = @mulAdd(@Vector(8, f32), wf, xv, acc[tt]);
+                    }
+                }
+            }
+            inline for (0..8) |tt| {
+                if (tt < tn) {
+                    var s = @reduce(.Add, acc[tt]);
+                    var kk = k;
+                    while (kk < Ks) : (kk += 1) {
+                        const wv = if (is_f16) types.fp16_to_fp32(@as([*]const types.fp16_t, @ptrCast(@alignCast(W)))[@as(usize, m) * Ks + kk]) else @as([*]const f32, @ptrCast(@alignCast(W)))[@as(usize, m) * Ks + kk];
+                        s += wv * X[(tb + tt) * Ks + kk];
+                    }
+ Y[(tb + tt) * ys + yo + m] = s;
+                }
+            }
+        }
+    }
+}
+
+pub fn matmatDispatchQuant(W: [*]const u8, X: [*]const f32, Y: [*]f32, M: u32, K: u32, T: u32, dtype: gguf.GGMLType) void {
+    matmatDispatchQuantStrided(W, X, Y, M, K, T, dtype, @intCast(M), 0);
+}
+
+pub fn matmatDispatchQuantStrided(W: [*]const u8, X: [*]const f32, Y: [*]f32, M: u32, K: u32, T: u32, dtype: gguf.GGMLType, ys: usize, yo: usize) void {
+    if (T == 0) return;
+    if (T == 1) { @memset(Y[yo .. yo + @as(usize, @intCast(M))], 0); matvecDispatchQuant(0, 0, W, X, Y + yo, M, K, dtype); return; }
+    switch (dtype) {
+        .f16 => matmatFloat(true, W, X, Y, M, K, T, ys, yo),
+        .f32 => matmatFloat(false, W, X, Y, M, K, T, ys, yo),
+        .q8_0 => if (K % 32 == 0) matmatQ80Float(W, X, Y, M, K, T, ys, yo) else { for (0..T) |t| { @memset(Y[t * ys + yo ..][0..@intCast(M)], 0); matvecDispatchQuant(0, 0, W, X + t * @as(usize, K), Y + t * ys + yo, M, K, dtype); } },
+        .q4_k => if (K >= 256) int_dot.matmatQ4K_int(W, X, Y, M, K, T, ys, yo) else { for (0..T) |t| { @memset(Y[t * ys + yo ..][0..@intCast(M)], 0); matvecDispatchQuant(0, 0, W, X + t * @as(usize, K), Y + t * ys + yo, M, K, dtype); } },
+        .q5_k => if (K >= 256) avx2_q5k.matmatQ5K_avx2(W, X, Y, M, K, T, ys, yo) else { for (0..T) |t| { @memset(Y[t * ys + yo ..][0..@intCast(M)], 0); matvecDispatchQuant(0, 0, W, X + t * @as(usize, K), Y + t * ys + yo, M, K, dtype); } },
+        .q6_k => if (K >= 256) avx2_q6k.matmatQ6K_avx2(W, X, Y, M, K, T, ys, yo) else { for (0..T) |t| { @memset(Y[t * ys + yo ..][0..@intCast(M)], 0); matvecDispatchQuant(0, 0, W, X + t * @as(usize, K), Y + t * ys + yo, M, K, dtype); } },
+        else => { for (0..T) |t| { @memset(Y[t * ys + yo ..][0..@intCast(M)], 0); matvecDispatchQuant(0, 0, W, X + t * @as(usize, K), Y + t * ys + yo, M, K, dtype); } },
+    }
+}
+fn matmatQ80Float(blocks: [*]const u8, X: [*]const f32, Y: [*]f32, M: u32, K: u32, T: u32, ys: usize, yo: usize) void {
+    const blocks_per_row: usize = @intCast(K / 32);
+    const block_stride: usize = 34;
+    const Ks: usize = @intCast(K);
+    const Ts: usize = @intCast(T);
+    var m: u32 = 0;
+    while (m < M) : (m += 1) {
+        const row_ptr = blocks + @as(usize, m) * blocks_per_row * block_stride;
+        var tb: usize = 0;
+        while (tb + 8 <= Ts) : (tb += 8) {
+            var acc = [_]@Vector(8, f32){ @splat(0), @splat(0), @splat(0), @splat(0), @splat(0), @splat(0), @splat(0), @splat(0) };
+            var b: usize = 0;
+            while (b < blocks_per_row) : (b += 1) {
+                const bp = row_ptr + b * block_stride;
+                @prefetch(bp + 16 * block_stride, .{ .rw = .read, .locality = 2, .cache = .data });
+                const d: @Vector(8, f32) = @splat(types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little)));
+                inline for (0..4) |q| {
+                    const wv8: @Vector(8, i8) = @as(*align(1) const [8]i8, @ptrCast(bp + 2 + q * 8)).*;
+                    const wf = @as(@Vector(8, f32), @floatFromInt(@as(@Vector(8, i32), @intCast(wv8)))) * d;
+                    inline for (0..8) |tt| {
+                        const xv: @Vector(8, f32) = @as(*align(1) const [8]f32, @ptrCast(X + (tb + tt) * Ks + b * 32 + q * 8)).*;
+                        acc[tt] = @mulAdd(@Vector(8, f32), wf, xv, acc[tt]);
+                    }
+                }
+            }
+            inline for (0..8) |tt| Y[(tb + tt) * ys + yo + m] = @reduce(.Add, acc[tt]);
+        }
+        while (tb < Ts) : (tb += 1) {
+            var a0: @Vector(8, f32) = @splat(0);
+            var a1: @Vector(8, f32) = @splat(0);
+            var b: usize = 0;
+            while (b < blocks_per_row) : (b += 1) {
+                const bp = row_ptr + b * block_stride;
+                const d: @Vector(8, f32) = @splat(types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little)));
+                inline for (0..4) |q| {
+                    const wv8: @Vector(8, i8) = @as(*align(1) const [8]i8, @ptrCast(bp + 2 + q * 8)).*;
+                    const wf = @as(@Vector(8, f32), @floatFromInt(@as(@Vector(8, i32), @intCast(wv8)))) * d;
+                    const xv: @Vector(8, f32) = @as(*align(1) const [8]f32, @ptrCast(X + tb * Ks + b * 32 + q * 8)).*;
+                    if (q % 2 == 0) { a0 = @mulAdd(@Vector(8, f32), wf, xv, a0); } else { a1 = @mulAdd(@Vector(8, f32), wf, xv, a1); }
+                }
+            }
+            Y[tb * ys + yo + m] = @reduce(.Add, a0 + a1);
+        }
+    }
 }

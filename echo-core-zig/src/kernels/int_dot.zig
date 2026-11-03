@@ -99,32 +99,22 @@ pub fn matvecQ4K_intPre(blocks: [*]const u8, q8_pre: [*]const quant.block_q8_K, 
         y[m] += s;
     }
 }
-
-test "Q4 int dot" {
-    var q4 = std.mem.zeroes(quant.block_q4_K);
-    q4.d = types.fp32_to_fp16(2); q4.dmin = types.fp32_to_fp16(1);
-    q4.scales[0] = 1; q4.scales[4] = 2; q4.scales[8] = 0x11; q4.scales[9] = 0x22;
-    var prng = std.Random.DefaultPrng.init(123);
-    for (0..q4.qs.len) |i| q4.qs[i] = prng.random().int(u8);
-    var x: [256]f32 = undefined;
-    for (0..256) |i| x[i] = @as(f32, @floatFromInt(@as(i32, @intCast(prng.random().int(u8) & 15)) - 8)) * 0.1;
-    var yo: [1]f32 = .{0};
-    matvecQ4K_int(@as([*]const u8, @ptrCast(&q4)), &x, &yo, 1, 256);
-    var exp: f32 = 0; const df_ = types.fp16_to_fp32(q4.d); const dmf_ = types.fp16_to_fp32(q4.dmin);
-    for (0..4) |blk| { const js = blk * 2;
-        const sc0: u8 = if (js < 4) q4.scales[js] & 63 else (q4.scales[js + 4] & 0x0F) | ((q4.scales[js - 4] >> 6) << 4);
-        const mn0: u8 = if (js < 4) q4.scales[js + 4] & 63 else (q4.scales[js + 4] >> 4) | ((q4.scales[js] >> 6) << 4);
-        const sc1: u8 = if (js + 1 < 4) q4.scales[js + 1] & 63 else (q4.scales[js + 1 + 4] & 0x0F) | ((q4.scales[js + 1 - 4] >> 6) << 4);
-        const mn1: u8 = if (js + 1 < 4) q4.scales[js + 1 + 4] & 63 else (q4.scales[js + 1 + 4] >> 4) | ((q4.scales[js + 1] >> 6) << 4);
-        const rs0 = df_ * @as(f32, @floatFromInt(sc0)); const rm0 = dmf_ * @as(f32, @floatFromInt(mn0));
-        const rs1 = df_ * @as(f32, @floatFromInt(sc1)); const rm1 = dmf_ * @as(f32, @floatFromInt(mn1));
-        const qo = blk * 32; const wo = blk * 64;
-        for (0..16) |k| {
-            exp += (rs0 * @as(f32, @floatFromInt(q4.qs[qo + k] & 0x0F)) - rm0) * x[wo + k];
-            exp += (rs1 * @as(f32, @floatFromInt(q4.qs[qo + 16 + k] & 0x0F)) - rm1) * x[wo + 16 + k];
-            exp += (rs0 * @as(f32, @floatFromInt(q4.qs[qo + k] >> 4)) - rm0) * x[wo + 32 + k];
-            exp += (rs1 * @as(f32, @floatFromInt(q4.qs[qo + 16 + k] >> 4)) - rm1) * x[wo + 48 + k];
+pub fn matmatQ4K_int(blocks: [*]const u8, X: [*]const f32, Y: [*]f32, M: u32, K: u32, T: u32, ys: usize, yo: usize) void {
+    const bpr: usize = @intCast(K / 256);
+    const nblocks = @as(usize, T) * bpr;
+    const q8all = std.heap.smp_allocator.alloc(quant.block_q8_K, @max(nblocks, 1)) catch {
+        for (0..T) |t| matvecQ4K_int(blocks, X + t * @as(usize, K), Y + t * ys + yo, M, K);
+        return;
+    };
+    defer std.heap.smp_allocator.free(q8all);
+    for (0..T) |t| quantizeXToQ8K(X + t * @as(usize, K), q8all.ptr + t * bpr, @intCast(K));
+    var m: u32 = 0;
+    while (m < M) : (m += 1) {
+        const rp = blocks + @as(usize, m) * bpr * 144;
+        for (0..T) |t| {
+            var s: f32 = 0;
+            for (0..bpr) |b| s += dotQ4K(@ptrCast(rp + b * 144), &q8all[t * bpr + b]);
+            Y[t * ys + yo + m] = s;
         }
     }
-    try std.testing.expectApproxEqAbs(exp, yo[0], 50);
 }

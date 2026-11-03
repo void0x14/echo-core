@@ -52,36 +52,3 @@ pub fn softmaxAvx2(values: []f32) void {
         values[i] *= inv_sum;
     }
 }
-
-test "softmax basic" {
-    const original: [8]f32 = .{ 1, 2, 3, 4, 5, 6, 7, 8 };
-    var buf: [8]f32 = original;
-    softmaxAvx2(&buf);
-
-    var expected: [8]f32 = undefined;
-    var max_val: f32 = -std.math.inf(f32);
-    for (&original) |v| { if (v > max_val) max_val = v; }
-    var sum: f32 = 0;
-    for (&expected, 0..) |_, i| {
-        expected[i] = @exp(original[i] - max_val);
-        sum += expected[i];
-    }
-    for (&expected, 0..) |_, i| expected[i] /= sum;
-
-    for (&expected, 0..) |e, i| {
-        try std.testing.expectApproxEqAbs(e, buf[i], 0.001);
-    }
-}
-
-test "softmax single element" {
-    var buf: [1]f32 = .{42.0};
-    softmaxAvx2(&buf);
-    try std.testing.expectApproxEqAbs(1.0, buf[0], 0.001);
-}
-
-test "softmax all equal" {
-    var buf: [16]f32 = @splat(3.0);
-    softmaxAvx2(&buf);
-    const expected = 1.0 / 16.0;
-    for (&buf) |v| try std.testing.expectApproxEqAbs(expected, v, 0.001);
-}

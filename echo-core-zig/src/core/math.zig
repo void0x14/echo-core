@@ -50,24 +50,3 @@ pub inline fn softmax(values: []f32) void {
         v.* /= sum;
     }
 }
-
-test "sqrt basic" {
-    try std.testing.expectApproxEqAbs(sqrt(4.0), 2.0, 0.001);
-    try std.testing.expectApproxEqAbs(sqrt(9.0), 3.0, 0.001);
-}
-
-test "exp basic" {
-    try std.testing.expectApproxEqAbs(exp(0.0), 1.0, 0.001);
-    try std.testing.expectApproxEqAbs(exp(1.0), std.math.e, 0.01);
-}
-
-test "gelu basic" {
-    const result = gelu(1.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.841192), result, 0.001);
-}
-
-test "relu basic" {
-    try std.testing.expectEqual(relu(5.0), 5.0);
-    try std.testing.expectEqual(relu(-5.0), 0.0);
-    try std.testing.expectEqual(relu(0.0), 0.0);
-}

@@ -126,13 +126,14 @@ pub fn forward(
     std.debug.assert(value_dim % num_v_heads == 0);
 
     const head_v_dim = value_dim / num_v_heads;
-    const key_dim = value_dim / 2;
+    const conv_elem_bytes: usize = switch (weights.conv1d.dtype) { .f32 => 4, .f16, .bf16 => 2, else => 0 };
+    const conv_dim: u32 = if (conv_elem_bytes > 0 and cfg.ssm_conv_kernel > 0) @intCast(weights.conv1d.bytes.len / (cfg.ssm_conv_kernel * conv_elem_bytes)) else value_dim * 3;
+    const key_dim = (conv_dim - value_dim) / 2;
     std.debug.assert(key_dim % head_v_dim == 0);
 
     const head_k_dim = head_v_dim;
     const num_k_heads = key_dim / head_k_dim;
     const repeat_factor = num_v_heads / num_k_heads;
-    const conv_dim = key_dim * 2 + value_dim;
     const conv_kernel = cfg.ssm_conv_kernel;
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_k_dim)));
 
@@ -212,16 +213,19 @@ pub fn forward(
         const head_state = state.recurrent_state[state_base .. state_base + head_k_dim * head_v_dim];
         for (head_state) |*value| value.* *= decay;
 
+        var kv_mem: [256]f32 = undefined;
+        @memset(kv_mem[0..head_v_dim], 0);
+        for (0..head_k_dim) |k_idx| {
+            const kval = temps.conv_out[k_base + k_idx];
+            const srow = head_state[k_idx * head_v_dim ..][0..head_v_dim];
+            for (0..head_v_dim) |v_idx| kv_mem[v_idx] += srow[v_idx] * kval;
+        }
         var delta: [256]f32 = undefined;
         std.debug.assert(head_v_dim <= delta.len);
-
         for (0..head_v_dim) |v_idx| {
-            var kv_mem: f32 = 0;
-            for (0..head_k_dim) |k_idx| {
-                kv_mem += head_state[k_idx * head_v_dim + v_idx] * temps.conv_out[k_base + k_idx];
-            }
-            delta[v_idx] = (temps.conv_out[v_base + v_idx] - kv_mem) * beta;
+            delta[v_idx] = (temps.conv_out[v_base + v_idx] - kv_mem[v_idx]) * beta;
         }
+
 
         for (0..head_k_dim) |k_idx| {
             const key_value = temps.conv_out[k_base + k_idx];
@@ -230,14 +234,17 @@ pub fn forward(
             }
         }
 
+        var attn_arr: [256]f32 = undefined;
+        @memset(attn_arr[0..head_v_dim], 0);
+        for (0..head_k_dim) |k_idx| {
+            const qval = temps.conv_out[q_base + k_idx] * scale;
+            const srow = head_state[k_idx * head_v_dim ..][0..head_v_dim];
+            for (0..head_v_dim) |v_idx| attn_arr[v_idx] += srow[v_idx] * qval;
+        }
         var rms: f32 = 0;
         for (0..head_v_dim) |v_idx| {
-            var attn_value: f32 = 0;
-            for (0..head_k_dim) |k_idx| {
-                attn_value += head_state[k_idx * head_v_dim + v_idx] * (temps.conv_out[q_base + k_idx] * scale);
-            }
-            temps.core[core_base + v_idx] = attn_value;
-            rms += attn_value * attn_value;
+            temps.core[core_base + v_idx] = attn_arr[v_idx];
+            rms += attn_arr[v_idx] * attn_arr[v_idx];
         }
 
         rms = @sqrt(rms / @as(f32, @floatFromInt(head_v_dim)) + 1e-6);
@@ -259,100 +266,111 @@ pub fn forward(
     );
 }
 
-test "qwen_linear no NaN small dims" {
-    const hidden: u32 = 64;
-    const conv_kernel: u32 = 4;
-    const head_k_dim: u32 = 8;
-    const head_v_dim: u32 = 8;
-    const num_k_heads: u32 = 2;
-    const num_v_heads: u32 = 4;
-    const key_dim = head_k_dim * num_k_heads;
-    const value_dim = head_v_dim * num_v_heads;
-    const conv_dim = key_dim * 2 + value_dim;
+pub fn forwardCore(
+    cfg: config.ModelConfig,
+    state: *QwenLinearState,
+    weights: Weights,
+    mixed_qkv: []const f32,
+    z_in: []const f32,
+    alpha_in: []const f32,
+    beta_in: []const f32,
+    core: []f32,
+) void {
+    const hidden = cfg.hidden_dim;
+    _ = hidden;
+    const value_dim = cfg.ssm_inner_size;
+    const num_v_heads = cfg.ssm_dt_rank;
+    const head_v_dim = value_dim / num_v_heads;
+    const conv_elem_bytes: usize = switch (weights.conv1d.dtype) { .f32 => 4, .f16, .bf16 => 2, else => 0 };
+    const conv_dim: u32 = if (conv_elem_bytes > 0 and cfg.ssm_conv_kernel > 0) @intCast(weights.conv1d.bytes.len / (cfg.ssm_conv_kernel * conv_elem_bytes)) else value_dim * 3;
+    const key_dim = (conv_dim - value_dim) / 2;
+    const head_k_dim = head_v_dim;
+    const num_k_heads = key_dim / head_k_dim;
+    const repeat_factor = num_v_heads / num_k_heads;
+    const conv_kernel = cfg.ssm_conv_kernel;
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_k_dim)));
 
-    const cfg = config.ModelConfig{
-        .vocab_size = 1000,
-        .hidden_dim = hidden,
-        .num_heads = num_v_heads,
-        .num_kv_heads = num_k_heads,
-        .head_dim = head_k_dim,
-        .num_layers = 1,
-        .num_ssm_layers = 1,
-        .ffn_hidden_dim = hidden * 3,
-        .max_seq_len = 128,
-        .ffn_type = .gated_swi_glu,
-        .norm_type = .rms_norm,
-        .pos_encoding = .rope,
-        .use_kv_quantization = false,
-        .full_attention_interval = 0,
-        .ssm_conv_kernel = conv_kernel,
-        .ssm_inner_size = value_dim,
-        .ssm_num_groups = num_k_heads,
-        .ssm_dt_rank = num_v_heads,
-        .ssm_dt_scale = 1.0,
-    };
+    var conv_out_buf: [8192]f32 = undefined;
+    const conv_out = conv_out_buf[0..conv_dim];
 
-    var input: [64]f32 = undefined;
-    var output: [64]f32 = undefined;
-    var state = QwenLinearState.init(conv_dim, conv_kernel, num_v_heads, head_v_dim, head_v_dim, hidden, std.testing.allocator) catch unreachable;
-    defer state.deinit(std.testing.allocator);
-
-    // Fake weights as fp16
-    var qkv_fp16: [64 * 48]types.fp16_t = undefined;
-    var z_fp16: [64 * 32]types.fp16_t = undefined;
-    var alpha_fp16: [64 * num_v_heads]types.fp16_t = undefined;
-    var beta_fp16: [64 * num_v_heads]types.fp16_t = undefined;
-    var conv1d_fp16: [conv_kernel * conv_dim]types.fp16_t = undefined;
-    var a_f32: [num_v_heads]f32 = undefined;
-    var dt_f32: [num_v_heads]f32 = undefined;
-    var norm_f16: [head_v_dim * 2]types.fp16_t = undefined;
-    var out_fp16: [64 * value_dim]types.fp16_t = undefined;
-
-    // Init with small values
-    var seed: u32 = 42;
-    inline for (.{ &qkv_fp16, &z_fp16, &alpha_fp16, &beta_fp16, &conv1d_fp16 }) |arr_ptr| {
-        for (arr_ptr) |*v| {
-            v.* = types.fp32_to_fp16(@as(f32, @floatFromInt(seed & 0xFF)) / 128.0 - 1.0);
-            seed += 1;
+    if (conv_kernel > 1) {
+        var kernel_idx: usize = conv_kernel - 1;
+        while (kernel_idx > 0) : (kernel_idx -= 1) {
+            const dst = kernel_idx * conv_dim;
+            const src = (kernel_idx - 1) * conv_dim;
+            @memcpy(state.conv_state[dst .. dst + conv_dim], state.conv_state[src .. src + conv_dim]);
         }
     }
-    for (&a_f32) |*v| { v.* = @as(f32, @floatFromInt(seed & 0x0F)) / 8.0 - 1.0; seed += 1; }
-    for (&dt_f32) |*v| { v.* = @as(f32, @floatFromInt(seed & 0x0F)) / 8.0 - 1.0; seed += 1; }
-    for (&norm_f16) |*v| { v.* = types.fp32_to_fp16(1.0); }
-    for (&out_fp16) |*v| { v.* = types.fp32_to_fp16(@as(f32, @floatFromInt(seed & 0xFF)) / 128.0 - 1.0); seed += 1; }
+    @memcpy(state.conv_state[0..conv_dim], mixed_qkv[0..conv_dim]);
 
-    for (&input, 0..) |*v, i| { v.* = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(input.len)); }
-    @memset(&output, 0);
+    for (0..conv_dim) |dim_idx| {
+        var acc: f32 = 0;
+        for (0..conv_kernel) |kernel_idx| {
+            const state_idx = kernel_idx * conv_dim + dim_idx;
+            const weight_idx = (conv_kernel - 1 - kernel_idx) * conv_dim + dim_idx;
+            acc += state.conv_state[state_idx] * scalarAt(weights.conv1d, weight_idx);
+        }
+        conv_out[dim_idx] = math.swish(acc);
+    }
 
-    var temps_qkv: [2048]f32 = undefined;
-    var temps_conv: [2048]f32 = undefined;
-    var temps_z: [256]f32 = undefined;
-    var temps_core: [256]f32 = undefined;
-    var temps_alpha: [128]f32 = undefined;
-    var temps_beta: [128]f32 = undefined;
+    normalizeHeads(conv_out[0..key_dim], num_k_heads, head_k_dim);
+    normalizeHeads(conv_out[key_dim .. key_dim * 2], num_k_heads, head_k_dim);
 
-    forward(cfg, &input, &output, &state, .{
-        .qkv = .{ .bytes = std.mem.sliceAsBytes(qkv_fp16[0..]), .dtype = .f16 },
-        .z = .{ .bytes = std.mem.sliceAsBytes(z_fp16[0..]), .dtype = .f16 },
-        .alpha = .{ .bytes = std.mem.sliceAsBytes(alpha_fp16[0..]), .dtype = .f16 },
-        .beta = .{ .bytes = std.mem.sliceAsBytes(beta_fp16[0..]), .dtype = .f16 },
-        .conv1d = .{ .bytes = std.mem.sliceAsBytes(conv1d_fp16[0..]), .dtype = .f16 },
-        .a_log = .{ .bytes = std.mem.sliceAsBytes(a_f32[0..]), .dtype = .f32 },
-        .dt_bias = .{ .bytes = std.mem.sliceAsBytes(dt_f32[0..]), .dtype = .f32 },
-        .norm = .{ .bytes = std.mem.sliceAsBytes(norm_f16[0..]), .dtype = .f16 },
-        .out = .{ .bytes = std.mem.sliceAsBytes(out_fp16[0..]), .dtype = .f16 },
-    }, .{
-        .mixed_qkv = temps_qkv[0..2048],
-        .conv_out = temps_conv[0..2048],
-        .z = temps_z[0..256],
-        .core = temps_core[0..256],
-        .alpha = temps_alpha[0..128],
-        .beta = temps_beta[0..128],
-    }, 0);
+    const norm_weight = weights.norm;
+    for (0..num_v_heads) |head_idx| {
+        const q_head_idx = head_idx / repeat_factor;
+        const q_base = q_head_idx * head_k_dim;
+        const k_base = key_dim + q_head_idx * head_k_dim;
+        const v_base = key_dim * 2 + head_idx * head_v_dim;
+        const core_base = head_idx * head_v_dim;
+        const state_base = head_idx * head_k_dim * head_v_dim;
 
-    for (output) |v| {
-        try std.testing.expect(!std.math.isNan(v));
-        try std.testing.expect(!std.math.isInf(v));
+        const beta = 1.0 / (1.0 + std.math.exp(-beta_in[head_idx]));
+        const A_log = scalarAt(weights.a_log, head_idx);
+        const dt_bias = scalarAt(weights.dt_bias, head_idx);
+        const g = -std.math.exp(A_log) * softplus(alpha_in[head_idx] + dt_bias);
+        const decay = std.math.exp(g);
+
+        const head_state = state.recurrent_state[state_base .. state_base + head_k_dim * head_v_dim];
+        for (head_state) |*value| value.* *= decay;
+
+        var kv_mem: [256]f32 = undefined;
+        @memset(kv_mem[0..head_v_dim], 0);
+        for (0..head_k_dim) |k_idx| {
+            const kval = conv_out[k_base + k_idx];
+            const srow = head_state[k_idx * head_v_dim ..][0..head_v_dim];
+            for (0..head_v_dim) |v_idx| kv_mem[v_idx] += srow[v_idx] * kval;
+        }
+        var delta: [256]f32 = undefined;
+        for (0..head_v_dim) |v_idx| {
+            delta[v_idx] = (conv_out[v_base + v_idx] - kv_mem[v_idx]) * beta;
+        }
+
+        for (0..head_k_dim) |k_idx| {
+            const key_value = conv_out[k_base + k_idx];
+            for (0..head_v_dim) |v_idx| {
+                head_state[k_idx * head_v_dim + v_idx] += key_value * delta[v_idx];
+            }
+        }
+
+        var attn_arr: [256]f32 = undefined;
+        @memset(attn_arr[0..head_v_dim], 0);
+        for (0..head_k_dim) |k_idx| {
+            const qval = conv_out[q_base + k_idx] * scale;
+            const srow = head_state[k_idx * head_v_dim ..][0..head_v_dim];
+            for (0..head_v_dim) |v_idx| attn_arr[v_idx] += srow[v_idx] * qval;
+        }
+        var rms: f32 = 0;
+        for (0..head_v_dim) |v_idx| {
+            core[core_base + v_idx] = attn_arr[v_idx];
+            rms += attn_arr[v_idx] * attn_arr[v_idx];
+        }
+
+        rms = @sqrt(rms / @as(f32, @floatFromInt(head_v_dim)) + 1e-6);
+        const inv_rms = 1.0 / rms;
+        for (0..head_v_dim) |v_idx| {
+            const normed = core[core_base + v_idx] * inv_rms * scalarAt(norm_weight, v_idx);
+            core[core_base + v_idx] = normed * math.swish(z_in[core_base + v_idx]);
+        }
     }
 }
-

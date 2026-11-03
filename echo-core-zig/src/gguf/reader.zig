@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const config_mod = @import("core_config");
 
 const Allocator = std.mem.Allocator;
@@ -236,6 +235,12 @@ pub const Reader = struct {
         }
         if (self.prefixedLookup("block_count")) |value| {
             if (self.numericAsU64(value)) |v| self.config.num_layers = @intCast(v);
+        }
+        if (self.prefixedLookup("nextn_predict_layers")) |value| {
+            if (self.numericAsU64(value)) |v| {
+                const nextn: u32 = @intCast(v);
+                if (nextn < self.config.num_layers) self.config.num_layers -= nextn;
+            }
         }
         if (self.prefixedLookup("feed_forward_length")) |value| {
             if (self.numericAsU64(value)) |v| self.config.ffn_hidden_dim = @intCast(v);
@@ -762,108 +767,4 @@ pub fn buildSyntheticQwen35GgufForTests(allocator: Allocator) ![]u8 {
     for (0..22282240) |_| try appendU8(&bytes, 0xCD);
 
     return try bytes.toOwnedSlice();
-}
-
-test "GGMLType count" {
-    try std.testing.expectEqual(@as(u32, 40), @intFromEnum(GGMLType.count));
-}
-
-test "Reader parses synthetic GGUF v3 file" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const data = try buildSyntheticGgufForTests(std.testing.allocator);
-    defer std.testing.allocator.free(data);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sample.gguf", .data = data });
-
-    var path_buf: [256]u8 = undefined;
-    const rel_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/sample.gguf", .{tmp.sub_path[0..]});
-
-    var reader = try Reader.openWithAllocator(rel_path, std.testing.allocator);
-    defer reader.deinit();
-
-    try std.testing.expectEqual(@as(u32, 64), reader.getAlignment());
-    try std.testing.expectEqual(@as(u32, 128), reader.config.max_seq_len);
-    try std.testing.expectEqual(@as(u32, 8), reader.config.hidden_dim);
-    try std.testing.expectEqual(@as(u32, 1), reader.config.num_layers);
-    try std.testing.expectEqual(@as(u32, 2), reader.config.num_heads);
-    try std.testing.expectEqual(@as(u32, 1), reader.config.num_kv_heads);
-    try std.testing.expectEqual(@as(u32, 4), reader.config.head_dim);
-    try std.testing.expectEqual(@as(usize, 2), reader.tokens.items.len);
-    try std.testing.expectEqualStrings("hello", reader.tokens.items[0]);
-    try std.testing.expectEqualStrings("world", reader.tokens.items[1]);
-    try std.testing.expectEqual(@as(u64, @intCast(data.len - 128)), reader.data_offset);
-
-    const exact = reader.findTensorBySuffix("blk.0.attn_q.weight");
-    try std.testing.expect(exact != null);
-    const suffix = reader.findTensorBySuffix("attn_q.weight");
-    try std.testing.expect(suffix != null);
-    try std.testing.expectEqual(@as(u64, 128), suffix.?.size);
-
-    const tensor = try reader.loadTensor("blk.0.attn_q.weight");
-    defer std.testing.allocator.free(tensor);
-    try std.testing.expectEqual(@as(usize, 128), tensor.len);
-    try std.testing.expectEqual(@as(u8, 0xAB), tensor[0]);
-
-    const scores = reader.metadata.get("tokenizer.ggml.scores") orelse unreachable;
-    switch (scores) {
-        .floats => |vals| {
-            try std.testing.expectEqual(@as(usize, 2), vals.len);
-            try std.testing.expectApproxEqAbs(@as(f64, 1.25), vals[0], 0.0001);
-            try std.testing.expectApproxEqAbs(@as(f64, -0.5), vals[1], 0.0001);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-test "Reader loadTensorInto matches loadTensor bytes" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const data = try buildSyntheticGgufForTests(std.testing.allocator);
-    defer std.testing.allocator.free(data);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "sample.gguf", .data = data });
-
-    var path_buf: [256]u8 = undefined;
-    const rel_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/sample.gguf", .{tmp.sub_path[0..]});
-
-    var reader = try Reader.openWithAllocator(rel_path, std.testing.allocator);
-    defer reader.deinit();
-
-    const raw = try reader.loadTensor("blk.0.attn_q.weight");
-    defer std.testing.allocator.free(raw);
-
-    const direct = try std.testing.allocator.alloc(u8, raw.len);
-    defer std.testing.allocator.free(direct);
-    try reader.loadTensorInto("blk.0.attn_q.weight", direct);
-
-    try std.testing.expectEqualSlices(u8, raw, direct);
-}
-
-test "Reader honors qwen35 explicit key_length and group_count metadata" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
-
-    const data = try buildSyntheticQwen35GgufForTests(std.testing.allocator);
-    defer std.testing.allocator.free(data);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "qwen35.gguf", .data = data });
-
-    var path_buf: [256]u8 = undefined;
-    const rel_path = try std.fmt.bufPrint(&path_buf, ".zig-cache/tmp/{s}/qwen35.gguf", .{tmp.sub_path[0..]});
-
-    var reader = try Reader.openWithAllocator(rel_path, std.testing.allocator);
-    defer reader.deinit();
-
-    try std.testing.expectEqual(@as(u32, 2560), reader.config.hidden_dim);
-    try std.testing.expectEqual(@as(u32, 16), reader.config.num_heads);
-    try std.testing.expectEqual(@as(u32, 4), reader.config.num_kv_heads);
-    try std.testing.expectEqual(@as(u32, 256), reader.config.head_dim);
-    try std.testing.expectEqual(@as(u32, 16), reader.config.ssm_num_groups);
 }

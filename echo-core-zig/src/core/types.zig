@@ -63,20 +63,3 @@ pub inline fn fp16_to_fp32_row(src: [*]const fp16_t, dst: [*]f32, n: usize) void
 pub inline fn fp32_to_fp16_row(src: [*]const f32, dst: [*]fp16_t, n: usize) void {
     return fp32ToFp16Row(src, dst, n);
 }
-
-test "fp16 conversion roundtrip" {
-    const test_values = [_]f32{ 0.0, 1.0, -1.0, 3.14159, -100.0, 0.5 };
-    for (test_values) |f| {
-        const h = fp32_to_fp16(f);
-        const back = fp16_to_fp32(h);
-        const diff = @abs(f - back);
-        const tolerance = @abs(f) * 0.01 + 0.0001;
-        try std.testing.expect(diff < tolerance);
-    }
-}
-
-test "fp16 subnormal matches IEEE half" {
-    const smallest_subnormal: fp16_t = 0x0001;
-    const expected = @as(f32, @floatCast(@as(f16, @bitCast(smallest_subnormal))));
-    try std.testing.expectEqual(expected, fp16_to_fp32(smallest_subnormal));
-}

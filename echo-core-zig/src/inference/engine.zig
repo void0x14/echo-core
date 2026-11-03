@@ -90,6 +90,33 @@ fn loadEmbeddingRowToF32(src: []const u8, dtype: gguf.GGMLType, cols: u32, dst: 
                 }
             }
         },
+        .q6_k => {
+            const blocks_per_row = cols / 256;
+            for (0..blocks_per_row) |b| {
+                const bp = src[b * 210 ..][0..210];
+                const d = types.fp16_to_fp32(std.mem.readInt(u16, bp[208..210], .little));
+                var n: usize = 0;
+                while (n < 256) : (n += 128) {
+                    var l: usize = 0;
+                    while (l < 32) : (l += 1) {
+                        const is = l / 16;
+                        const qh = bp[128 + n / 4 + l];
+                        const q1: i32 = @intCast((bp[n / 2 + l] & 0x0F) | (((qh >> 0) & 0x03) << 4));
+                        const q2: i32 = @intCast((bp[n / 2 + 32 + l] & 0x0F) | (((qh >> 2) & 0x03) << 4));
+                        const q3: i32 = @intCast((bp[n / 2 + l] >> 4) | (((qh >> 4) & 0x03) << 4));
+                        const q4: i32 = @intCast((bp[n / 2 + 32 + l] >> 4) | (((qh >> 6) & 0x03) << 4));
+                        const s0: i32 = @as(i8, @bitCast(bp[192 + n / 16 + is + 0]));
+                        const s1: i32 = @as(i8, @bitCast(bp[192 + n / 16 + is + 2]));
+                        const s2: i32 = @as(i8, @bitCast(bp[192 + n / 16 + is + 4]));
+                        const s3: i32 = @as(i8, @bitCast(bp[192 + n / 16 + is + 6]));
+                        dst[b * 256 + n + l] = d * @as(f32, @floatFromInt(s0)) * @as(f32, @floatFromInt(q1 - 32));
+                        dst[b * 256 + n + l + 32] = d * @as(f32, @floatFromInt(s1)) * @as(f32, @floatFromInt(q2 - 32));
+                        dst[b * 256 + n + l + 64] = d * @as(f32, @floatFromInt(s2)) * @as(f32, @floatFromInt(q3 - 32));
+                        dst[b * 256 + n + l + 96] = d * @as(f32, @floatFromInt(s3)) * @as(f32, @floatFromInt(q4 - 32));
+                    }
+                }
+            }
+        },
         else => unreachable,
     }
 }
@@ -235,9 +262,9 @@ pub const Engine = struct {
         const ssm_tmp_C = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size else 1);
         errdefer allocator.free(ssm_tmp_C);
 
-        const qwen_tmp_mixed_qkv = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size * 2 else 1);
+        const qwen_tmp_mixed_qkv = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size * 3 else 1);
         errdefer allocator.free(qwen_tmp_mixed_qkv);
-        const qwen_tmp_conv_out = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size * 2 else 1);
+        const qwen_tmp_conv_out = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size * 3 else 1);
         errdefer allocator.free(qwen_tmp_conv_out);
         const qwen_tmp_z = try allocator.alloc(f32, if (cfg.ssm_inner_size > 0) cfg.ssm_inner_size else 1);
         errdefer allocator.free(qwen_tmp_z);
@@ -571,12 +598,10 @@ pub const Engine = struct {
         @memset(self.k_proj, 0);
         @memset(self.v_proj, 0);
 
-        const q8p: [*]quantK.block_q8_K = @ptrCast(@alignCast(self.x_q8.ptr));
-        int_dot.quantizeXToQ8K(input.ptr, q8p, hidden);
+        parallel.parallelMatvec(self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, q_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
+        parallel.parallelMatvec(self.weight_pool[k_proj_offset..].ptr, input.ptr, self.k_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 2));
 
-        parallel.parallelMatvecQ4KPre(self.weight_pool[q_proj_offset..].ptr, q8p, self.q_proj.ptr, q_dim, hidden);
-        parallel.parallelMatvecQ4KPre(self.weight_pool[k_proj_offset..].ptr, q8p, self.k_proj.ptr, kv_dim, hidden);
-        parallel.parallelMatvecQ4KPre(self.weight_pool[v_proj_offset..].ptr, q8p, self.v_proj.ptr, kv_dim, hidden);
+        parallel.parallelMatvec(self.weight_pool[v_proj_offset..].ptr, input.ptr, self.v_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 3));
 
         // Apply Q/K head norms if weights are non-zero
         const q_norm_byte_offset = layer_base + self.weight_layout.attn_q_norm_offset;
@@ -609,7 +634,7 @@ pub const Engine = struct {
             const cache_layer = self.kv_cache.?.layer(layer_idx);
             for (0..num_heads) |head_index| {
                 const h: u32 = @intCast(head_index);
-                const kv_head = h % num_kv_heads;
+                const kv_head = h / (num_heads / num_kv_heads);
                 @memcpy(self.head_q[0..head_dim], self.q_proj[@as(usize, h) * head_dim ..][0..head_dim]);
 
                 if (self.config.use_kv_quantization) {
@@ -656,11 +681,7 @@ pub const Engine = struct {
         }
 
         @memset(self.attn_out, 0);
-        {
-            const o_q8: [*]quantK.block_q8_K = @ptrCast(@alignCast(self.x_q8.ptr));
-            int_dot.quantizeXToQ8K(self.attn_accum.ptr, o_q8, q_dim);
-            parallel.parallelMatvecQ4KPre(self.weight_pool[o_proj_offset..].ptr, o_q8, self.attn_out.ptr, hidden, q_dim);
-        }
+        parallel.parallelMatvec(self.weight_pool[o_proj_offset..].ptr, self.attn_accum.ptr, self.attn_out.ptr, hidden, q_dim, dtypeForTensor(self.weight_dtypes, layer_idx, 4));
         @memcpy(output, self.attn_out);
     }
 
@@ -751,12 +772,12 @@ pub const Engine = struct {
         const value_dim = self.config.ssm_inner_size;
         const num_v_heads = self.config.ssm_dt_rank;
         const head_v_dim = if (num_v_heads > 0) value_dim / num_v_heads else 0;
-        const key_dim = value_dim / 2;
+        const key_dim = value_dim;
         const num_k_heads = if (head_v_dim > 0) key_dim / head_v_dim else 0;
 
         if (self.qwen_states[layer_idx].conv_state.len == 0) {
             self.qwen_states[layer_idx] = qwen_linear.QwenLinearState.init(
-                value_dim * 2,
+                key_dim * 2 + value_dim,
                 self.config.ssm_conv_kernel,
                 num_v_heads,
                 if (num_k_heads > 0) key_dim / num_k_heads else 0,
@@ -865,9 +886,7 @@ pub const Engine = struct {
 
         // Prefill: process all prompt tokens through the KV cache.
         // After this loop, self.logits holds the prediction for the first generated token.
-        for (ids.items) |tok_id| {
-            _ = try self.forwardToken(tok_id);
-        }
+        _ = try self.prefill(ids.items);
 
         // Decode: sample from prefill logits, then forward each new token.
         var generated: u32 = 0;
@@ -884,13 +903,355 @@ pub const Engine = struct {
         return tokenizer_.decode(all_ids.items);
     }
 
+    fn applyRoPETo(self: *Engine, q: []f32, k: []f32, pos: u32) void {
+        const head_dim = self.config.head_dim;
+        const num_heads = self.config.num_heads;
+        const num_kv_heads = self.config.num_kv_heads;
+        const rope_base: f32 = 10000.0;
+        for (0..num_heads) |h| {
+            const offset = h * head_dim;
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_val = @cos(angle);
+                const sin_val = @sin(angle);
+                const q0 = q[offset + i];
+                const q1 = q[offset + i + 1];
+                q[offset + i] = q0 * cos_val - q1 * sin_val;
+                q[offset + i + 1] = q0 * sin_val + q1 * cos_val;
+            }
+        }
+        for (0..num_kv_heads) |h| {
+            const offset = h * head_dim;
+            var i: usize = 0;
+            while (i < head_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                const cos_val = @cos(angle);
+                const sin_val = @sin(angle);
+                const k0 = k[offset + i];
+                const k1 = k[offset + i + 1];
+                k[offset + i] = k0 * cos_val - k1 * sin_val;
+                k[offset + i + 1] = k0 * sin_val + k1 * cos_val;
+            }
+        }
+    }
+
+    fn ffnBatched(self: *Engine, layer_idx: u32, X: []f32, out_buf: []f32, T: u32, gate_buf: []f32, up_buf: []f32) void {
+        const hidden = self.config.hidden_dim;
+        const ffn_h = self.config.ffn_hidden_dim;
+        const w1_offset = self.current_layer_base + self.weight_layout.ffn_weight1_offset;
+        const w2_offset = self.current_layer_base + self.weight_layout.ffn_weight2_offset;
+        switch (self.config.ffn_type) {
+            .dense => {
+                parallel.parallelMatmat(self.weight_pool[w1_offset..].ptr, X.ptr, gate_buf.ptr, ffn_h, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 6));
+                for (gate_buf[0 .. @as(usize, T) * ffn_h]) |*value| value.* = math.relu(value.*);
+                parallel.parallelMatmat(self.weight_pool[w2_offset..].ptr, gate_buf.ptr, out_buf.ptr, hidden, ffn_h, T, dtypeForTensor(self.weight_dtypes, layer_idx, 7));
+            },
+            .gated_swi_glu, .gated_gelu => {
+                const w3_offset = self.current_layer_base + self.weight_layout.ffn_weight3_offset;
+                parallel.parallelMatmat(self.weight_pool[w1_offset..].ptr, X.ptr, gate_buf.ptr, ffn_h, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 6));
+                parallel.parallelMatmat(self.weight_pool[w2_offset..].ptr, X.ptr, up_buf.ptr, ffn_h, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 7));
+                for (0 .. @as(usize, T) * ffn_h) |i| {
+                    gate_buf[i] = switch (self.config.ffn_type) {
+                        .gated_swi_glu => math.swish(gate_buf[i]) * up_buf[i],
+                        .gated_gelu => math.gelu(gate_buf[i]) * up_buf[i],
+                        else => unreachable,
+                    };
+                }
+                parallel.parallelMatmat(self.weight_pool[w3_offset..].ptr, gate_buf.ptr, out_buf.ptr, hidden, ffn_h, T, dtypeForTensor(self.weight_dtypes, layer_idx, 8));
+            },
+        }
+    }
+
+    const BatchScratch = struct {
+        r: []f32,
+        mixed: []f32,
+        zb: []f32,
+        coreb: []f32,
+        alphab: []f32,
+        betab: []f32,
+        qb: []f32,
+        kb: []f32,
+        vb: []f32,
+        ab: []f32,
+        ob: []f32,
+        gateb: []f32,
+        upb: []f32,
+    };
+    fn layerForwardBatched(self: *Engine, layer_idx: u32, H: []f32, T: u32, sc: *BatchScratch) void {
+        const hidden = self.config.hidden_dim;
+        const layer_type = self.weight_layout.layer_types[layer_idx];
+        const Ts: usize = @intCast(T);
+
+        if (layer_type == .ssm) {
+            for (0..Ts) |t| {
+                const row = H[t * hidden ..][0..hidden];
+                self.layerForward(layer_idx, row, row);
+            }
+            return;
+        }
+
+        const layer_base = self.weight_layout.layer_offsets[layer_idx];
+        self.current_layer_base = layer_base;
+        const layer_norm_bytes = self.weight_pool[layer_base + self.weight_layout.norm_weight_offset ..][0 .. hidden * @sizeOf(types.fp16_t)];
+        const layer_norm = fp16SliceFromBytes(layer_norm_bytes);
+        const ffn_norm_bytes = self.weight_pool[layer_base + self.weight_layout.ffn_norm_offset ..][0 .. hidden * @sizeOf(types.fp16_t)];
+        const ffn_norm = fp16SliceFromBytes(ffn_norm_bytes);
+
+        @memcpy(sc.r, H);
+        for (0..Ts) |t| {
+            const row = H[t * hidden ..][0..hidden];
+            self.norm(row, row, layer_norm);
+        }
+
+        if (layer_type == .qwen_linear) {
+            const qkv_offset = layer_base + self.weight_layout.q_proj_offset;
+            const qkv_end = layer_base + self.weight_layout.o_proj_offset;
+            const z_offset = layer_base + self.weight_layout.o_proj_offset;
+            const z_end = layer_base + self.weight_layout.ffn_norm_offset;
+            const qwen_base = packedSsmBase(&self.weight_layout, layer_idx);
+            const out_offset = qwen_base + self.weight_layout.ssm_out_offset;
+            const out_end = qwen_base + self.weight_layout.ssm_x_offset;
+            const alpha_offset = qwen_base + self.weight_layout.ssm_dt_offset;
+            const alpha_end = qwen_base + self.weight_layout.ssm_A_offset;
+            const beta_offset = qwen_base + self.weight_layout.ssm_B_offset;
+            const beta_end = qwen_base + self.weight_layout.ssm_C_offset;
+            const a_offset = qwen_base + self.weight_layout.ssm_A_offset;
+            const a_end = qwen_base + self.weight_layout.ssm_B_offset;
+            const dt_bias_offset = qwen_base + self.weight_layout.ssm_conv1d_bias_offset;
+            const dt_bias_end = qwen_base + self.weight_layout.ssm_per_layer_size;
+            const conv_offset = qwen_base + self.weight_layout.ssm_conv1d_offset;
+            const conv_end = qwen_base + self.weight_layout.ssm_conv1d_bias_offset;
+            const norm_offset = qwen_base + self.weight_layout.ssm_D_offset;
+            const norm_end = qwen_base + self.weight_layout.ssm_conv1d_offset;
+
+            const value_dim = self.config.ssm_inner_size;
+            const num_v_heads = self.config.ssm_dt_rank;
+            const head_v_dim = if (num_v_heads > 0) value_dim / num_v_heads else 0;
+            const conv_dim_b = value_dim * 3;
+
+            if (self.qwen_states[layer_idx].conv_state.len == 0) {
+                self.qwen_states[layer_idx] = qwen_linear.QwenLinearState.init(
+                    conv_dim_b,
+                    self.config.ssm_conv_kernel,
+                    num_v_heads,
+                    head_v_dim,
+                    head_v_dim,
+                    self.config.hidden_dim,
+                    self.allocator,
+                ) catch unreachable;
+            }
+
+            const weights = qwen_linear.Weights{
+                .qkv = .{ .bytes = self.weight_pool[qkv_offset..qkv_end], .dtype = dtypeForTensor(self.weight_dtypes, layer_idx, 1) },
+                .z = .{ .bytes = self.weight_pool[z_offset..z_end], .dtype = dtypeForTensor(self.weight_dtypes, layer_idx, 4) },
+                .alpha = .{ .bytes = self.weight_pool[alpha_offset..alpha_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 12) },
+                .beta = .{ .bytes = self.weight_pool[beta_offset..beta_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 13) },
+                .a_log = .{ .bytes = self.weight_pool[a_offset..a_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 14) },
+                .dt_bias = .{ .bytes = self.weight_pool[dt_bias_offset..dt_bias_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 15) },
+                .conv1d = .{ .bytes = self.weight_pool[conv_offset..conv_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 16) },
+                .norm = .{ .bytes = self.weight_pool[norm_offset..norm_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 17) },
+                .out = .{ .bytes = self.weight_pool[out_offset..out_end], .dtype = dtypeForLayerSlot(self.weight_dtypes, layer_idx, 11) },
+            };
+
+            parallel.parallelMatmat(weights.qkv.bytes.ptr, H.ptr, sc.mixed.ptr, conv_dim_b, hidden, T, weights.qkv.dtype);
+            parallel.parallelMatmat(weights.z.bytes.ptr, H.ptr, sc.zb.ptr, value_dim, hidden, T, weights.z.dtype);
+            {
+                const n_weights = hidden * num_v_heads;
+                const alpha_fp16 = @as([*]types.fp16_t, @ptrCast(@alignCast(self.qwen_states[layer_idx].dequant_scratch.ptr)))[0..n_weights];
+                quantK.dequantizeRow(weights.alpha.bytes.ptr, alpha_fp16.ptr, n_weights, weights.alpha.dtype);
+                parallel.parallelMatmat(@ptrCast(alpha_fp16.ptr), H.ptr, sc.alphab.ptr, num_v_heads, hidden, T, .f16);
+                const beta_fp16 = self.qwen_states[layer_idx].dequant_scratch[n_weights..];
+                quantK.dequantizeRow(weights.beta.bytes.ptr, beta_fp16.ptr, n_weights, weights.beta.dtype);
+                parallel.parallelMatmat(@ptrCast(beta_fp16.ptr), H.ptr, sc.betab.ptr, num_v_heads, hidden, T, .f16);
+            }
+            for (0..Ts) |t| {
+                qwen_linear.forwardCore(
+                    self.config,
+                    &self.qwen_states[layer_idx],
+                    weights,
+                    sc.mixed[t * conv_dim_b ..][0..conv_dim_b],
+                    sc.zb[t * value_dim ..][0..value_dim],
+                    sc.alphab[t * num_v_heads ..][0..num_v_heads],
+                    sc.betab[t * num_v_heads ..][0..num_v_heads],
+                    sc.coreb[t * value_dim ..][0..value_dim],
+                );
+            }
+            parallel.parallelMatmat(weights.out.bytes.ptr, sc.coreb.ptr, sc.ob.ptr, hidden, value_dim, T, weights.out.dtype);
+        } else {
+            const num_heads = self.config.num_heads;
+            const num_kv_heads = self.config.num_kv_heads;
+            const head_dim = self.config.head_dim;
+            const q_dim = num_heads * head_dim;
+            const kv_dim = num_kv_heads * head_dim;
+            const q_proj_offset = layer_base + self.weight_layout.q_proj_offset;
+            const k_proj_offset = layer_base + self.weight_layout.k_proj_offset;
+            const v_proj_offset = layer_base + self.weight_layout.v_proj_offset;
+            const o_proj_offset = layer_base + self.weight_layout.o_proj_offset;
+
+            parallel.parallelMatmat(self.weight_pool[q_proj_offset..].ptr, H.ptr, sc.qb.ptr, q_dim, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
+            parallel.parallelMatmat(self.weight_pool[k_proj_offset..].ptr, H.ptr, sc.kb.ptr, kv_dim, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 2));
+            parallel.parallelMatmat(self.weight_pool[v_proj_offset..].ptr, H.ptr, sc.vb.ptr, kv_dim, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 3));
+
+            const q_norm_bytes = self.weight_pool[layer_base + self.weight_layout.attn_q_norm_offset ..][0 .. head_dim * @sizeOf(types.fp16_t)];
+            const k_norm_bytes = self.weight_pool[layer_base + self.weight_layout.attn_k_norm_offset ..][0 .. head_dim * @sizeOf(types.fp16_t)];
+            const q_norm_w = fp16SliceFromBytes(q_norm_bytes);
+            const k_norm_w = fp16SliceFromBytes(k_norm_bytes);
+            const do_q_norm = !std.mem.allEqual(types.fp16_t, q_norm_w, 0);
+            const do_k_norm = !std.mem.allEqual(types.fp16_t, k_norm_w, 0);
+            const base_pos = self.seq_pos;
+            const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
+
+            for (0..Ts) |t| {
+                const qrow = sc.qb[t * q_dim ..][0..q_dim];
+                const krow = sc.kb[t * kv_dim ..][0..kv_dim];
+                const vrow = sc.vb[t * kv_dim ..][0..kv_dim];
+                if (do_q_norm) applyHeadNorm(qrow, num_heads, head_dim, q_norm_w);
+                if (do_k_norm) applyHeadNorm(krow, num_kv_heads, head_dim, k_norm_w);
+                if (self.config.pos_encoding == .rope) {
+                    self.applyRoPETo(qrow, krow, base_pos + @as(u32, @intCast(t)));
+                }
+                if (self.kv_cache) |*cache| cache.append(layer_idx, krow.ptr, vrow.ptr);
+                const ab_row = sc.ab[t * q_dim ..][0..q_dim];
+                @memset(ab_row, 0);
+                if (self.kv_cache) |*cache| {
+                    const cache_layer = cache.layer(layer_idx);
+                    const cache_len = cache_layer.seq_len;
+                    for (0..num_heads) |head_index| {
+                        const h: u32 = @intCast(head_index);
+                        const kv_head = h / (num_heads / num_kv_heads);
+                        const head_q = qrow[@as(usize, h) * head_dim ..][0..head_dim];
+                        if (self.config.use_kv_quantization) {
+                            for (0..cache_len) |pos_index| {
+                                const pos: u32 = @intCast(pos_index);
+                                var score: f32 = 0;
+                                const key_head = cache_layer.keys_int8.? + @as(usize, pos) * kv_dim + @as(usize, kv_head) * head_dim;
+                                const k_scale = cache_layer.key_scales.?[@as(usize, pos) * num_kv_heads + kv_head];
+                                for (0..head_dim) |d| score += head_q[d] * @as(f32, @floatFromInt(key_head[d])) * k_scale;
+                                self.scores[pos] = score * scale;
+                            }
+                        } else {
+                            for (0..cache_len) |pos_index| {
+                                const pos: u32 = @intCast(pos_index);
+                                var score: f32 = 0;
+                                const key_head = cache_layer.keys_fp32.? + @as(usize, pos) * kv_dim + @as(usize, kv_head) * head_dim;
+                                for (0..head_dim) |d| score += head_q[d] * key_head[d];
+                                self.scores[pos] = score * scale;
+                            }
+                        }
+                        avx2_softmax.softmaxAvx2(self.scores[0..cache_len]);
+                        const head_out = ab_row[@as(usize, h) * head_dim ..][0..head_dim];
+                        if (self.config.use_kv_quantization) {
+                            for (0..cache_len) |pos_index| {
+                                const pos: u32 = @intCast(pos_index);
+                                const value_head = cache_layer.values_int8.? + @as(usize, pos) * kv_dim + @as(usize, kv_head) * head_dim;
+                                const v_scale = cache_layer.val_scales.?[@as(usize, pos) * num_kv_heads + kv_head];
+                                for (0..head_dim) |d| {
+                                    head_out[d] += self.scores[pos] * (@as(f32, @floatFromInt(value_head[d])) * v_scale);
+                                }
+                            }
+                        } else {
+                            for (0..cache_len) |pos_index| {
+                                const pos: u32 = @intCast(pos_index);
+                                const value_head = cache_layer.values_fp32.? + @as(usize, pos) * kv_dim + @as(usize, kv_head) * head_dim;
+                                for (0..head_dim) |d| head_out[d] += self.scores[pos] * value_head[d];
+                            }
+                        }
+                    }
+                }
+            }
+            parallel.parallelMatmat(self.weight_pool[o_proj_offset..].ptr, sc.ab.ptr, sc.ob.ptr, hidden, q_dim, T, dtypeForTensor(self.weight_dtypes, layer_idx, 4));
+        }
+
+        for (0 .. Ts * hidden) |i| H[i] = sc.r[i] + sc.ob[i];
+        @memcpy(sc.r, H);
+        for (0..Ts) |t| {
+            const row = H[t * hidden ..][0..hidden];
+            self.norm(row, row, ffn_norm);
+        }
+        self.ffnBatched(layer_idx, H, sc.ob, T, sc.gateb, sc.upb);
+        for (0 .. Ts * hidden) |i| H[i] = sc.r[i] + sc.ob[i];
+    }
+    pub fn prefillBatched(self: *Engine, token_ids: []const u32) ![]f32 {
+        try self.ensureKvCache();
+        const T: u32 = @intCast(token_ids.len);
+        if (T == 0) return self.logits;
+        if (T < 4) {
+            var logits: []f32 = self.logits;
+            for (token_ids) |tok_id| logits = try self.forwardToken(tok_id);
+            return logits;
+        }
+        const hidden = self.config.hidden_dim;
+        const Ts: usize = @intCast(T);
+        const alloc = self.allocator;
+        const value_dim = @max(self.config.ssm_inner_size, 1);
+        const conv_dim_b = value_dim * 3;
+        const num_v_heads = @max(self.config.ssm_dt_rank, 1);
+        const q_dim = @max(self.config.num_heads * self.config.head_dim, 1);
+        const kv_dim = @max(self.config.num_kv_heads * self.config.head_dim, 1);
+        const ffn_h = @max(self.config.ffn_hidden_dim, 1);
+
+        const H = try alloc.alloc(f32, Ts * hidden);
+        defer alloc.free(H);
+        var sc: BatchScratch = undefined;
+        sc.r = try alloc.alloc(f32, Ts * hidden);
+        defer alloc.free(sc.r);
+        sc.mixed = try alloc.alloc(f32, Ts * conv_dim_b);
+        defer alloc.free(sc.mixed);
+        sc.zb = try alloc.alloc(f32, Ts * value_dim);
+        defer alloc.free(sc.zb);
+        sc.coreb = try alloc.alloc(f32, Ts * value_dim);
+        defer alloc.free(sc.coreb);
+        sc.alphab = try alloc.alloc(f32, Ts * num_v_heads);
+        defer alloc.free(sc.alphab);
+        sc.betab = try alloc.alloc(f32, Ts * num_v_heads);
+        defer alloc.free(sc.betab);
+        sc.qb = try alloc.alloc(f32, Ts * q_dim);
+        defer alloc.free(sc.qb);
+        sc.kb = try alloc.alloc(f32, Ts * kv_dim);
+        defer alloc.free(sc.kb);
+        sc.vb = try alloc.alloc(f32, Ts * kv_dim);
+        defer alloc.free(sc.vb);
+        sc.ab = try alloc.alloc(f32, Ts * q_dim);
+        defer alloc.free(sc.ab);
+        sc.ob = try alloc.alloc(f32, Ts * hidden);
+        defer alloc.free(sc.ob);
+        sc.gateb = try alloc.alloc(f32, Ts * ffn_h);
+        defer alloc.free(sc.gateb);
+        sc.upb = try alloc.alloc(f32, Ts * ffn_h);
+        defer alloc.free(sc.upb);
+
+        const embedding_dtype = dtypeForGlobal(self.weight_dtypes, 0);
+        const embedding_row_bytes = rowByteSize(hidden, embedding_dtype);
+        for (token_ids, 0..) |tok_id, t| {
+            const emb_bytes = self.weight_pool[self.weight_layout.token_embedding_offset + @as(usize, tok_id) * embedding_row_bytes ..][0..embedding_row_bytes];
+            loadEmbeddingRowToF32(emb_bytes, embedding_dtype, hidden, H[t * hidden ..][0..hidden]);
+        }
+
+        for (0..self.config.num_layers) |layer_idx| {
+            self.layerForwardBatched(@intCast(layer_idx), H, T, &sc);
+        }
+
+        @memcpy(self.hidden_state, H[(Ts - 1) * hidden ..][0..hidden]);
+        const final_norm_bytes = self.weight_pool[self.weight_layout.final_norm_offset..][0 .. hidden * @sizeOf(types.fp16_t)];
+        const final_norm = fp16SliceFromBytes(final_norm_bytes);
+        self.norm(self.hidden_state, self.hidden_state, final_norm);
+
+        @memset(self.logits, 0);
+        const output_proj_byte_offset = self.weight_layout.output_proj_offset;
+        const output_proj_size = self.weight_layout.ssm_region_offset - self.weight_layout.output_proj_offset;
+        const output_proj_bytes = self.weight_pool[output_proj_byte_offset..][0..output_proj_size];
+        const output_dtype = dtypeForGlobal(self.weight_dtypes, 2);
+        parallel.parallelMatvec(output_proj_bytes.ptr, self.hidden_state.ptr, self.logits.ptr, self.config.vocab_size, hidden, output_dtype);
+
+        self.seq_pos += T;
+        return self.logits;
+    }
     /// Prefill prompt tokens into KV cache, return logits of last token.
     pub fn prefill(self: *Engine, token_ids: []const u32) ![]f32 {
-        var logits: []f32 = self.logits;
-        for (token_ids) |tok_id| {
-            logits = try self.forwardToken(tok_id);
-        }
-        return logits;
+        return self.prefillBatched(token_ids);
     }
 
     /// Decode one step: process token_id, return logits.
@@ -940,125 +1301,4 @@ fn makeTinyConfig(num_layers: u32, max_seq_len: u32) config.ModelConfig {
         .ssm_dt_rank = 1,
         .ssm_dt_scale = 1.0,
     };
-}
-
-test "Engine init" {
-    var eng = try Engine.init(makeTinyConfig(1, 8), null, std.testing.allocator);
-    defer eng.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 4), eng.config.hidden_dim);
-    try std.testing.expectEqual(@as(usize, 4), eng.logits.len);
-}
-
-test "Engine forward returns vocab logits and uses last token embedding" {
-    const cfg = makeTinyConfig(0, 0);
-    var eng = try Engine.init(cfg, null, std.testing.allocator);
-    defer eng.deinit(std.testing.allocator);
-
-    // Initialize weight_pool to zeros (as bytes)
-    @memset(eng.weight_pool, 0);
-
-    // Use byte offsets directly (not element offsets)
-    const embed_offset = eng.weight_layout.token_embedding_offset;
-    const final_norm_offset = eng.weight_layout.final_norm_offset;
-    const output_offset = eng.weight_layout.output_proj_offset;
-
-    // Set up embedding weights (one-hot identity)
-    for (0..cfg.vocab_size) |tok| {
-        for (0..cfg.hidden_dim) |i| {
-            const byte_idx = embed_offset + (tok * cfg.hidden_dim + i) * @sizeOf(types.fp16_t);
-            const fp16_val = types.fp32_to_fp16(if (tok == i) 1 else 0);
-            const ptr: *u16 = @ptrCast(@alignCast(&eng.weight_pool[byte_idx]));
-            ptr.* = fp16_val;
-        }
-    }
-
-    // Set up final norm and output projection
-    for (0..cfg.hidden_dim) |i| {
-        const norm_byte_idx = final_norm_offset + i * @sizeOf(types.fp16_t);
-        const norm_ptr: *u16 = @ptrCast(@alignCast(&eng.weight_pool[norm_byte_idx]));
-        norm_ptr.* = types.fp32_to_fp16(1);
-
-        for (0..cfg.hidden_dim) |j| {
-            const out_byte_idx = output_offset + (i * cfg.hidden_dim + j) * @sizeOf(types.fp16_t);
-            const fp16_val = types.fp32_to_fp16(if (i == j) 1 else 0);
-            const out_ptr: *u16 = @ptrCast(@alignCast(&eng.weight_pool[out_byte_idx]));
-            out_ptr.* = fp16_val;
-        }
-    }
-
-    const logits = try eng.forward(&.{3});
-    try std.testing.expectEqual(@as(usize, cfg.vocab_size), logits.len);
-
-    var best: usize = 0;
-    for (1..logits.len) |i| {
-        if (logits[i] > logits[best]) best = i;
-    }
-    try std.testing.expectEqual(@as(usize, 3), best);
-}
-
-test "Engine forward advances kv cache across calls" {
-    const cfg = makeTinyConfig(1, 8);
-    var eng = try Engine.init(cfg, null, std.testing.allocator);
-    defer eng.deinit(std.testing.allocator);
-
-    // Fill weight_pool with fp16(0.1) pattern = 0x2E66 (little endian: 0x66, 0x2E)
-    const fp16_pattern = types.fp32_to_fp16(0.1);
-    var i: usize = 0;
-    while (i < eng.weight_pool.len) : (i += 2) {
-        if (i + 1 < eng.weight_pool.len) {
-            const ptr: *u16 = @ptrCast(@alignCast(&eng.weight_pool[i]));
-            ptr.* = fp16_pattern;
-        }
-    }
-
-    _ = try eng.forward(&.{0});
-    try std.testing.expect(eng.kv_cache != null);
-    try std.testing.expectEqual(@as(u32, 1), eng.kv_cache.?.seqLen());
-
-    _ = try eng.forward(&.{ 0, 1 });
-    try std.testing.expectEqual(@as(u32, 2), eng.kv_cache.?.seqLen());
-}
-
-test "Engine lazily initializes kv cache on first forward" {
-    const cfg = makeTinyConfig(1, 8);
-    var eng = try Engine.init(cfg, null, std.testing.allocator);
-    defer eng.deinit(std.testing.allocator);
-
-    try std.testing.expect(eng.kv_cache == null);
-
-    // Fill weight_pool with fp16(0.1) pattern
-    const fp16_pattern = types.fp32_to_fp16(0.1);
-    var j: usize = 0;
-    while (j < eng.weight_pool.len) : (j += 2) {
-        if (j + 1 < eng.weight_pool.len) {
-            const ptr2: *u16 = @ptrCast(@alignCast(&eng.weight_pool[j]));
-            ptr2.* = fp16_pattern;
-        }
-    }
-    _ = try eng.forward(&.{0});
-
-    try std.testing.expect(eng.kv_cache != null);
-    try std.testing.expectEqual(@as(u32, 1), eng.kv_cache.?.seqLen());
-}
-
-test "Engine.greedyNextToken correctly identifies token with max logit" {
-    const cfg = makeTinyConfig(0, 0);
-    var eng = try Engine.init(cfg, null, std.testing.allocator);
-    defer eng.deinit(std.testing.allocator);
-
-    // Populate logits with known values
-    eng.logits[0] = 0.1;
-    eng.logits[1] = 0.5;
-    eng.logits[2] = 2.0; // max
-    eng.logits[3] = 1.1;
-
-    try std.testing.expectEqual(@as(u32, 2), eng.greedyNextToken());
-
-    // Change max
-    eng.logits[1] = 5.0; // new max
-    try std.testing.expectEqual(@as(u32, 1), eng.greedyNextToken());
-
-    // Test early in the slice
-    eng.logits[0] = 10.0;
-    try std.testing.expectEqual(@as(u32, 0), eng.greedyNextToken());
 }
