@@ -1,0 +1,787 @@
+{
+ "topology": {
+  "0": {
+   "core": 0,
+   "sib": [
+    0,
+    6
+   ],
+   "l3": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    8
+   ]
+  },
+  "1": {
+   "core": 1,
+   "sib": [
+    1,
+    7
+   ],
+   "l3": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    8
+   ]
+  },
+  "2": {
+   "core": 2,
+   "sib": [
+    2,
+    8
+   ],
+   "l3": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    8
+   ]
+  },
+  "3": {
+   "core": 4,
+   "sib": [
+    3,
+    9
+   ],
+   "l3": [
+    3,
+    4,
+    5,
+    9,
+    10,
+    11
+   ]
+  },
+  "4": {
+   "core": 5,
+   "sib": [
+    4,
+    10
+   ],
+   "l3": [
+    3,
+    4,
+    5,
+    9,
+    10,
+    11
+   ]
+  },
+  "5": {
+   "core": 6,
+   "sib": [
+    5,
+    11
+   ],
+   "l3": [
+    3,
+    4,
+    5,
+    9,
+    10,
+    11
+   ]
+  },
+  "6": {
+   "core": 0,
+   "sib": [
+    0,
+    6
+   ],
+   "l3": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    8
+   ]
+  },
+  "7": {
+   "core": 1,
+   "sib": [
+    1,
+    7
+   ],
+   "l3": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    8
+   ]
+  },
+  "8": {
+   "core": 2,
+   "sib": [
+    2,
+    8
+   ],
+   "l3": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    8
+   ]
+  },
+  "9": {
+   "core": 4,
+   "sib": [
+    3,
+    9
+   ],
+   "l3": [
+    3,
+    4,
+    5,
+    9,
+    10,
+    11
+   ]
+  },
+  "10": {
+   "core": 5,
+   "sib": [
+    4,
+    10
+   ],
+   "l3": [
+    3,
+    4,
+    5,
+    9,
+    10,
+    11
+   ]
+  },
+  "11": {
+   "core": 6,
+   "sib": [
+    5,
+    11
+   ],
+   "l3": [
+    3,
+    4,
+    5,
+    9,
+    10,
+    11
+   ]
+  }
+ },
+ "raw": {
+  "tek-thread": {
+   "cfg": {
+    "name": "tek-thread",
+    "class": "single",
+    "mode": "single",
+    "args": [
+     "0"
+    ],
+    "cpus": [
+     0
+    ]
+   },
+   "runs": [
+    {
+     "mode": "single",
+     "pp_p50_ns": 460,
+     "pp_p99_ns": 890,
+     "pp_mism": 0,
+     "pipe_mb_s": 8229.2,
+     "pipe_p50_ns": 460,
+     "pipe_p99_ns": 760,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 1,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "single",
+     "pp_p50_ns": 460,
+     "pp_p99_ns": 740,
+     "pp_mism": 0,
+     "pipe_mb_s": 8269.6,
+     "pipe_p50_ns": 460,
+     "pipe_p99_ns": 720,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 1,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "single",
+     "pp_p50_ns": 460,
+     "pp_p99_ns": 780,
+     "pp_mism": 0,
+     "pipe_mb_s": 8286.4,
+     "pipe_p50_ns": 460,
+     "pipe_p99_ns": 710,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 1,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "single",
+     "pp_p50_ns": 460,
+     "pp_p99_ns": 600,
+     "pp_mism": 0,
+     "pipe_mb_s": 8254.1,
+     "pipe_p50_ns": 460,
+     "pipe_p99_ns": 760,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 1,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "single",
+     "pp_p50_ns": 460,
+     "pp_p99_ns": 700,
+     "pp_mism": 0,
+     "pipe_mb_s": 8259.9,
+     "pipe_p50_ns": 460,
+     "pipe_p99_ns": 750,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 1,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    }
+   ]
+  },
+  "smt-kardesi": {
+   "cfg": {
+    "name": "smt-kardesi",
+    "class": "smt",
+    "mode": "pair",
+    "args": [
+     "0",
+     "6"
+    ],
+    "cpus": [
+     0,
+     6
+    ]
+   },
+   "runs": [
+    {
+     "mode": "pair",
+     "pp_p50_ns": 370,
+     "pp_p99_ns": 380,
+     "pp_mism": 0,
+     "pipe_mb_s": 10455.3,
+     "pipe_p50_ns": 24130,
+     "pipe_p99_ns": 30439,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 64,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 370,
+     "pp_p99_ns": 370,
+     "pp_mism": 0,
+     "pipe_mb_s": 10262.2,
+     "pipe_p50_ns": 24030,
+     "pipe_p99_ns": 30390,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 64,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 370,
+     "pp_p99_ns": 370,
+     "pp_mism": 0,
+     "pipe_mb_s": 10241.2,
+     "pipe_p50_ns": 24069,
+     "pipe_p99_ns": 31940,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 64,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 370,
+     "pp_p99_ns": 370,
+     "pp_mism": 0,
+     "pipe_mb_s": 10601.1,
+     "pipe_p50_ns": 23930,
+     "pipe_p99_ns": 29920,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 64,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 370,
+     "pp_p99_ns": 380,
+     "pp_mism": 0,
+     "pipe_mb_s": 10328.2,
+     "pipe_p50_ns": 24070,
+     "pipe_p99_ns": 38120,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 64,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    }
+   ]
+  },
+  "ccx1-farkli-cekirdek": {
+   "cfg": {
+    "name": "ccx1-farkli-cekirdek",
+    "class": "same_ccx",
+    "mode": "pair",
+    "args": [
+     "0",
+     "1"
+    ],
+    "cpus": [
+     0,
+     1
+    ]
+   },
+   "runs": [
+    {
+     "mode": "pair",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 440,
+     "pp_mism": 0,
+     "pipe_mb_s": 6973.7,
+     "pipe_p50_ns": 310,
+     "pipe_p99_ns": 19120,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 2,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 400,
+     "pp_p99_ns": 530,
+     "pp_mism": 0,
+     "pipe_mb_s": 9345.1,
+     "pipe_p50_ns": 300,
+     "pipe_p99_ns": 23569,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 2,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 470,
+     "pp_mism": 0,
+     "pipe_mb_s": 11290.0,
+     "pipe_p50_ns": 290,
+     "pipe_p99_ns": 12000,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 2,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 310,
+     "pp_p99_ns": 400,
+     "pp_mism": 0,
+     "pipe_mb_s": 11059.1,
+     "pipe_p50_ns": 270,
+     "pipe_p99_ns": 8690,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 2,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 320,
+     "pp_p99_ns": 410,
+     "pp_mism": 0,
+     "pipe_mb_s": 10535.2,
+     "pipe_p50_ns": 280,
+     "pipe_p99_ns": 12780,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 2,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    }
+   ]
+  },
+  "ccx2-farkli-cekirdek": {
+   "cfg": {
+    "name": "ccx2-farkli-cekirdek",
+    "class": "same_ccx",
+    "mode": "pair",
+    "args": [
+     "3",
+     "4"
+    ],
+    "cpus": [
+     3,
+     4
+    ]
+   },
+   "runs": [
+    {
+     "mode": "pair",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 440,
+     "pp_mism": 0,
+     "pipe_mb_s": 11084.2,
+     "pipe_p50_ns": 280,
+     "pipe_p99_ns": 5210,
+     "pipe_mism": 0,
+     "mask_prod": 8,
+     "mask_cons": 16,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 450,
+     "pp_mism": 0,
+     "pipe_mb_s": 11352.2,
+     "pipe_p50_ns": 280,
+     "pipe_p99_ns": 3140,
+     "pipe_mism": 0,
+     "mask_prod": 8,
+     "mask_cons": 16,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 320,
+     "pp_p99_ns": 400,
+     "pp_mism": 0,
+     "pipe_mb_s": 10660.2,
+     "pipe_p50_ns": 270,
+     "pipe_p99_ns": 5310,
+     "pipe_mism": 0,
+     "mask_prod": 8,
+     "mask_cons": 16,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 430,
+     "pp_mism": 0,
+     "pipe_mb_s": 11035.1,
+     "pipe_p50_ns": 280,
+     "pipe_p99_ns": 1690,
+     "pipe_mism": 0,
+     "mask_prod": 8,
+     "mask_cons": 16,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 400,
+     "pp_mism": 0,
+     "pipe_mb_s": 11107.9,
+     "pipe_p50_ns": 280,
+     "pipe_p99_ns": 2570,
+     "pipe_mism": 0,
+     "mask_prod": 8,
+     "mask_cons": 16,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    }
+   ]
+  },
+  "farkli-ccx-a": {
+   "cfg": {
+    "name": "farkli-ccx-a",
+    "class": "cross",
+    "mode": "pair",
+    "args": [
+     "0",
+     "3"
+    ],
+    "cpus": [
+     0,
+     3
+    ]
+   },
+   "runs": [
+    {
+     "mode": "pair",
+     "pp_p50_ns": 670,
+     "pp_p99_ns": 950,
+     "pp_mism": 0,
+     "pipe_mb_s": 3617.1,
+     "pipe_p50_ns": 530,
+     "pipe_p99_ns": 840,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 8,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 740,
+     "pp_p99_ns": 1020,
+     "pp_mism": 0,
+     "pipe_mb_s": 3682.8,
+     "pipe_p50_ns": 620,
+     "pipe_p99_ns": 1240,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 8,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 740,
+     "pp_p99_ns": 1000,
+     "pp_mism": 0,
+     "pipe_mb_s": 3701.9,
+     "pipe_p50_ns": 620,
+     "pipe_p99_ns": 1790,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 8,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 750,
+     "pp_p99_ns": 1040,
+     "pp_mism": 0,
+     "pipe_mb_s": 3626.7,
+     "pipe_p50_ns": 620,
+     "pipe_p99_ns": 1010,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 8,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 750,
+     "pp_p99_ns": 1060,
+     "pp_mism": 0,
+     "pipe_mb_s": 3695.9,
+     "pipe_p50_ns": 620,
+     "pipe_p99_ns": 870,
+     "pipe_mism": 0,
+     "mask_prod": 1,
+     "mask_cons": 8,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    }
+   ]
+  },
+  "farkli-ccx-b": {
+   "cfg": {
+    "name": "farkli-ccx-b",
+    "class": "cross",
+    "mode": "pair",
+    "args": [
+     "8",
+     "11"
+    ],
+    "cpus": [
+     8,
+     11
+    ]
+   },
+   "runs": [
+    {
+     "mode": "pair",
+     "pp_p50_ns": 740,
+     "pp_p99_ns": 1010,
+     "pp_mism": 0,
+     "pipe_mb_s": 3650.6,
+     "pipe_p50_ns": 630,
+     "pipe_p99_ns": 8120,
+     "pipe_mism": 0,
+     "mask_prod": 256,
+     "mask_cons": 2048,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 750,
+     "pp_p99_ns": 1010,
+     "pp_mism": 0,
+     "pipe_mb_s": 3625.2,
+     "pipe_p50_ns": 620,
+     "pipe_p99_ns": 2630,
+     "pipe_mism": 0,
+     "mask_prod": 256,
+     "mask_cons": 2048,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 740,
+     "pp_p99_ns": 1000,
+     "pp_mism": 0,
+     "pipe_mb_s": 3663.4,
+     "pipe_p50_ns": 620,
+     "pipe_p99_ns": 1570,
+     "pipe_mism": 0,
+     "mask_prod": 256,
+     "mask_cons": 2048,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 750,
+     "pp_p99_ns": 1080,
+     "pp_mism": 0,
+     "pipe_mb_s": 3438.6,
+     "pipe_p50_ns": 640,
+     "pipe_p99_ns": 12210,
+     "pipe_mism": 0,
+     "mask_prod": 256,
+     "mask_cons": 2048,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "pair",
+     "pp_p50_ns": 780,
+     "pp_p99_ns": 1140,
+     "pp_mism": 0,
+     "pipe_mb_s": 3368.5,
+     "pipe_p50_ns": 640,
+     "pipe_p99_ns": 8400,
+     "pipe_mism": 0,
+     "mask_prod": 256,
+     "mask_cons": 2048,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    }
+   ]
+  },
+  "serbest-os": {
+   "cfg": {
+    "name": "serbest-os",
+    "class": "free",
+    "mode": "free",
+    "args": [],
+    "cpus": null
+   },
+   "runs": [
+    {
+     "mode": "free",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 860,
+     "pp_mism": 0,
+     "pipe_mb_s": 8978.1,
+     "pipe_p50_ns": 290,
+     "pipe_p99_ns": 11400,
+     "pipe_mism": 0,
+     "mask_prod": 3341,
+     "mask_cons": 1026,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "free",
+     "pp_p50_ns": 320,
+     "pp_p99_ns": 780,
+     "pp_mism": 0,
+     "pipe_mb_s": 7131.3,
+     "pipe_p50_ns": 320,
+     "pipe_p99_ns": 22660,
+     "pipe_mism": 0,
+     "mask_prod": 281,
+     "mask_cons": 1147,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "free",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 720,
+     "pp_mism": 0,
+     "pipe_mb_s": 8752.0,
+     "pipe_p50_ns": 290,
+     "pipe_p99_ns": 14130,
+     "pipe_mism": 0,
+     "mask_prod": 256,
+     "mask_cons": 3098,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "free",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 880,
+     "pp_mism": 0,
+     "pipe_mb_s": 8297.5,
+     "pipe_p50_ns": 290,
+     "pipe_p99_ns": 12030,
+     "pipe_mism": 0,
+     "mask_prod": 260,
+     "mask_cons": 2219,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    },
+    {
+     "mode": "free",
+     "pp_p50_ns": 330,
+     "pp_p99_ns": 920,
+     "pp_mism": 0,
+     "pipe_mb_s": 11254.8,
+     "pipe_p50_ns": 280,
+     "pipe_p99_ns": 9220,
+     "pipe_mism": 0,
+     "mask_prod": 4,
+     "mask_cons": 35,
+     "n_pp": 100000,
+     "n_pipe": 200000
+    }
+   ]
+  }
+ }
+}
