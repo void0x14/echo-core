@@ -1,0 +1,1962 @@
+{
+ "static": [
+  {
+   "cond": "static",
+   "seed": 1,
+   "faz_s": 5,
+   "pencere": 8906,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 7312.6,
+     "p99_us_med": 10.8,
+     "pencere": 3006,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      3006
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 5743.1,
+     "p99_us_med": 11.7,
+     "pencere": 2299,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2299
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 4332.1,
+     "p99_us_med": 12.1,
+     "pencere": 1810,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      1810
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 4172.6,
+     "p99_us_med": 10.6,
+     "pencere": 1791,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      1791
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 5370.2,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "static",
+   "seed": 2,
+   "faz_s": 5,
+   "pencere": 9367,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6427.6,
+     "p99_us_med": 11.3,
+     "pencere": 2612,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2612
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 5547.0,
+     "p99_us_med": 10.8,
+     "pencere": 2328,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2328
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 5093.9,
+     "p99_us_med": 10.5,
+     "pencere": 2268,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2268
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 5064.7,
+     "p99_us_med": 9.0,
+     "pencere": 2159,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2159
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 5517.9,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "static",
+   "seed": 3,
+   "faz_s": 5,
+   "pencere": 9103,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6399.9,
+     "p99_us_med": 10.6,
+     "pencere": 2463,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2463
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 5393.9,
+     "p99_us_med": 11.1,
+     "pencere": 2301,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2301
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 4966.7,
+     "p99_us_med": 10.2,
+     "pencere": 2135,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2135
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 5099.3,
+     "p99_us_med": 10.7,
+     "pencere": 2204,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2204
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 5439.4,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "static",
+   "seed": 4,
+   "faz_s": 5,
+   "pencere": 8730,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6716.8,
+     "p99_us_med": 10.2,
+     "pencere": 2806,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2806
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 4924.9,
+     "p99_us_med": 11.5,
+     "pencere": 2153,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2153
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 4963.1,
+     "p99_us_med": 10.4,
+     "pencere": 2131,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2131
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 3579.6,
+     "p99_us_med": 13.1,
+     "pencere": 1640,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      1640
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 5010.2,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "static",
+   "seed": 5,
+   "faz_s": 5,
+   "pencere": 7610,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6707.9,
+     "p99_us_med": 10.0,
+     "pencere": 2599,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2599
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 5647.3,
+     "p99_us_med": 10.4,
+     "pencere": 2255,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      2255
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2770.0,
+     "p99_us_med": 11.3,
+     "pencere": 1236,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      1236
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 3540.7,
+     "p99_us_med": 11.3,
+     "pencere": 1520,
+     "kesif": 0,
+     "yanlis": 0,
+     "k": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      1520
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 4578.1,
+   "toplam_yanlis": 0
+  }
+ ],
+ "explore": [
+  {
+   "cond": "explore",
+   "seed": 1,
+   "faz_s": 5,
+   "pencere": 4975,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 3205.4,
+     "p99_us_med": 9.8,
+     "pencere": 1514,
+     "kesif": 1514,
+     "yanlis": 0,
+     "k": [
+      253,
+      253,
+      252,
+      252,
+      252,
+      252
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2655.5,
+     "p99_us_med": 9.8,
+     "pencere": 1263,
+     "kesif": 1263,
+     "yanlis": 0,
+     "k": [
+      210,
+      210,
+      211,
+      211,
+      211,
+      210
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2346.2,
+     "p99_us_med": 3.6,
+     "pencere": 1190,
+     "kesif": 1190,
+     "yanlis": 0,
+     "k": [
+      199,
+      198,
+      198,
+      198,
+      198,
+      199
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 1935.6,
+     "p99_us_med": 3.4,
+     "pencere": 1008,
+     "kesif": 1008,
+     "yanlis": 0,
+     "k": [
+      168,
+      168,
+      168,
+      168,
+      168,
+      168
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 2517.8,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "explore",
+   "seed": 2,
+   "faz_s": 5,
+   "pencere": 5297,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 3617.4,
+     "p99_us_med": 3.6,
+     "pencere": 1685,
+     "kesif": 1685,
+     "yanlis": 0,
+     "k": [
+      281,
+      281,
+      281,
+      281,
+      281,
+      280
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2577.3,
+     "p99_us_med": 3.7,
+     "pencere": 1246,
+     "kesif": 1246,
+     "yanlis": 0,
+     "k": [
+      208,
+      208,
+      208,
+      207,
+      207,
+      208
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2533.4,
+     "p99_us_med": 3.3,
+     "pencere": 1283,
+     "kesif": 1283,
+     "yanlis": 0,
+     "k": [
+      214,
+      214,
+      213,
+      214,
+      214,
+      214
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2063.8,
+     "p99_us_med": 3.3,
+     "pencere": 1083,
+     "kesif": 1083,
+     "yanlis": 0,
+     "k": [
+      180,
+      180,
+      181,
+      181,
+      181,
+      180
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 2674.7,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "explore",
+   "seed": 3,
+   "faz_s": 5,
+   "pencere": 5379,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 4032.1,
+     "p99_us_med": 3.2,
+     "pencere": 1893,
+     "kesif": 1893,
+     "yanlis": 0,
+     "k": [
+      316,
+      316,
+      316,
+      315,
+      315,
+      315
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2550.3,
+     "p99_us_med": 3.7,
+     "pencere": 1260,
+     "kesif": 1260,
+     "yanlis": 0,
+     "k": [
+      210,
+      210,
+      210,
+      210,
+      210,
+      210
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2391.8,
+     "p99_us_med": 3.6,
+     "pencere": 1210,
+     "kesif": 1210,
+     "yanlis": 0,
+     "k": [
+      202,
+      201,
+      201,
+      202,
+      202,
+      202
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 1919.9,
+     "p99_us_med": 3.4,
+     "pencere": 1016,
+     "kesif": 1016,
+     "yanlis": 0,
+     "k": [
+      169,
+      170,
+      170,
+      169,
+      169,
+      169
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 2691.3,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "explore",
+   "seed": 4,
+   "faz_s": 5,
+   "pencere": 4946,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 3390.3,
+     "p99_us_med": 3.7,
+     "pencere": 1569,
+     "kesif": 1569,
+     "yanlis": 0,
+     "k": [
+      262,
+      262,
+      262,
+      261,
+      261,
+      261
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2582.7,
+     "p99_us_med": 3.4,
+     "pencere": 1264,
+     "kesif": 1264,
+     "yanlis": 0,
+     "k": [
+      211,
+      210,
+      210,
+      211,
+      211,
+      211
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2512.0,
+     "p99_us_med": 3.5,
+     "pencere": 1220,
+     "kesif": 1220,
+     "yanlis": 0,
+     "k": [
+      203,
+      204,
+      204,
+      203,
+      203,
+      203
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 1780.3,
+     "p99_us_med": 3.7,
+     "pencere": 893,
+     "kesif": 893,
+     "yanlis": 0,
+     "k": [
+      149,
+      149,
+      148,
+      149,
+      149,
+      149
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 2550.2,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "explore",
+   "seed": 5,
+   "faz_s": 5,
+   "pencere": 5410,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 3907.7,
+     "p99_us_med": 3.2,
+     "pencere": 1802,
+     "kesif": 1802,
+     "yanlis": 0,
+     "k": [
+      301,
+      301,
+      300,
+      300,
+      300,
+      300
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2567.4,
+     "p99_us_med": 3.3,
+     "pencere": 1273,
+     "kesif": 1273,
+     "yanlis": 0,
+     "k": [
+      212,
+      212,
+      213,
+      212,
+      212,
+      212
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2610.3,
+     "p99_us_med": 3.4,
+     "pencere": 1294,
+     "kesif": 1294,
+     "yanlis": 0,
+     "k": [
+      216,
+      215,
+      215,
+      216,
+      216,
+      216
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2094.5,
+     "p99_us_med": 3.4,
+     "pencere": 1041,
+     "kesif": 1041,
+     "yanlis": 0,
+     "k": [
+      173,
+      174,
+      174,
+      174,
+      173,
+      173
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 2774.7,
+   "toplam_yanlis": 0
+  }
+ ],
+ "fixed": [
+  {
+   "cond": "fixed",
+   "seed": 1,
+   "faz_s": 5,
+   "pencere": 6590,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6345.0,
+     "p99_us_med": 3.6,
+     "pencere": 2624,
+     "kesif": 302,
+     "yanlis": 0,
+     "k": [
+      54,
+      51,
+      54,
+      43,
+      55,
+      2367
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2967.2,
+     "p99_us_med": 4.0,
+     "pencere": 1384,
+     "kesif": 168,
+     "yanlis": 0,
+     "k": [
+      26,
+      24,
+      29,
+      36,
+      29,
+      1240
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2701.6,
+     "p99_us_med": 3.6,
+     "pencere": 1329,
+     "kesif": 167,
+     "yanlis": 0,
+     "k": [
+      20,
+      29,
+      31,
+      28,
+      24,
+      1197
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2450.5,
+     "p99_us_med": 3.4,
+     "pencere": 1253,
+     "kesif": 161,
+     "yanlis": 0,
+     "k": [
+      23,
+      18,
+      26,
+      25,
+      38,
+      1123
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3499.3,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "fixed",
+   "seed": 2,
+   "faz_s": 5,
+   "pencere": 6809,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6382.8,
+     "p99_us_med": 3.5,
+     "pencere": 2694,
+     "kesif": 318,
+     "yanlis": 0,
+     "k": [
+      61,
+      62,
+      56,
+      51,
+      45,
+      2419
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 4009.6,
+     "p99_us_med": 4.1,
+     "pencere": 1728,
+     "kesif": 207,
+     "yanlis": 0,
+     "k": [
+      30,
+      34,
+      40,
+      28,
+      34,
+      1562
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2705.2,
+     "p99_us_med": 4.7,
+     "pencere": 1239,
+     "kesif": 156,
+     "yanlis": 0,
+     "k": [
+      22,
+      32,
+      31,
+      23,
+      25,
+      1106
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2387.7,
+     "p99_us_med": 4.4,
+     "pencere": 1148,
+     "kesif": 148,
+     "yanlis": 0,
+     "k": [
+      27,
+      21,
+      31,
+      24,
+      24,
+      1021
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3800.0,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "fixed",
+   "seed": 3,
+   "faz_s": 5,
+   "pencere": 6961,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 5756.2,
+     "p99_us_med": 3.8,
+     "pencere": 2385,
+     "kesif": 342,
+     "yanlis": 0,
+     "k": [
+      57,
+      64,
+      60,
+      48,
+      66,
+      2090
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 3762.4,
+     "p99_us_med": 3.7,
+     "pencere": 1644,
+     "kesif": 219,
+     "yanlis": 0,
+     "k": [
+      35,
+      33,
+      37,
+      36,
+      42,
+      1461
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 3488.1,
+     "p99_us_med": 3.9,
+     "pencere": 1531,
+     "kesif": 176,
+     "yanlis": 0,
+     "k": [
+      25,
+      38,
+      29,
+      23,
+      36,
+      1380
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2969.1,
+     "p99_us_med": 3.9,
+     "pencere": 1401,
+     "kesif": 169,
+     "yanlis": 0,
+     "k": [
+      32,
+      27,
+      30,
+      30,
+      24,
+      1258
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3950.4,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "fixed",
+   "seed": 4,
+   "faz_s": 5,
+   "pencere": 7080,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 5772.9,
+     "p99_us_med": 3.8,
+     "pencere": 2482,
+     "kesif": 283,
+     "yanlis": 0,
+     "k": [
+      35,
+      54,
+      45,
+      50,
+      40,
+      2258
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 3790.3,
+     "p99_us_med": 3.8,
+     "pencere": 1786,
+     "kesif": 200,
+     "yanlis": 0,
+     "k": [
+      35,
+      38,
+      28,
+      32,
+      36,
+      1617
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 3090.4,
+     "p99_us_med": 3.7,
+     "pencere": 1521,
+     "kesif": 189,
+     "yanlis": 0,
+     "k": [
+      28,
+      29,
+      24,
+      35,
+      32,
+      1373
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2594.7,
+     "p99_us_med": 3.7,
+     "pencere": 1291,
+     "kesif": 153,
+     "yanlis": 0,
+     "k": [
+      29,
+      28,
+      30,
+      22,
+      26,
+      1156
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3744.3,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "fixed",
+   "seed": 5,
+   "faz_s": 5,
+   "pencere": 6342,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 5218.7,
+     "p99_us_med": 4.1,
+     "pencere": 2190,
+     "kesif": 287,
+     "yanlis": 0,
+     "k": [
+      46,
+      59,
+      49,
+      35,
+      55,
+      1946
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 3231.2,
+     "p99_us_med": 3.9,
+     "pencere": 1404,
+     "kesif": 177,
+     "yanlis": 0,
+     "k": [
+      26,
+      30,
+      33,
+      27,
+      27,
+      1261
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2973.7,
+     "p99_us_med": 3.7,
+     "pencere": 1397,
+     "kesif": 154,
+     "yanlis": 0,
+     "k": [
+      23,
+      26,
+      27,
+      22,
+      31,
+      1268
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2781.1,
+     "p99_us_med": 3.7,
+     "pencere": 1351,
+     "kesif": 170,
+     "yanlis": 0,
+     "k": [
+      25,
+      28,
+      31,
+      35,
+      29,
+      1203
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3504.4,
+   "toplam_yanlis": 0
+  }
+ ],
+ "adaptive": [
+  {
+   "cond": "adaptive",
+   "seed": 1,
+   "faz_s": 5,
+   "pencere": 6640,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6463.2,
+     "p99_us_med": 3.7,
+     "pencere": 2686,
+     "kesif": 118,
+     "yanlis": 0,
+     "k": [
+      22,
+      16,
+      22,
+      31,
+      86,
+      2509
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 3502.9,
+     "p99_us_med": 3.7,
+     "pencere": 1544,
+     "kesif": 109,
+     "yanlis": 0,
+     "k": [
+      18,
+      47,
+      34,
+      93,
+      128,
+      1224
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2759.2,
+     "p99_us_med": 3.7,
+     "pencere": 1315,
+     "kesif": 82,
+     "yanlis": 0,
+     "k": [
+      12,
+      68,
+      57,
+      326,
+      20,
+      832
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2265.7,
+     "p99_us_med": 3.9,
+     "pencere": 1095,
+     "kesif": 81,
+     "yanlis": 0,
+     "k": [
+      13,
+      10,
+      69,
+      44,
+      172,
+      787
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3655.9,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "adaptive",
+   "seed": 2,
+   "faz_s": 5,
+   "pencere": 6796,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6091.8,
+     "p99_us_med": 3.7,
+     "pencere": 2513,
+     "kesif": 128,
+     "yanlis": 0,
+     "k": [
+      24,
+      26,
+      23,
+      38,
+      986,
+      1416
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 3274.5,
+     "p99_us_med": 3.6,
+     "pencere": 1570,
+     "kesif": 104,
+     "yanlis": 0,
+     "k": [
+      16,
+      29,
+      43,
+      61,
+      204,
+      1217
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2959.7,
+     "p99_us_med": 3.5,
+     "pencere": 1422,
+     "kesif": 69,
+     "yanlis": 0,
+     "k": [
+      10,
+      67,
+      75,
+      30,
+      12,
+      1228
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2595.1,
+     "p99_us_med": 3.4,
+     "pencere": 1291,
+     "kesif": 66,
+     "yanlis": 0,
+     "k": [
+      15,
+      13,
+      17,
+      13,
+      669,
+      564
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3634.4,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "adaptive",
+   "seed": 3,
+   "faz_s": 5,
+   "pencere": 6900,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6253.5,
+     "p99_us_med": 3.7,
+     "pencere": 2647,
+     "kesif": 137,
+     "yanlis": 0,
+     "k": [
+      22,
+      28,
+      22,
+      46,
+      775,
+      1754
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 3512.9,
+     "p99_us_med": 3.5,
+     "pencere": 1565,
+     "kesif": 122,
+     "yanlis": 0,
+     "k": [
+      26,
+      39,
+      58,
+      111,
+      110,
+      1221
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2945.4,
+     "p99_us_med": 3.4,
+     "pencere": 1387,
+     "kesif": 62,
+     "yanlis": 0,
+     "k": [
+      12,
+      145,
+      459,
+      137,
+      300,
+      334
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2670.9,
+     "p99_us_med": 3.6,
+     "pencere": 1301,
+     "kesif": 69,
+     "yanlis": 0,
+     "k": [
+      12,
+      21,
+      17,
+      433,
+      210,
+      608
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3777.1,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "adaptive",
+   "seed": 4,
+   "faz_s": 5,
+   "pencere": 6644,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 5750.0,
+     "p99_us_med": 3.9,
+     "pencere": 2488,
+     "kesif": 112,
+     "yanlis": 0,
+     "k": [
+      15,
+      22,
+      16,
+      110,
+      390,
+      1935
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 3065.8,
+     "p99_us_med": 3.9,
+     "pencere": 1462,
+     "kesif": 95,
+     "yanlis": 0,
+     "k": [
+      15,
+      19,
+      78,
+      80,
+      236,
+      1034
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2702.6,
+     "p99_us_med": 3.6,
+     "pencere": 1338,
+     "kesif": 49,
+     "yanlis": 0,
+     "k": [
+      10,
+      5,
+      393,
+      502,
+      351,
+      77
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2714.6,
+     "p99_us_med": 3.7,
+     "pencere": 1356,
+     "kesif": 56,
+     "yanlis": 0,
+     "k": [
+      6,
+      16,
+      11,
+      30,
+      194,
+      1099
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3489.2,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "adaptive",
+   "seed": 5,
+   "faz_s": 5,
+   "pencere": 6591,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6298.0,
+     "p99_us_med": 3.8,
+     "pencere": 2479,
+     "kesif": 93,
+     "yanlis": 0,
+     "k": [
+      14,
+      21,
+      21,
+      10,
+      138,
+      2275
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 3374.9,
+     "p99_us_med": 3.5,
+     "pencere": 1583,
+     "kesif": 73,
+     "yanlis": 0,
+     "k": [
+      11,
+      27,
+      24,
+      18,
+      139,
+      1364
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2767.0,
+     "p99_us_med": 3.5,
+     "pencere": 1360,
+     "kesif": 33,
+     "yanlis": 0,
+     "k": [
+      2,
+      13,
+      5,
+      228,
+      767,
+      345
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2418.4,
+     "p99_us_med": 3.6,
+     "pencere": 1169,
+     "kesif": 42,
+     "yanlis": 0,
+     "k": [
+      7,
+      8,
+      12,
+      246,
+      153,
+      743
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3586.8,
+   "toplam_yanlis": 0
+  }
+ ],
+ "adaptive1": [
+  {
+   "cond": "adaptive1",
+   "seed": 1,
+   "faz_s": 5,
+   "pencere": 6186,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 5129.3,
+     "p99_us_med": 3.7,
+     "pencere": 2261,
+     "kesif": 467,
+     "yanlis": 0,
+     "k": [
+      87,
+      91,
+      89,
+      114,
+      794,
+      1086
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2999.7,
+     "p99_us_med": 3.7,
+     "pencere": 1448,
+     "kesif": 491,
+     "yanlis": 0,
+     "k": [
+      84,
+      390,
+      133,
+      110,
+      242,
+      489
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2483.5,
+     "p99_us_med": 3.7,
+     "pencere": 1243,
+     "kesif": 393,
+     "yanlis": 0,
+     "k": [
+      65,
+      213,
+      164,
+      164,
+      179,
+      458
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2419.2,
+     "p99_us_med": 3.5,
+     "pencere": 1234,
+     "kesif": 270,
+     "yanlis": 0,
+     "k": [
+      39,
+      40,
+      60,
+      72,
+      163,
+      860
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3198.4,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "adaptive1",
+   "seed": 2,
+   "faz_s": 5,
+   "pencere": 6294,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 5906.7,
+     "p99_us_med": 3.6,
+     "pencere": 2510,
+     "kesif": 394,
+     "yanlis": 0,
+     "k": [
+      77,
+      75,
+      72,
+      63,
+      433,
+      1790
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2571.7,
+     "p99_us_med": 3.8,
+     "pencere": 1218,
+     "kesif": 534,
+     "yanlis": 0,
+     "k": [
+      96,
+      139,
+      137,
+      181,
+      260,
+      405
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2920.3,
+     "p99_us_med": 3.5,
+     "pencere": 1346,
+     "kesif": 413,
+     "yanlis": 0,
+     "k": [
+      70,
+      122,
+      124,
+      241,
+      293,
+      496
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2414.9,
+     "p99_us_med": 3.4,
+     "pencere": 1220,
+     "kesif": 218,
+     "yanlis": 0,
+     "k": [
+      38,
+      40,
+      50,
+      40,
+      298,
+      754
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3375.4,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "adaptive1",
+   "seed": 3,
+   "faz_s": 5,
+   "pencere": 6486,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 6267.1,
+     "p99_us_med": 3.5,
+     "pencere": 2659,
+     "kesif": 386,
+     "yanlis": 0,
+     "k": [
+      71,
+      74,
+      64,
+      58,
+      480,
+      1912
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2738.3,
+     "p99_us_med": 3.7,
+     "pencere": 1353,
+     "kesif": 626,
+     "yanlis": 0,
+     "k": [
+      120,
+      130,
+      139,
+      149,
+      344,
+      471
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2535.4,
+     "p99_us_med": 3.8,
+     "pencere": 1243,
+     "kesif": 474,
+     "yanlis": 0,
+     "k": [
+      85,
+      155,
+      195,
+      188,
+      254,
+      366
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2452.4,
+     "p99_us_med": 3.7,
+     "pencere": 1231,
+     "kesif": 299,
+     "yanlis": 0,
+     "k": [
+      58,
+      51,
+      62,
+      109,
+      315,
+      636
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3394.7,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "adaptive1",
+   "seed": 4,
+   "faz_s": 5,
+   "pencere": 6157,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 4919.5,
+     "p99_us_med": 3.9,
+     "pencere": 2137,
+     "kesif": 365,
+     "yanlis": 0,
+     "k": [
+      57,
+      75,
+      222,
+      65,
+      366,
+      1352
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 2947.3,
+     "p99_us_med": 3.4,
+     "pencere": 1452,
+     "kesif": 474,
+     "yanlis": 0,
+     "k": [
+      77,
+      250,
+      135,
+      117,
+      261,
+      612
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2839.0,
+     "p99_us_med": 3.8,
+     "pencere": 1386,
+     "kesif": 547,
+     "yanlis": 0,
+     "k": [
+      109,
+      127,
+      222,
+      240,
+      398,
+      290
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2390.7,
+     "p99_us_med": 3.9,
+     "pencere": 1182,
+     "kesif": 436,
+     "yanlis": 0,
+     "k": [
+      76,
+      80,
+      135,
+      100,
+      300,
+      491
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3224.1,
+   "toplam_yanlis": 0
+  },
+  {
+   "cond": "adaptive1",
+   "seed": 5,
+   "faz_s": 5,
+   "pencere": 6525,
+   "fazlar": [
+    {
+     "faz": 0,
+     "yuk": 0,
+     "thr_mb_s": 5039.9,
+     "p99_us_med": 3.9,
+     "pencere": 2167,
+     "kesif": 562,
+     "yanlis": 0,
+     "k": [
+      96,
+      110,
+      100,
+      177,
+      183,
+      1501
+     ]
+    },
+    {
+     "faz": 1,
+     "yuk": 2,
+     "thr_mb_s": 3420.3,
+     "p99_us_med": 3.8,
+     "pencere": 1618,
+     "kesif": 617,
+     "yanlis": 0,
+     "k": [
+      115,
+      164,
+      146,
+      162,
+      430,
+      601
+     ]
+    },
+    {
+     "faz": 2,
+     "yuk": 4,
+     "thr_mb_s": 2817.9,
+     "p99_us_med": 3.6,
+     "pencere": 1384,
+     "kesif": 577,
+     "yanlis": 0,
+     "k": [
+      104,
+      175,
+      249,
+      225,
+      224,
+      407
+     ]
+    },
+    {
+     "faz": 3,
+     "yuk": 6,
+     "thr_mb_s": 2764.4,
+     "p99_us_med": 3.9,
+     "pencere": 1356,
+     "kesif": 498,
+     "yanlis": 0,
+     "k": [
+      95,
+      93,
+      107,
+      172,
+      427,
+      462
+     ]
+    }
+   ],
+   "toplam_thr_mb_s": 3462.1,
+   "toplam_yanlis": 0
+  }
+ ]
+}
