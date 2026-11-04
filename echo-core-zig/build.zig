@@ -48,6 +48,18 @@ pub fn build(b: *std.Build) void {
         .root_module = dump_model_mod,
     }));
 
+    // Deney D: keşif/üretim ayrımı, ödül-güdümlü sezai denetleyici
+    const deney_d_mod = b.createModule(.{
+        .root_source_file = b.path("src/deney_d_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    deney_d_mod.addImport("gguf", gguf_mod);
+    b.installArtifact(b.addExecutable(.{
+        .name = "deney-d",
+        .root_module = deney_d_mod,
+    }));
+
     // Analyze GGUF tool - standalone, needs Zig 0.17 API refactor
     // Temporarily disabled until old std.fs API calls are updated
     // const analyze_mod = b.createModule(.{
