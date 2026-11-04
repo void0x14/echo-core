@@ -48,6 +48,17 @@ pub fn build(b: *std.Build) void {
         .root_module = dump_model_mod,
     }));
 
+    // Deney B: iş parçacığı yerleşimi ve ring gecikmesi
+    const deney_b_mod = b.createModule(.{
+        .root_source_file = b.path("src/deney_b_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(b.addExecutable(.{
+        .name = "deney-b",
+        .root_module = deney_b_mod,
+    }));
+
     // Analyze GGUF tool - standalone, needs Zig 0.17 API refactor
     // Temporarily disabled until old std.fs API calls are updated
     // const analyze_mod = b.createModule(.{
