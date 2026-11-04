@@ -48,6 +48,32 @@ pub fn build(b: *std.Build) void {
         .root_module = dump_model_mod,
     }));
 
+    // Deney C (blok düzeyi): istasyonsuz tek geçiş vs istasyonlu geçiş
+    const deney_c_mod = b.createModule(.{
+        .root_source_file = b.path("src/deney_c_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    deney_c_mod.addImport("gguf", gguf_mod);
+    b.installArtifact(b.addExecutable(.{
+        .name = "deney-c",
+        .root_module = deney_c_mod,
+    }));
+
+    // Deney C (uçtan uca): decode döngüsüne istasyon boru hattı
+    const deney_c_e2e_mod = b.createModule(.{
+        .root_source_file = b.path("src/deney_c_e2e_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    deney_c_e2e_mod.addImport("core_config", core_config_mod);
+    deney_c_e2e_mod.addImport("gguf", gguf_mod);
+    deney_c_e2e_mod.addImport("config", core_config_mod);
+    b.installArtifact(b.addExecutable(.{
+        .name = "deney-c-e2e",
+        .root_module = deney_c_e2e_mod,
+    }));
+
     // Analyze GGUF tool - standalone, needs Zig 0.17 API refactor
     // Temporarily disabled until old std.fs API calls are updated
     // const analyze_mod = b.createModule(.{
