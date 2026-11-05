@@ -187,7 +187,7 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     while (args_it.next()) |arg| try args.append(arg);
 
-    if (args.items.len > 1 and std.mem.eql(u8, args.items[1], "--llama-bench")) {
+    if (qwen35.supported and args.items.len > 1 and std.mem.eql(u8, args.items[1], "--llama-bench")) {
         return runLlamaBench(init, args.items);
     }
 

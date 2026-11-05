@@ -33,28 +33,30 @@ extern fn @"llvm.x86.sse2.pmadd.wd"(a: W8, b: W8) I4;
 extern fn @"llvm.x86.sse3.hadd.ps"(a: F4, b: F4) F4;
 
 // glibc libm: llama.cpp ile aynı fonksiyonlar. Zig compiler_rt aynı adları binary içinde
-// tanımlayıp extern'i gölgelediği için (farklı algoritma, farklı ulp) dlsym ile alınır.
+// tanımlayıp extern'i gölgelediği için (farklı algoritma, farklı ulp) dlopen ile alınır.
 const MathFn = *const fn (f32) callconv(.c) f32;
+extern "c" fn dlopen(path: [*:0]const u8, flags: c_int) ?*anyopaque;
 extern "c" fn dlsym(handle: ?*anyopaque, symbol: [*:0]const u8) ?*anyopaque;
-extern "c" fn powf(x: f32, y: f32) f32; // DT_NEEDED libm.so bunun sayesinde kalır
 var expf_fn: MathFn = undefined;
 var logf_fn: MathFn = undefined;
 var sinf_fn: MathFn = undefined;
 var cosf_fn: MathFn = undefined;
+var powf_fn: *const fn (f32, f32) callconv(.c) f32 = undefined;
 
 /// ggml_table_f32_f16 (sgemm.cpp unhalf): vpinsrw bağımlılığı olmadan yarım duyarlık çevirimi
 pub var fp16_table: [65536]f32 = undefined;
 
-pub fn initLibm() void {
+pub fn initLibm() !void {
     for (&fp16_table, 0..) |*t, i| {
         const h: f16 = @bitCast(@as(u16, @intCast(i)));
         t.* = @floatCast(h);
     }
-    std.mem.doNotOptimizeAway(powf(1.0, 1.0));
-    expf_fn = @ptrCast(dlsym(null, "expf").?);
-    logf_fn = @ptrCast(dlsym(null, "logf").?);
-    sinf_fn = @ptrCast(dlsym(null, "sinf").?);
-    cosf_fn = @ptrCast(dlsym(null, "cosf").?);
+    const libm = dlopen("libm.so.6", 2) orelse return error.LibmNotFound; // RTLD_NOW
+    expf_fn = @ptrCast(dlsym(libm, "expf") orelse return error.LibmNotFound);
+    logf_fn = @ptrCast(dlsym(libm, "logf") orelse return error.LibmNotFound);
+    sinf_fn = @ptrCast(dlsym(libm, "sinf") orelse return error.LibmNotFound);
+    cosf_fn = @ptrCast(dlsym(libm, "cosf") orelse return error.LibmNotFound);
+    powf_fn = @ptrCast(dlsym(libm, "powf") orelse return error.LibmNotFound);
 }
 pub inline fn expf(x: f32) f32 {
     return expf_fn(x);
@@ -68,8 +70,8 @@ pub inline fn sinf(x: f32) f32 {
 pub inline fn cosf(x: f32) f32 {
     return cosf_fn(x);
 }
-pub inline fn powfGlibc(x: f32, y: f32) f32 {
-    return powf(x, y);
+pub inline fn powf(x: f32, y: f32) f32 {
+    return powf_fn(x, y);
 }
 
 pub inline fn maddubs(a: B32, b: B32) W16 {

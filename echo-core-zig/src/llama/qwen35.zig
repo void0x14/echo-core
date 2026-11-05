@@ -93,7 +93,7 @@ pub const Model = struct {
     }
 
     pub fn load(path: []const u8, allocator: Alloc) !*Model {
-        avx.initLibm();
+        try avx.initLibm();
         var reader = try gguf.Reader.openWithAllocator(path, allocator);
         defer reader.deinit();
 
@@ -356,7 +356,7 @@ pub const Context = struct {
             .logits = try allocator.alloc(f32, m.n_vocab),
             .wdata = try allocator.alignedAlloc(u8, .@"64", n_ub * max_k * 2), // en büyük satır: F16
             .fdata = try buf(allocator, ops.flashScratchFloats(m.head_dim, m.n_head, n_threads) + n_threads * (m.d_state + 64)),
-            .theta_scale = avx.powfGlibc(m.freq_base, -2.0 / @as(f32, @floatFromInt(m.n_rot))),
+            .theta_scale = avx.powf(m.freq_base, -2.0 / @as(f32, @floatFromInt(m.n_rot))),
             .b_inp = try buf(allocator, n_ub * m.n_embd),
             .b_norm = try buf(allocator, n_ub * m.n_embd),
             .b_resid = try buf(allocator, n_ub * m.n_embd),
@@ -410,6 +410,7 @@ pub const Context = struct {
     /// llama_decode: yalnız son token için logit üretir (llama_batch_get_one).
     pub fn decode(self: *Context, tokens: []const u32) !void {
         if (self.head + tokens.len > self.n_ctx) return error.ContextFull;
+        for (tokens) |t| if (t >= self.model.n_vocab) return error.InvalidToken;
         var off: usize = 0;
         while (off < tokens.len) {
             const n = @min(tokens.len - off, self.n_ubatch);

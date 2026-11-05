@@ -250,7 +250,7 @@ test "simdGemm: naif çarpımla aynı" {
 }
 
 test "vExpf: -inf ve büyük negatif şeritler sıfıra gider, diğerleri expf ile uyumlu" {
-    avx.initLibm();
+    try avx.initLibm();
     const xs = [8]f32{ -std.math.inf(f32), 0.0, -1.0, 1.0, -200.0, -90.0, 5.0, -0.25 };
     const v = vExpf(xs);
     for (xs, 0..) |x, i| {

@@ -668,8 +668,8 @@ pub fn flashAttn(p: *const Params, a: *const FlashArgs) void {
                 const m_new = @max(m_final, m_chunk);
                 const scale_old = avx.expf(m_final - m_new);
                 const scale_new = avx.expf(m_chunk - m_new);
-                for (0..dv) |d| vkq_final[d] = vkq_final[d] * scale_old + partial[2 + d] * scale_new;
-                s_final = s_final * scale_old + s_chunk * scale_new;
+                for (0..dv) |d| vkq_final[d] = @mulAdd(f32, vkq_final[d], scale_old, partial[2 + d] * scale_new);
+                s_final = @mulAdd(f32, s_final, scale_old, s_chunk * scale_new);
                 m_final = m_new;
             }
             if (s_final != 0.0) vec.scaleF32(dv, vkq_final, 1.0 / s_final);
@@ -707,7 +707,7 @@ pub fn flashScratchFloats(dk: usize, h_q: usize, nth: usize) usize {
 }
 
 test "flashTiled, skaler flash yolu ile aynı sonucu verir" {
-    avx.initLibm();
+    try avx.initLibm();
     const alloc = std.testing.allocator;
     const Pool = @import("pool.zig").Pool;
     const pool = try Pool.init(alloc, 1);

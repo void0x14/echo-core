@@ -41,7 +41,8 @@ def echo(model, test):
 
 rows = []
 for name in a.models.split(","):
-    model = f"{MODELS}/{name}.gguf"
+    model = name if "/" in name else f"{MODELS}/{name}.gguf"
+    name = os.path.basename(name).removesuffix(".gguf")
     for test in a.tests.split(","):
         ls, es = [], []
         for r in range(a.rounds):
@@ -53,6 +54,7 @@ for name in a.models.split(","):
         rows.append(dict(model=name, test=test, llama=lm, echo=em, ratio=em / lm, llama_samples=ls, echo_samples=es))
         print(f"{name:26s} {test:6s} llama={lm:8.2f} echo={em:8.2f} oran={em / lm * 100:6.1f}%", flush=True)
 if a.out:
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     json.dump(dict(time=time.strftime("%Y-%m-%d %H:%M:%S"), threads=a.t, reps=a.reps, rows=rows), open(a.out, "w"), indent=1)
 worst = min(r["ratio"] for r in rows)
 print(f"en kötü oran: {worst * 100:.1f}%")

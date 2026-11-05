@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = true, // src/llama: glibc expf/logf/sinf/cosf/memcpy (llama.cpp ile aynı)
+        .link_libc = true, // src/llama: glibc expf/logf/sinf/cosf (llama.cpp ile aynı)
     });
     echo_core_module.addImport("core_config", core_config_mod);
     echo_core_module.addImport("gguf", gguf_mod);
