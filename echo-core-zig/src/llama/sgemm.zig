@@ -107,9 +107,11 @@ pub fn TinyBlas(comptime T: type) type {
     };
 }
 
-/// tinyBLAS_Q0_AVX::gemm4xN<2> iç döngüsü (GCC -O3 çıktısıyla aynı komut biçimleri ve aynı FP sırası).
-/// LLVM |a| değerlerini CSE edip 4 akümülatörü stack'e spill ediyordu; burada |a| her (i, j) için
-/// bellekten okunur, 8 akümülatör register'da kalır. Bir bloğun boyu 34 bayt: d (u16) + qs (32 bayt).
+/// tinyBLAS_Q0_AVX::gemm4xN<2> iç döngüsü: aynı aritmetik ve FP sırası, 16 register'a sığan plan.
+/// LLVM |a| değerlerini CSE edip akümülatörleri stack'e spill ediyordu. Burada 8 akümülatör
+/// (ymm8-15) register'da; i dış döngü olduğu için a ve |a| satır başına bir kez hesaplanır,
+/// b0, b1 ve delta çarpımları register'da kalır, 1 sabiti bellekten okunur.
+/// Bir bloğun boyu 34 bayt: d (u16) + qs (32 bayt).
 const gemm4x2_asm = blk: {
     var t: []const u8 =
         \\ vmovups 0x00(%[cv]), %%ymm8
@@ -120,7 +122,6 @@ const gemm4x2_asm = blk: {
         \\ vmovups 0xa0(%[cv]), %%ymm13
         \\ vmovups 0xc0(%[cv]), %%ymm14
         \\ vmovups 0xe0(%[cv]), %%ymm15
-        \\ vmovdqu (%[ones]), %%ymm7
         \\ .p2align 4
         \\ 1:
         \\ movzwl (%[a3],%[i]), %%eax
@@ -133,29 +134,35 @@ const gemm4x2_asm = blk: {
         \\ or %%rcx, %%rax
         \\ movzwl (%[a0],%[i]), %%ecx
         \\ or %%rcx, %%rax
-        \\ vmovq %%rax, %%xmm2
-        \\ vcvtph2ps %%xmm2, %%xmm2
+        \\ vmovq %%rax, %%xmm4
+        \\ vcvtph2ps %%xmm4, %%xmm4
+        \\ movzwl (%[b0],%[i]), %%eax
+        \\ vbroadcastss (%[tab],%%rax,4), %%xmm2
+        \\ movzwl (%[b1],%[i]), %%eax
+        \\ vbroadcastss (%[tab],%%rax,4), %%xmm3
+        \\ vmulps %%xmm4, %%xmm2, %%xmm2
+        \\ vmulps %%xmm4, %%xmm3, %%xmm3
+        \\ vperm2f128 $0, %%ymm2, %%ymm2, %%ymm2
+        \\ vperm2f128 $0, %%ymm3, %%ymm3, %%ymm3
+        \\ vmovdqu 2(%[b0],%[i]), %%ymm0
+        \\ vmovdqu 2(%[b1],%[i]), %%ymm1
         \\
     ;
     const imm = [4][]const u8{ "$0x00", "$0x55", "$0xaa", "$0xff" };
-    for (0..2) |j| {
-        const bn = if (j == 0) "b0" else "b1";
-        t = t ++ "movzwl (%[" ++ bn ++ "],%[i]), %%eax\n" ++
-            "vbroadcastss (%[tab],%%rax,4), %%xmm1\n" ++
-            "vmulps %%xmm2, %%xmm1, %%xmm1\n" ++
-            "vperm2f128 $0, %%ymm1, %%ymm1, %%ymm1\n" ++
-            "vmovdqu 2(%[" ++ bn ++ "],%[i]), %%ymm0\n";
-        for (0..4) |i| {
-            const an = "a" ++ [1]u8{'0' + i};
+    for (0..4) |i| {
+        const an = "a" ++ [1]u8{'0' + i};
+        t = t ++ "vmovdqu 2(%[" ++ an ++ "],%[i]), %%ymm4\n" ++
+            "vpabsb %%ymm4, %%ymm5\n";
+        for (0..2) |j| {
+            const bv = if (j == 0) "%%ymm0" else "%%ymm1";
+            const dv = if (j == 0) "%%ymm2" else "%%ymm3";
             const acc = "%%ymm" ++ std.fmt.comptimePrint("{d}", .{8 + j * 4 + i});
-            t = t ++ "vmovdqu 2(%[" ++ an ++ "],%[i]), %%ymm3\n" ++
-                "vpabsb %%ymm3, %%ymm4\n" ++
-                "vpsignb %%ymm3, %%ymm0, %%ymm3\n" ++
-                "vpmaddubsw %%ymm3, %%ymm4, %%ymm3\n" ++
-                "vpmaddwd %%ymm3, %%ymm7, %%ymm3\n" ++
-                "vcvtdq2ps %%ymm3, %%ymm3\n" ++
-                "vpermilps " ++ imm[i] ++ ", %%ymm1, %%ymm4\n" ++
-                "vfmadd231ps %%ymm3, %%ymm4, " ++ acc ++ "\n";
+            t = t ++ "vpsignb %%ymm4, " ++ bv ++ ", %%ymm6\n" ++
+                "vpmaddubsw %%ymm6, %%ymm5, %%ymm6\n" ++
+                "vpmaddwd (%[ones]), %%ymm6, %%ymm6\n" ++
+                "vcvtdq2ps %%ymm6, %%ymm6\n" ++
+                "vpermilps " ++ imm[i] ++ ", " ++ dv ++ ", %%ymm7\n" ++
+                "vfmadd231ps %%ymm6, %%ymm7, " ++ acc ++ "\n";
         }
     }
     t = t ++
@@ -316,7 +323,7 @@ pub const TinyBlasQ0 = struct {
                       [ones] "r" (&ones16),
                       [end] "r" (i_end),
                       [cv] "r" (&cv),
-                    : .{ .rax = true, .rcx = true, .ymm0 = true, .ymm1 = true, .ymm2 = true, .ymm3 = true, .ymm4 = true, .ymm7 = true, .ymm8 = true, .ymm9 = true, .ymm10 = true, .ymm11 = true, .ymm12 = true, .ymm13 = true, .ymm14 = true, .ymm15 = true, .memory = true, .cc = true });
+                    : .{ .rax = true, .rcx = true, .ymm0 = true, .ymm1 = true, .ymm2 = true, .ymm3 = true, .ymm4 = true, .ymm5 = true, .ymm6 = true, .ymm7 = true, .ymm8 = true, .ymm9 = true, .ymm10 = true, .ymm11 = true, .ymm12 = true, .ymm13 = true, .ymm14 = true, .ymm15 = true, .memory = true, .cc = true });
             } else for (0..self.k) |l| {
                 const da = delta4(a, self.lda, ii, l);
                 const a0 = &a[self.lda * (ii + 0) + l].qs;

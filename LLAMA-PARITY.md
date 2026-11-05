@@ -3,7 +3,7 @@
 Hedef: `BENCHMARK-CPU-GPU-2026-11-04.md`'deki CPU throughput'unu Zig motorunda 1:1 yakalamak, tercihen geçmek.
 Yöntem: llama.cpp b11146 (`7fe450e`) sıcak yolunu Zig'e satır satır kopyalamak.
 
-**Durum: hedef tuttu.** Aynı anda sırayla ölçümde 4 modelin 16 hücresinde echo-core llama.cpp'yi geçiyor; logit'ler llama.cpp ile sıfır farkla aynı. Sonuçlar en alttaki "Son durum" bölümünde.
+**Durum: hedef tuttu.** Belgedeki 12 CPU hücresinin tamamı son kodla geçildi, en kötü oran %104,2; logit'ler 4 modelde llama.cpp ile sıfır farkla aynı. Tablolar en alttaki "Son durum" bölümünde.
 
 ## Ölçüm ve doğrulama
 
@@ -11,6 +11,7 @@ Yöntem: llama.cpp b11146 (`7fe450e`) sıcak yolunu Zig'e satır satır kopyalam
 |---|---|
 | `zig-out/bin/echo-core-zig --llama-bench -m M -t 6 -r 5 -p 128,512 -n 32,128` | `llama-bench` ile aynı döngü: taze context, warmup, tekrar başına memory clear, rastgele token |
 | `tools/llama_parity.py` | iki motoru aynı testte sırayla koşar, oran tablosu üretir |
+| `tools/doc_parity.py` | belgedeki CPU hücrelerini okur, echo-core'u ölçüp belge değerine oranlar |
 | `tools/ref_logits.cpp` + `tools/compare_logits.py` | aynı token dizisinde llama.cpp ve echo-core logit'lerini karşılaştırır |
 | `zig test -OReleaseSafe -fllvm -lc src/llama/ops.zig` | tiled/skaler flash, `simdGemm`, `vExpf` birim testleri |
 
@@ -76,9 +77,40 @@ Kanıtlanan:
 - "Thread pinning varyansı düşürür": pinned 208–266, pinned'siz 260–267 tok/s. Eklenmedi.
 - "UD pp128/pp512 llama.cpp'nin gerisinde": %92,6 ve %97,6 tek turluk değerler arka plan yükündendi; aynı hücrelerin diğer turları %111–120.
 
+### 2026-11-05: belgeye karşı doğrulama ve Q8_0 kernel'i
+
+Kanıtlanan:
+- `gemm4x2_asm` yeniden planlandı (8 akümülatör ymm8–15; `|a|` ve `sign(b,a)` her satır/sütunda yeniden üretiliyor, spill yok). Tek thread Q8_0 pp128 yaklaşık 53'ten 56,5 tok/s'ye çıktı.
+- Son binary ile belgedeki 12 hücrenin hepsi geçildi (aşağıdaki birinci tablo).
+- Son binary ile `compare_logits.py`, 4 modelde `5,1,128,1,300,1`, `512,1,1`, `7,300,300,1,1` dizilerinde `SONUC: ESIT`, max|fark| = 0,00000. Birim testleri geçiyor.
+
+Çürütülen:
+- "Yük altında belge değerine ulaşılamaz": load 8,2 iken bile en kötü hücre %104,2. Önceki tek turda Q8_0 pp128 %92 kalmıştı, şimdi %108,4. Bu 16 puanın yaklaşık 6'sı kernel'den, kalanı turlar arasındaki yük farkından geliyor.
+
 ## Son durum
 
-Ortam: Ryzen 5 3600, 6 thread, tarayıcı açık (load average 7–11). Tek tur, 5 tekrar, medyan. Ham veri: `echo-core-zig/benchmarks/llama-parity-2026-11-05-son.json`.
+### Belgeye karşı (hedef ölçütü)
+
+Ortam: Ryzen 5 3600, 6 thread, load average 8,2. 3 tur, tur başına 5 tekrar, medyan. Ham veri: `echo-core-zig/benchmarks/doc-parity-2026-11-05.json`. Belge değerleri boşta ölçülmüş llama.cpp sayılarıdır.
+
+| Model | Test | Belge (llama.cpp) | echo-core | Oran |
+|---|---|---:|---:|---:|
+| Qwen3.5-0.8B-Q8_0 | pp128 | 263,39 | 285,56 | %108,4 |
+| | pp512 | 253,33 | 281,94 | %111,3 |
+| | tg32 | 33,28 | 39,09 | %117,5 |
+| | tg128 | 30,01 | 36,77 | %122,5 |
+| Qwen3.5-0.8B-UD-Q8_K_XL | pp128 | 237,12 | 253,81 | %107,0 |
+| | pp512 | 190,66 | 258,90 | %135,8 |
+| | tg32 | 24,59 | 25,61 | %104,2 |
+| | tg128 | 24,89 | 27,22 | %109,4 |
+| unc-0.8b-q5km | pp128 | 169,59 | 191,26 | %112,8 |
+| | pp512 | 161,86 | 193,04 | %119,3 |
+| | tg32 | 53,60 | 68,72 | %128,2 |
+| | tg128 | 55,42 | 66,90 | %120,7 |
+
+### Aynı anda sırayla (önceki kernel)
+
+Bu tablo `gemm4x2_asm` değişikliğinden önce alındı. Ortam: tarayıcı açık (load average 7–11). Tek tur, 5 tekrar, medyan. Ham veri: `echo-core-zig/benchmarks/llama-parity-2026-11-05-son.json`.
 
 | Model | Test | llama.cpp | echo-core | Oran |
 |---|---|---:|---:|---:|

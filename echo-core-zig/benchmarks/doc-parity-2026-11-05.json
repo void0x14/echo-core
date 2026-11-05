@@ -1,0 +1,156 @@
+{
+ "time": "2026-11-05 07:43:49",
+ "load": [
+  8.18408203125,
+  7.421875,
+  6.958984375
+ ],
+ "reps": 5,
+ "rounds": 3,
+ "rows": [
+  {
+   "model": "Qwen3.5-0.8B-Q8_0",
+   "test": "pp128",
+   "doc": 263.39,
+   "echo_median": 285.56,
+   "echo_best": 286.376,
+   "round_medians": [
+    285.236,
+    285.56,
+    286.376
+   ]
+  },
+  {
+   "model": "Qwen3.5-0.8B-Q8_0",
+   "test": "pp512",
+   "doc": 253.33,
+   "echo_median": 281.942,
+   "echo_best": 282.405,
+   "round_medians": [
+    281.942,
+    282.405,
+    280.397
+   ]
+  },
+  {
+   "model": "Qwen3.5-0.8B-Q8_0",
+   "test": "tg32",
+   "doc": 33.28,
+   "echo_median": 39.09,
+   "echo_best": 39.111,
+   "round_medians": [
+    39.09,
+    39.111,
+    36.068
+   ]
+  },
+  {
+   "model": "Qwen3.5-0.8B-Q8_0",
+   "test": "tg128",
+   "doc": 30.01,
+   "echo_median": 36.775,
+   "echo_best": 38.15,
+   "round_medians": [
+    35.528,
+    36.775,
+    38.15
+   ]
+  },
+  {
+   "model": "Qwen3.5-0.8B-UD-Q8_K_XL",
+   "test": "pp128",
+   "doc": 237.12,
+   "echo_median": 253.809,
+   "echo_best": 257.593,
+   "round_medians": [
+    253.809,
+    169.284,
+    257.593
+   ]
+  },
+  {
+   "model": "Qwen3.5-0.8B-UD-Q8_K_XL",
+   "test": "pp512",
+   "doc": 190.66,
+   "echo_median": 258.904,
+   "echo_best": 259.088,
+   "round_medians": [
+    258.904,
+    259.088,
+    240.386
+   ]
+  },
+  {
+   "model": "Qwen3.5-0.8B-UD-Q8_K_XL",
+   "test": "tg32",
+   "doc": 24.59,
+   "echo_median": 25.612,
+   "echo_best": 25.641,
+   "round_medians": [
+    25.612,
+    25.641,
+    24.017
+   ]
+  },
+  {
+   "model": "Qwen3.5-0.8B-UD-Q8_K_XL",
+   "test": "tg128",
+   "doc": 24.89,
+   "echo_median": 27.224,
+   "echo_best": 27.555,
+   "round_medians": [
+    26.089,
+    27.555,
+    27.224
+   ]
+  },
+  {
+   "model": "unc-0.8b-q5km",
+   "test": "pp128",
+   "doc": 169.59,
+   "echo_median": 191.262,
+   "echo_best": 192.437,
+   "round_medians": [
+    189.004,
+    192.437,
+    191.262
+   ]
+  },
+  {
+   "model": "unc-0.8b-q5km",
+   "test": "pp512",
+   "doc": 161.86,
+   "echo_median": 193.041,
+   "echo_best": 193.982,
+   "round_medians": [
+    193.982,
+    189.518,
+    193.041
+   ]
+  },
+  {
+   "model": "unc-0.8b-q5km",
+   "test": "tg32",
+   "doc": 53.6,
+   "echo_median": 68.725,
+   "echo_best": 70.128,
+   "round_medians": [
+    68.725,
+    70.128,
+    62.786
+   ]
+  },
+  {
+   "model": "unc-0.8b-q5km",
+   "test": "tg128",
+   "doc": 55.42,
+   "echo_median": 66.901,
+   "echo_best": 67.137,
+   "round_medians": [
+    61.54,
+    66.901,
+    67.137
+   ]
+  }
+ ]
+}
