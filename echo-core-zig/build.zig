@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true, // src/llama: glibc expf/logf/sinf/cosf/memcpy (llama.cpp ile aynı)
     });
     echo_core_module.addImport("core_config", core_config_mod);
     echo_core_module.addImport("gguf", gguf_mod);
@@ -32,6 +33,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "echo-core-zig",
         .root_module = echo_core_module,
+        .use_llvm = true, // src/llama: llvm.x86.* intrinsic extern'leri
     });
     b.installArtifact(exe);
 

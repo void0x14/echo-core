@@ -1,5 +1,6 @@
 const std = @import("std");
 const ports = @import("ports/inference.zig");
+const llama_bench = @import("llama/bench.zig");
 
 const ArrayList = std.array_list.Managed;
 
@@ -113,6 +114,66 @@ fn parseModelPath(args: []const []const u8) ?[]const u8 {
     return model_path;
 }
 
+fn parseUsizeList(allocator: std.mem.Allocator, text: []const u8) ![]usize {
+    var list: std.ArrayList(usize) = .empty;
+    errdefer list.deinit(allocator);
+    var it = std.mem.splitScalar(u8, text, ',');
+    while (it.next()) |part| try list.append(allocator, try std.fmt.parseInt(usize, part, 10));
+    return list.toOwnedSlice(allocator);
+}
+
+/// llama-bench ile aynı ölçüm: echo-core-zig --llama-bench -m M -t 6 -r 5 -p 128,512 -n 32,128
+fn runLlamaBench(init: std.process.Init, args: []const []const u8) !void {
+    var opt = llama_bench.Options{};
+    var model: ?[]const u8 = null;
+    var dump: ?[]const u8 = null;
+    var tokens_text: ?[]const u8 = null;
+    var steps_text: ?[]const u8 = null;
+    var n_ctx: usize = 1024;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--llama-bench")) continue;
+        i += 1;
+        if (i >= args.len) return error.InvalidArgs;
+        const v = args[i];
+        if (std.mem.eql(u8, a, "-m")) {
+            model = v;
+        } else if (std.mem.eql(u8, a, "-t")) {
+            opt.n_threads = try std.fmt.parseInt(u32, v, 10);
+        } else if (std.mem.eql(u8, a, "-r")) {
+            opt.reps = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "-p")) {
+            opt.prompts = try parseUsizeList(init.gpa, v);
+        } else if (std.mem.eql(u8, a, "-n")) {
+            opt.gens = try parseUsizeList(init.gpa, v);
+        } else if (std.mem.eql(u8, a, "--dump-logits")) {
+            dump = v;
+        } else if (std.mem.eql(u8, a, "--tokens")) {
+            tokens_text = v;
+        } else if (std.mem.eql(u8, a, "--steps")) {
+            steps_text = v;
+        } else if (std.mem.eql(u8, a, "--ctx")) {
+            n_ctx = try std.fmt.parseInt(usize, v, 10);
+        } else return error.InvalidArgs;
+    }
+    const path = model orelse return error.InvalidArgs;
+    var buf: [65536]u8 = undefined;
+    if (dump) |dump_path| {
+        const ids = try parseUsizeList(init.gpa, tokens_text orelse return error.InvalidArgs);
+        const tokens = try init.gpa.alloc(u32, ids.len);
+        for (ids, tokens) |id, *t| t.* = @intCast(id);
+        const steps = try parseUsizeList(init.gpa, steps_text orelse return error.InvalidArgs);
+        const f = try std.Io.Dir.cwd().createFile(init.io, dump_path, .{});
+        defer f.close(init.io);
+        var w = f.writer(init.io, &buf);
+        try llama_bench.dumpLogits(path, tokens, steps, opt.n_threads, n_ctx, init.gpa, &w.interface);
+        return;
+    }
+    var w = std.Io.File.stdout().writer(init.io, &buf);
+    try llama_bench.run(path, opt, init.gpa, init.io, &w.interface);
+}
+
 pub fn main(init: std.process.Init) !void {
     var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args_it.deinit();
@@ -120,6 +181,10 @@ pub fn main(init: std.process.Init) !void {
     var args = ArrayList([]const u8).init(init.gpa);
     defer args.deinit();
     while (args_it.next()) |arg| try args.append(arg);
+
+    if (args.items.len > 1 and std.mem.eql(u8, args.items[1], "--llama-bench")) {
+        return runLlamaBench(init, args.items);
+    }
 
     var prompt: ?[]const u8 = null;
     var max_tokens: u32 = 100;
