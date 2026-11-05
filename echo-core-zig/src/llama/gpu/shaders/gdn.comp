@@ -1,22 +1,19 @@
 #version 450
-// GATED_DELTA_NET (K=1): satır başına tek dalga-şerit, durum 128x128, 16 başlık; grup = 64 satır
+// GATED_DELTA_NET (K=1): dalga = durum satırı (128 eleman, şerit = vec4). Satır tek geçişte okunur ve yazılır;
+// satırlar birbirinden bağımsız olduğu için sonuç üç geçişli ggml döngüsüyle aynıdır.
 #extension GL_GOOGLE_include_directive : require
 #include "common.glsl"
-layout(local_size_x = 64) in;
+layout(local_size_x = 32) in;
 layout(push_constant) uniform P { uint st; uint k; uint q; uint vv; uint alpha; uint beta; uint dt; uint a; uint o; float sc; } p;
 void main() {
-    uint h = gl_WorkGroupID.x >> 1, j = (gl_WorkGroupID.x & 1u) * 64u + gl_LocalInvocationIndex;
+    uint h = gl_WorkGroupID.x >> 7, j = gl_WorkGroupID.x & 127u, lane = gl_LocalInvocationIndex;
     float e = exp(softplus(f[p.alpha + h] + f[p.dt + h]) * f[p.a + h]);
-    float b = sigmoid(f[p.beta + h]);
-    uint r = p.st / 4u + (h * 128u + j) * 32u, ik = p.k / 4u + h * 32u, iq = p.q / 4u + h * 32u;
-    float s = 0.0;
-    for (uint i = 0u; i < 32u; i++) s += dot(v[r + i] * e, v[ik + i]);
-    float delta = (f[p.vv + h * 128u + j] - s) * b;
-    float s2 = 0.0;
-    for (uint i = 0u; i < 32u; i++) {
-        vec4 n = v[r + i] * e + v[ik + i] * delta;
-        v[r + i] = n;
-        s2 += dot(n, v[iq + i]);
-    }
-    f[p.o + h * 128u + j] = s2 * p.sc;
+    uint r = p.st / 4u + (h * 128u + j) * 32u + lane;
+    vec4 kv = v[p.k / 4u + h * 32u + lane];
+    vec4 s = v[r] * e;
+    float delta = (f[p.vv + h * 128u + j] - subgroupAdd(dot(s, kv))) * sigmoid(f[p.beta + h]);
+    vec4 n = s + kv * delta;
+    v[r] = n;
+    float o = subgroupAdd(dot(n, v[p.q / 4u + h * 32u + lane]));
+    if (lane == 0u) f[p.o + h * 128u + j] = o * p.sc;
 }

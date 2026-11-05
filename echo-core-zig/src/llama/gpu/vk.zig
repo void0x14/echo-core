@@ -61,7 +61,8 @@ const CommandBufferAllocateInfo = extern struct { sType: i32 = 40, pNext: Pn = n
 const CommandBufferBeginInfo = extern struct { sType: i32 = 42, pNext: Pn = null, flags: u32, inh: Pn = null };
 pub const MemoryBarrier = extern struct { sType: i32 = 46, pNext: Pn = null, src: u32, dst: u32 };
 pub const BufferCopy = extern struct { src: u64, dst: u64, size: u64 };
-const SubmitInfo = extern struct { sType: i32 = 4, pNext: Pn = null, nw: u32 = 0, w: Pn = null, wm: Pn = null, nc: u32 = 1, c: *const Disp, ns: u32 = 0, s: Pn = null };
+const SubmitInfo = extern struct { sType: i32 = 4, pNext: Pn = null, nw: u32 = 0, w: Pn = null, wm: Pn = null, nc: u32 = 1, c: [*]const Disp, ns: u32 = 0, s: Pn = null };
+const QueryPoolCreateInfo = extern struct { sType: i32 = 11, pNext: Pn = null, flags: u32 = 0, type: u32 = 2, count: u32, stats: u32 = 0 };
 const FenceCreateInfo = extern struct { sType: i32 = 8, pNext: Pn = null, flags: u32 = 0 };
 
 const R = i32;
@@ -93,6 +94,10 @@ const Fns = struct {
     vkCmdDispatch: *const fn (Disp, u32, u32, u32) callconv(.c) void,
     vkCmdPipelineBarrier: *const fn (Disp, u32, u32, u32, u32, *const MemoryBarrier, u32, Pn, u32, Pn) callconv(.c) void,
     vkCmdCopyBuffer: *const fn (Disp, H, H, u32, *const BufferCopy) callconv(.c) void,
+    vkCreateQueryPool: *const fn (Disp, *const QueryPoolCreateInfo, Pn, *H) callconv(.c) R,
+    vkCmdResetQueryPool: *const fn (Disp, H, u32, u32) callconv(.c) void,
+    vkCmdWriteTimestamp: *const fn (Disp, u32, H, u32) callconv(.c) void,
+    vkGetQueryPoolResults: *const fn (Disp, H, u32, u32, usize, *anyopaque, u64, u32) callconv(.c) R,
     vkCmdDispatchIndirect: *const fn (Disp, H, u64) callconv(.c) void,
     vkCmdFillBuffer: *const fn (Disp, H, u64, u64, u32) callconv(.c) void,
     vkQueueSubmit: *const fn (Disp, u32, *const SubmitInfo, H) callconv(.c) R,
@@ -235,6 +240,12 @@ pub const Ctx = struct {
         return p;
     }
 
+    pub fn queryPool(self: *const Ctx, n: u32) !H {
+        var q: H = 0;
+        try check(self.f.vkCreateQueryPool(self.dev, &.{ .count = n }, null, &q));
+        return q;
+    }
+
     pub fn cmdBuffer(self: *const Ctx) !Disp {
         var c: Disp = null;
         try check(self.f.vkAllocateCommandBuffers(self.dev, &.{ .pool = self.cmd_pool }, &c));
@@ -242,15 +253,22 @@ pub const Ctx = struct {
     }
     /// flags 0: tekrar gönderilebilir komut tamponu
     pub fn begin(self: *const Ctx, c: Disp) !void {
-        try check(self.f.vkBeginCommandBuffer(c, &.{ .flags = 0 }));
+        try self.beginFlags(c, 0);
+    }
+    /// 4: SIMULTANEOUS_USE, aynı tampon tek gönderimde tekrar edilebilir
+    pub fn beginFlags(self: *const Ctx, c: Disp, flags: u32) !void {
+        try check(self.f.vkBeginCommandBuffer(c, &.{ .flags = flags }));
         self.f.vkCmdBindDescriptorSets(c, BIND_COMPUTE, self.layout, 0, 1, &self.set, 0, null);
     }
     pub fn end(self: *const Ctx, c: Disp) !void {
         try check(self.f.vkEndCommandBuffer(c));
     }
     pub fn submitWait(self: *const Ctx, c: Disp) !void {
-        const cb = c;
-        try check(self.f.vkQueueSubmit(self.queue, 1, &.{ .c = &cb }, self.fence));
+        const cb = [1]Disp{c};
+        try self.submitListWait(&cb);
+    }
+    pub fn submitListWait(self: *const Ctx, list: []const Disp) !void {
+        try check(self.f.vkQueueSubmit(self.queue, 1, &.{ .nc = @intCast(list.len), .c = list.ptr }, self.fence));
         try check(self.f.vkWaitForFences(self.dev, 1, &self.fence, 1, ~@as(u64, 0)));
         try check(self.f.vkResetFences(self.dev, 1, &self.fence));
     }

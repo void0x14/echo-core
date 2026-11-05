@@ -7,13 +7,14 @@ layout(std430, set = 0, binding = 0) buffer AF { float f[]; };
 layout(std430, set = 0, binding = 0) buffer AV { vec4 v[]; };
 layout(std430, set = 0, binding = 0) buffer AU { uint u[]; };
 layout(std430, set = 0, binding = 0) buffer AQ { uvec4 uq[]; };
-layout(std430, set = 0, binding = 1) readonly buffer PR { uint token; uint head; uint n_cells; uint pad0; float pos; } par;
+layout(std430, set = 0, binding = 1) buffer PR { uint token; uint head; uint n_cells; uint mode; float pos; uint pad1[11]; uint ix; } par;
 
-vec4 u8v(uint w) { return vec4(float(w & 255u), float((w >> 8) & 255u), float((w >> 16) & 255u), float(w >> 24)) - 128.0; }
-// ggml quantize_row_q8_0: en yakına yuvarla, işaretsiz +128 saklanır
+// işaretli byte: ACO extract_i8 + cvt'yi tek SDWA komutuna indirir
+vec4 u8v(uint w) { int i = int(w); return vec4(float(bitfieldExtract(i, 0, 8)), float(bitfieldExtract(i, 8, 8)), float(bitfieldExtract(i, 16, 8)), float(i >> 24)); }
+// ggml quantize_row_q8_0: en yakına yuvarla
 uint pack8(vec4 a, float id) {
-    ivec4 i = ivec4(roundEven(a * id)) + 128;
-    return uint(i.x) | (uint(i.y) << 8) | (uint(i.z) << 16) | (uint(i.w) << 24);
+    uvec4 i = uvec4(ivec4(roundEven(a * id))) & 255u;
+    return i.x | (i.y << 8) | (i.z << 16) | (i.w << 24);
 }
 // ggml ölçeği f16 saklar; aynı yuvarlama
 float dq16(float d) { return unpackHalf2x16(packHalf2x16(vec2(d, 0.0))).x; }
