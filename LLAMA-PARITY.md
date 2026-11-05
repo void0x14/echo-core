@@ -40,3 +40,22 @@ Bulunan tuzaklar:
 - `@reduce(.Add)` toplama sırası ggml'den farklı: `hsum_float_8` ve `GGML_F32x8_REDUCE` aynen kopyalandı.
 - `@min(Q_TILE, x)` sonucu `u7`'ye daraltıp `tile_rows * KV_TILE`'ı taşırıyor; yalnız Debug yakaladı.
 - Zig `compiler_rt`, `expf/logf/sinf/cosf` adlarını binary içinde tanımlayıp glibc'yi gölgeliyor: `dlsym` ile alınıyor.
+
+### 2026-11-05: kernel kod üretimi ve ilk tam matris
+
+Kanıtlanan:
+- Q8_0 modelinde `compare_logits.py --steps 5,1,1,128,1`: tüm adımlarda max|fark| = 0,00000, argmax ve top5 aynı.
+- Tek thread `pp128`: Q8_0 %99,4, UD %100,4, Q5_K %109,4 (llama.cpp'ye oran).
+- 6 thread tam matris, aynı anda sırayla ölçüm (oran = echo-core / llama.cpp):
+
+| Model | pp128 | pp512 | tg32 | tg128 |
+|---|---:|---:|---:|---:|
+| Qwen3.5-0.8B-Q8_0 | 258,44 / 237,10 = %109,0 | 248,55 / 232,99 = %106,7 | 35,05 / 29,16 = %120,2 | 36,46 / 30,49 = %119,6 |
+| Qwen3.5-0.8B-UD-Q8_K_XL | 251,84 / 226,35 = %111,3 | 211,59 / 228,39 = %92,6 | 26,55 / 23,55 = %112,8 | 27,98 / 23,31 = %120,0 |
+| unc-0.8b-q5km | 188,45 / 165,41 = %113,9 | 187,90 / 156,91 = %119,7 | 67,10 / 50,12 = %133,9 | 69,53 / 54,06 = %128,6 |
+
+Bulunan tuzaklar:
+- Kuantalı kernel'da GCC'ye göre %18 yavaşlık: LLVM `vpinsrw` ile xmm'e sahte bağımlılık yaratıyor, `|a|` değerlerini CSE edip akümülatörleri spill ediyordu. `gemm4xN<2>` iç döngüsü inline asm'e alındı.
+- KV buffer sıfırlanmazsa tile içindeki boş hücrelerden NaN geliyor (ggml `ggml_backend_buffer_clear` yapar).
+
+Sıradaki tek adım: UD pp512 hücresini %100'e çıkarmak.

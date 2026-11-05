@@ -302,8 +302,11 @@ pub const Context = struct {
                 kv_k[il] = &.{};
                 kv_v[il] = &.{};
             } else {
+                // ggml_backend_buffer_clear: tile içindeki boş hücreler de okunur
                 kv_k[il] = try allocator.alloc(u16, kv_row * n_ctx);
                 kv_v[il] = try allocator.alloc(u16, kv_row * n_ctx);
+                @memset(kv_k[il], 0);
+                @memset(kv_v[il], 0);
                 rs_conv[il] = &.{};
                 rs_state[il] = &.{};
             }

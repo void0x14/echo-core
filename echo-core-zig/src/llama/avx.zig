@@ -42,7 +42,14 @@ var logf_fn: MathFn = undefined;
 var sinf_fn: MathFn = undefined;
 var cosf_fn: MathFn = undefined;
 
+/// ggml_table_f32_f16 (sgemm.cpp unhalf): vpinsrw bağımlılığı olmadan yarım duyarlık çevirimi
+pub var fp16_table: [65536]f32 = undefined;
+
 pub fn initLibm() void {
+    for (&fp16_table, 0..) |*t, i| {
+        const h: f16 = @bitCast(@as(u16, @intCast(i)));
+        t.* = @floatCast(h);
+    }
     std.mem.doNotOptimizeAway(powf(1.0, 1.0));
     expf_fn = @ptrCast(dlsym(null, "expf").?);
     logf_fn = @ptrCast(dlsym(null, "logf").?);
@@ -130,8 +137,16 @@ pub inline fn loadB(p: *const anyopaque) B32 {
 pub inline fn loadW(p: *const anyopaque) W16 {
     return @as(*align(1) const [16]i16, @ptrCast(p)).*;
 }
+/// _cvtsh_ss. Doğrudan f16 -> f32 çevirimi vpinsrw üretir: hedef register'a sahte bağımlılık
+/// (FMA zincirinde gerçek gecikme). vmovd sıfırlayarak yükler.
 pub inline fn fp16(v: u16) f32 {
-    return @floatCast(@as(f16, @bitCast(v)));
+    const w: @Vector(4, u32) = .{ v, 0, 0, 0 };
+    return fp16x4(@bitCast(w))[0];
+}
+/// _mm_cvtph_ps: düşük 64 bit içinde 4 yarım duyarlıklı sayı
+pub inline fn fp16x4(w: @Vector(8, u16)) F4 {
+    const h: @Vector(4, u16) = @shuffle(u16, w, undefined, [4]i32{ 0, 1, 2, 3 });
+    return @floatCast(@as(@Vector(4, f16), @bitCast(h)));
 }
 pub inline fn fp32to16(v: f32) u16 {
     return @bitCast(@as(f16, @floatCast(v)));
