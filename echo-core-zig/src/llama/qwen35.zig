@@ -8,6 +8,7 @@ const vec = @import("vec.zig");
 const q = @import("quants.zig");
 const ops = @import("ops.zig");
 const repack = @import("repack.zig");
+const ivf = @import("ivf.zig");
 const pool_mod = @import("pool.zig");
 const Pool = pool_mod.Pool;
 const Params = pool_mod.Params;
@@ -272,6 +273,8 @@ pub const Context = struct {
     rs_state: [][]f32,
 
     logits: []f32,
+    /// null: tam LM head (varsayılan)
+    lm: ?*ivf.Search = null,
 
     wdata: []align(64) u8,
     fdata: []align(64) f32,
@@ -451,6 +454,30 @@ pub const Context = struct {
         }
     }
 
+    /// Yaklaşık LM head: yalnız seçilen kümelerin satırları okunur; `logits` güncellenmez, sonuç `lm.token`.
+    fn lmSearch(p: *const Params, s: *ivf.Search, x: [*]const f32, k: usize) void {
+        const xq: [*]q.BlockQ80 = @ptrCast(@alignCast(p.wdata));
+        if (p.ith == 0) q.quantizeRowQ80(x, xq, k);
+        p.barrier();
+        s.scoreRange(xq, p.ith, p.nth);
+        p.barrier();
+        if (p.ith == 0) {
+            s.plan();
+            p.pool.chunkSet(@intCast(p.nth));
+        }
+        p.barrier();
+        var b = ivf.Best{};
+        var cur: i64 = p.ith;
+        while (cur < s.n_pieces) {
+            s.scan(xq, @intCast(cur), &b);
+            cur = p.pool.chunkAdd(1);
+        }
+        s.best[p.ith] = b;
+        p.barrier();
+        if (p.ith == 0) s.reduce();
+        p.barrier();
+    }
+
     fn graph(self: *Context, p: *const Params) void {
         const m = self.model;
         const n_t = self.n_t;
@@ -492,8 +519,12 @@ pub const Context = struct {
             const last = self.b_inp.ptr + (n_t - 1) * m.n_embd;
             ops.rmsNorm(p, last, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, 1, 1, m.eps, m.output_norm, 1.0);
             p.barrier();
-            ops.mulMat(p, m.output, self.b_norm.ptr, 1, self.logits.ptr);
-            p.barrier();
+            if (self.lm) |s| {
+                lmSearch(p, s, self.b_norm.ptr, m.n_embd);
+            } else {
+                ops.mulMat(p, m.output, self.b_norm.ptr, 1, self.logits.ptr);
+                p.barrier();
+            }
         }
         // ggml_graph_compute_thread: son barrier
         p.barrier();

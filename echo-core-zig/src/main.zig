@@ -152,6 +152,13 @@ fn runLlamaBench(init: std.process.Init, args: []const []const u8) !void {
             opt.prompts = try parseUsizeList(init.gpa, v);
         } else if (std.mem.eql(u8, a, "-n")) {
             opt.gens = try parseUsizeList(init.gpa, v);
+        } else if (std.mem.eql(u8, a, "--lm-ivf")) {
+            const lv = try parseUsizeList(init.gpa, v);
+            if (lv.len != 2) return error.InvalidArgs;
+            opt.lm_clusters = lv[0];
+            opt.lm_nprobe = lv[1];
+        } else if (std.mem.eql(u8, a, "--greedy")) {
+            opt.greedy = !std.mem.eql(u8, v, "0");
         } else if (std.mem.eql(u8, a, "--dump-logits")) {
             dump = v;
         } else if (std.mem.eql(u8, a, "--tokens")) {
@@ -187,6 +194,15 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     while (args_it.next()) |arg| try args.append(arg);
 
+    if (qwen35.supported and args.items.len > 5 and std.mem.eql(u8, args.items[1], "--ivf-eval")) {
+        const m = try qwen35.Model.load(args.items[2], init.gpa);
+        defer m.deinit();
+        return @import("llama/ivf.zig").eval(args.items[2], m.output, args.items[3], args.items[4], try std.fmt.parseInt(usize, args.items[5], 10), init.gpa, init.io);
+    }
+    if (qwen35.supported and args.items.len > 1 and std.mem.eql(u8, args.items[1], "--logit-check")) {
+        const save = args.items.len > 2 and std.mem.eql(u8, args.items[2], "--save");
+        return @import("llama/logit_check.zig").run(save, 6, init.gpa, init.io);
+    }
     if (qwen35.supported and args.items.len > 1 and std.mem.eql(u8, args.items[1], "--llama-bench")) {
         return runLlamaBench(init, args.items);
     }

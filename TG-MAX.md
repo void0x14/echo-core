@@ -14,7 +14,8 @@ Sayaç modeli: `Qwen3.5-0.8B-Q8_0.gguf`. Ölçüm: `--llama-bench` (rastgele tok
 | Yol | tg32 / tg128 | Not |
 |---|---|---|
 | Başlangıç (görsel) CPU t=6 | 39,09 / 36,77 | yük düşükken |
-| Şimdiki CPU t=6 | ~33–36 | RAM duvarı, **70 geçilmedi** |
+| Şimdiki CPU t=6, tam LM head | 29,61 / 36,85 | RAM duvarı |
+| **Şimdiki CPU t=6, IVF LM head (yaklaşık, top-1 %96,2)** | **46,47 / 54,48** | **70 geçilmedi** |
 
 ## Temel fizik (ölçüldü, 2026-11-05)
 
@@ -207,3 +208,22 @@ O çalışmadan CPU için geçerli kalan bulgular:
 - Ağırlık entropisi 7,67 bit; kayıpsız sıkıştırma yok. `d` tablosu tensör başına 834'e kadar farklı değer.
 - Kimlik öneki yetersiz: üretilen tokenlerin %99'u için sözlüğün %80'i gerekiyor. 8000 tokende yalnız 2115 farklı token var.
 - n-gram tahmin isabeti %25–28 (20 metin, 8000 token). Doğrulanmış spekülatif batch ağırlık okumasını paylaşır, çıktıyı değiştirmez; CPU için aday.
+
+### 2026-11-05: IVF LM head (CPU)
+
+Yaklaşık LM head: satırlar küresel k-means ile 4096 kümeye ayrıldı (`src/llama/ivf.zig`, önbellek `<model>.ivf4096`, 5,4 MB). Gizli vektör Q8 merkezlerle karşılaştırılır, en yakın 256 kümenin satırları okunur. `--lm-ivf 4096,256`; varsayılan yol tam LM head olarak kaldı.
+
+Kanıtlanan (Q8_0, t=6, 5 tekrar, aynı oturum):
+
+| LM head | tg32 | tg128 |
+|---|---:|---:|
+| Tam | 29,61 | 36,85 |
+| **IVF 4096/256 (yaklaşık)** | **46,47** | **54,48** |
+
+- Üretim arama kodu, 20 gerçek metnin 8000 greedy tokeninde top-1 %96,21; satırların %3,36'sı okunuyor. nprobe 128: %93,43, satır %1,66. nprobe 512: %97,75, satır %7,08.
+- nprobe 64–512 arası tg128 52,8–53,6: artık sınır LM head değil, gövde.
+- **Sınır:** IVF logit dizisi üretmez, yalnız top-1 verir; kaçan %3,8 tokende çıktı tam yoldan ayrılır. Top-k/sıcaklık örneklemesi henüz yok.
+
+Thread: t=3 50,6, t=5 49,8, t=6 51,5–54,5 (t=4'te 37,8 tek sapma, arka plan yükü). 70 geçilmedi.
+
+`tools/logit_check.py` Zig'e taşındı: `--logit-check [--save]`, referans `benchmarks/logit-ref.txt`. `tools/doc_parity.py` kaldırıldı.
