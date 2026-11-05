@@ -211,7 +211,7 @@ O çalışmadan CPU için geçerli kalan bulgular:
 
 ### 2026-11-05: IVF LM head (CPU)
 
-Yaklaşık LM head: satırlar küresel k-means ile 4096 kümeye ayrıldı (`src/llama/ivf.zig`, önbellek `<model>.ivf4096`, 5,4 MB). Gizli vektör Q8 merkezlerle karşılaştırılır, en yakın 256 kümenin satırları okunur. `--lm-ivf 4096,256`; varsayılan yol tam LM head olarak kaldı.
+Yaklaşık LM head: satırlar küresel k-means ile 4096 kümeye ayrıldı (`src/llama/ivf.zig`, önbellek `<model>.ivf4096`, 5,4 MB). Gizli vektör Q8 merkezlerle karşılaştırılır, en yakın 512 kümenin satırları okunur. Varsayılan yol artık IVF 4096/512; `--llama-bench --lm-ivf 0,0` tam yolu seçer.
 
 Kanıtlanan (Q8_0, t=6, 5 tekrar, aynı oturum):
 

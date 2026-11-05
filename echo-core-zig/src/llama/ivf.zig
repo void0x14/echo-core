@@ -5,6 +5,9 @@ const q = @import("quants.zig");
 const vec = @import("vec.zig");
 const ops = @import("ops.zig");
 const Alloc = std.mem.Allocator;
+/// Varsayılan LM head yolu: IVF (yaklaşık, yalnız top-1). 4096 küme, nprobe 512.
+pub const default_l: usize = 4096;
+pub const default_nprobe: usize = 512;
 
 fn parallel(nth: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), usize) void) !void {
     var th: [64]std.Thread = undefined;

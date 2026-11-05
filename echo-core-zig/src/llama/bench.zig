@@ -36,9 +36,9 @@ pub const Options = struct {
     reps: usize = 5,
     prompts: []const usize = &.{ 128, 512 },
     gens: []const usize = &.{ 32, 128 },
-    /// 0: tam LM head. >0: IVF küme sayısı (yaklaşık, ayrı etiketlenir)
-    lm_clusters: usize = 0,
-    lm_nprobe: usize = 256,
+    /// Varsayılan: IVF LM head (yaklaşık, ayrı etiketlenir). 0: tam LM head.
+    lm_clusters: usize = ivf.default_l,
+    lm_nprobe: usize = ivf.default_nprobe,
     greedy: bool = false,
 };
 
