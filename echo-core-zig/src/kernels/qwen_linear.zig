@@ -186,7 +186,7 @@ pub fn forward(
         var acc: f32 = 0;
         for (0..conv_kernel) |kernel_idx| {
             const state_idx = kernel_idx * conv_dim + dim_idx;
-            const weight_idx = (conv_kernel - 1 - kernel_idx) * conv_dim + dim_idx;
+            const weight_idx = dim_idx * conv_kernel + (conv_kernel - 1 - kernel_idx);
             acc += state.conv_state[state_idx] * scalarAt(weights.conv1d, weight_idx);
         }
         temps.conv_out[dim_idx] = math.swish(acc);
@@ -307,7 +307,7 @@ pub fn forwardCore(
         var acc: f32 = 0;
         for (0..conv_kernel) |kernel_idx| {
             const state_idx = kernel_idx * conv_dim + dim_idx;
-            const weight_idx = (conv_kernel - 1 - kernel_idx) * conv_dim + dim_idx;
+            const weight_idx = dim_idx * conv_kernel + (conv_kernel - 1 - kernel_idx);
             acc += state.conv_state[state_idx] * scalarAt(weights.conv1d, weight_idx);
         }
         conv_out[dim_idx] = math.swish(acc);

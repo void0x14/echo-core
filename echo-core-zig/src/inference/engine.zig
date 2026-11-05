@@ -194,6 +194,7 @@ pub const Engine = struct {
 
         const kv_dim = cfg.num_kv_heads * cfg.head_dim;
         const q_dim = cfg.num_heads * cfg.head_dim;
+        const q_proj_dim = if (cfg.full_attention_interval > 0) q_dim * 2 else q_dim;
 
         const weight_pool = try allocator.alloc(u8, layout.raw_pool_size);
         errdefer allocator.free(weight_pool);
@@ -218,7 +219,7 @@ pub const Engine = struct {
         errdefer allocator.free(attn_proj);
         const ffn_out = try allocator.alloc(f32, cfg.hidden_dim);
         errdefer allocator.free(ffn_out);
-        const q_proj = try allocator.alloc(f32, q_dim);
+        const q_proj = try allocator.alloc(f32, q_proj_dim);
         errdefer allocator.free(q_proj);
         const k_proj = try allocator.alloc(f32, kv_dim);
         errdefer allocator.free(k_proj);
@@ -537,14 +538,15 @@ pub const Engine = struct {
         const num_heads = self.config.num_heads;
         const num_kv_heads = self.config.num_kv_heads;
         const pos = self.seq_pos;
-        const rope_base: f32 = 10000.0;
+        const rope_base: f32 = 10000000.0;
+        const rotary_dim: usize = 64;
 
         // Apply to Q heads
         for (0..num_heads) |h| {
             const offset = h * head_dim;
             var i: usize = 0;
-            while (i < head_dim) : (i += 2) {
-                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+            while (i < rotary_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rotary_dim)));
                 const angle = @as(f32, @floatFromInt(pos)) * freq;
                 const cos_val = @cos(angle);
                 const sin_val = @sin(angle);
@@ -559,8 +561,8 @@ pub const Engine = struct {
         for (0..num_kv_heads) |h| {
             const offset = h * head_dim;
             var i: usize = 0;
-            while (i < head_dim) : (i += 2) {
-                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+            while (i < rotary_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rotary_dim)));
                 const angle = @as(f32, @floatFromInt(pos)) * freq;
                 const cos_val = @cos(angle);
                 const sin_val = @sin(angle);
@@ -586,6 +588,8 @@ pub const Engine = struct {
         const num_kv_heads = self.config.num_kv_heads;
         const head_dim = self.config.head_dim;
         const q_dim = num_heads * head_dim;
+        const is_qwen35 = self.config.full_attention_interval > 0;
+        const q_proj_dim = if (is_qwen35) q_dim * 2 else q_dim;
         const kv_dim = num_kv_heads * head_dim;
         const layer_base = self.weight_layout.layer_offsets[layer_idx];
 
@@ -598,9 +602,8 @@ pub const Engine = struct {
         @memset(self.k_proj, 0);
         @memset(self.v_proj, 0);
 
-        parallel.parallelMatvec(self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, q_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
+        parallel.parallelMatvec(self.weight_pool[q_proj_offset..].ptr, input.ptr, self.q_proj.ptr, q_proj_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
         parallel.parallelMatvec(self.weight_pool[k_proj_offset..].ptr, input.ptr, self.k_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 2));
-
         parallel.parallelMatvec(self.weight_pool[v_proj_offset..].ptr, input.ptr, self.v_proj.ptr, kv_dim, hidden, dtypeForTensor(self.weight_dtypes, layer_idx, 3));
 
         // Apply Q/K head norms if weights are non-zero
@@ -611,7 +614,14 @@ pub const Engine = struct {
         const q_norm_w = fp16SliceFromBytes(q_norm_bytes);
         const k_norm_w = fp16SliceFromBytes(k_norm_bytes);
         if (!std.mem.allEqual(types.fp16_t, q_norm_w, 0)) {
-            applyHeadNorm(self.q_proj, num_heads, head_dim, q_norm_w);
+            if (is_qwen35) {
+                for (0..num_heads) |h| {
+                    const offset = h * head_dim * 2;
+                    avx2_norm.rmsNormAvx2(self.q_proj.ptr + offset, self.q_proj.ptr + offset, q_norm_w.ptr, head_dim);
+                }
+            } else {
+                applyHeadNorm(self.q_proj, num_heads, head_dim, q_norm_w);
+            }
         }
         if (!std.mem.allEqual(types.fp16_t, k_norm_w, 0)) {
             applyHeadNorm(self.k_proj[0..kv_dim], num_kv_heads, head_dim, k_norm_w);
@@ -619,7 +629,41 @@ pub const Engine = struct {
 
         // Apply RoPE
         if (self.config.pos_encoding == .rope) {
-            self.applyRoPE();
+            if (is_qwen35) {
+                const pos = self.seq_pos;
+                const rope_base: f32 = 10000000.0;
+                const rotary_dim: usize = 64;
+                for (0..num_heads) |h| {
+                    const offset = h * head_dim * 2;
+                    var i: usize = 0;
+                    while (i < rotary_dim) : (i += 2) {
+                        const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rotary_dim)));
+                        const angle = @as(f32, @floatFromInt(pos)) * freq;
+                        const cos_val = @cos(angle);
+                        const sin_val = @sin(angle);
+                        const q0 = self.q_proj[offset + i];
+                        const q1 = self.q_proj[offset + i + 1];
+                        self.q_proj[offset + i] = q0 * cos_val - q1 * sin_val;
+                        self.q_proj[offset + i + 1] = q0 * sin_val + q1 * cos_val;
+                    }
+                }
+                for (0..num_kv_heads) |h| {
+                    const offset = h * head_dim;
+                    var i: usize = 0;
+                    while (i < rotary_dim) : (i += 2) {
+                        const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rotary_dim)));
+                        const angle = @as(f32, @floatFromInt(pos)) * freq;
+                        const cos_val = @cos(angle);
+                        const sin_val = @sin(angle);
+                        const k0 = self.k_proj[offset + i];
+                        const k1 = self.k_proj[offset + i + 1];
+                        self.k_proj[offset + i] = k0 * cos_val - k1 * sin_val;
+                        self.k_proj[offset + i + 1] = k0 * sin_val + k1 * cos_val;
+                    }
+                }
+            } else {
+                self.applyRoPE();
+            }
         }
 
         // Append K/V to cache BEFORE attention so current token attends to itself
@@ -635,7 +679,8 @@ pub const Engine = struct {
             for (0..num_heads) |head_index| {
                 const h: u32 = @intCast(head_index);
                 const kv_head = h / (num_heads / num_kv_heads);
-                @memcpy(self.head_q[0..head_dim], self.q_proj[@as(usize, h) * head_dim ..][0..head_dim]);
+                const q_offset = if (is_qwen35) @as(usize, h) * head_dim * 2 else @as(usize, h) * head_dim;
+                @memcpy(self.head_q[0..head_dim], self.q_proj[q_offset..][0..head_dim]);
 
                 if (self.config.use_kv_quantization) {
                     for (0..cache_len) |pos_index| {
@@ -673,6 +718,17 @@ pub const Engine = struct {
                         const pos: u32 = @intCast(pos_index);
                         const value_head = cache_layer.values_fp32.? + @as(usize, pos) * kv_dim + @as(usize, kv_head) * head_dim;
                         for (0..head_dim) |d| self.head_out[d] += self.scores[pos] * value_head[d];
+                    }
+                }
+
+                // Apply sigmoid gating if Qwen35
+                if (is_qwen35) {
+                    const gate_offset = @as(usize, h) * head_dim * 2 + head_dim;
+                    const gate = self.q_proj[gate_offset..][0..head_dim];
+                    for (0..head_dim) |d| {
+                        const g = gate[d];
+                        const sig = 1.0 / (1.0 + @exp(-g));
+                        self.head_out[d] *= sig;
                     }
                 }
 
@@ -907,12 +963,13 @@ pub const Engine = struct {
         const head_dim = self.config.head_dim;
         const num_heads = self.config.num_heads;
         const num_kv_heads = self.config.num_kv_heads;
-        const rope_base: f32 = 10000.0;
+        const rope_base: f32 = 10000000.0;
+        const rotary_dim: usize = 64;
         for (0..num_heads) |h| {
             const offset = h * head_dim;
             var i: usize = 0;
-            while (i < head_dim) : (i += 2) {
-                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+            while (i < rotary_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rotary_dim)));
                 const angle = @as(f32, @floatFromInt(pos)) * freq;
                 const cos_val = @cos(angle);
                 const sin_val = @sin(angle);
@@ -925,8 +982,8 @@ pub const Engine = struct {
         for (0..num_kv_heads) |h| {
             const offset = h * head_dim;
             var i: usize = 0;
-            while (i < head_dim) : (i += 2) {
-                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(head_dim)));
+            while (i < rotary_dim) : (i += 2) {
+                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rotary_dim)));
                 const angle = @as(f32, @floatFromInt(pos)) * freq;
                 const cos_val = @cos(angle);
                 const sin_val = @sin(angle);
@@ -1085,13 +1142,15 @@ pub const Engine = struct {
             const num_kv_heads = self.config.num_kv_heads;
             const head_dim = self.config.head_dim;
             const q_dim = num_heads * head_dim;
+            const is_qwen35 = self.config.full_attention_interval > 0;
+            const q_proj_dim = if (is_qwen35) q_dim * 2 else q_dim;
             const kv_dim = num_kv_heads * head_dim;
             const q_proj_offset = layer_base + self.weight_layout.q_proj_offset;
             const k_proj_offset = layer_base + self.weight_layout.k_proj_offset;
             const v_proj_offset = layer_base + self.weight_layout.v_proj_offset;
             const o_proj_offset = layer_base + self.weight_layout.o_proj_offset;
 
-            parallel.parallelMatmat(self.weight_pool[q_proj_offset..].ptr, H.ptr, sc.qb.ptr, q_dim, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
+            parallel.parallelMatmat(self.weight_pool[q_proj_offset..].ptr, H.ptr, sc.qb.ptr, q_proj_dim, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 1));
             parallel.parallelMatmat(self.weight_pool[k_proj_offset..].ptr, H.ptr, sc.kb.ptr, kv_dim, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 2));
             parallel.parallelMatmat(self.weight_pool[v_proj_offset..].ptr, H.ptr, sc.vb.ptr, kv_dim, hidden, T, dtypeForTensor(self.weight_dtypes, layer_idx, 3));
 
@@ -1105,13 +1164,56 @@ pub const Engine = struct {
             const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim)));
 
             for (0..Ts) |t| {
-                const qrow = sc.qb[t * q_dim ..][0..q_dim];
+                const qrow = sc.qb[t * q_proj_dim ..][0..q_proj_dim];
                 const krow = sc.kb[t * kv_dim ..][0..kv_dim];
                 const vrow = sc.vb[t * kv_dim ..][0..kv_dim];
-                if (do_q_norm) applyHeadNorm(qrow, num_heads, head_dim, q_norm_w);
+                if (do_q_norm) {
+                    if (is_qwen35) {
+                        for (0..num_heads) |h| {
+                            const offset = h * head_dim * 2;
+                            avx2_norm.rmsNormAvx2(qrow.ptr + offset, qrow.ptr + offset, q_norm_w.ptr, head_dim);
+                        }
+                    } else {
+                        applyHeadNorm(qrow, num_heads, head_dim, q_norm_w);
+                    }
+                }
                 if (do_k_norm) applyHeadNorm(krow, num_kv_heads, head_dim, k_norm_w);
                 if (self.config.pos_encoding == .rope) {
-                    self.applyRoPETo(qrow, krow, base_pos + @as(u32, @intCast(t)));
+                    if (is_qwen35) {
+                        const pos = base_pos + @as(u32, @intCast(t));
+                        const rope_base: f32 = 10000000.0;
+                        const rotary_dim: usize = 64;
+                        for (0..num_heads) |h| {
+                            const offset = h * head_dim * 2;
+                            var i: usize = 0;
+                            while (i < rotary_dim) : (i += 2) {
+                                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rotary_dim)));
+                                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                                const cos_val = @cos(angle);
+                                const sin_val = @sin(angle);
+                                const q0 = qrow[offset + i];
+                                const q1 = qrow[offset + i + 1];
+                                qrow[offset + i] = q0 * cos_val - q1 * sin_val;
+                                qrow[offset + i + 1] = q0 * sin_val + q1 * cos_val;
+                            }
+                        }
+                        for (0..num_kv_heads) |h| {
+                            const offset = h * head_dim;
+                            var i: usize = 0;
+                            while (i < rotary_dim) : (i += 2) {
+                                const freq = 1.0 / std.math.pow(f32, rope_base, @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(rotary_dim)));
+                                const angle = @as(f32, @floatFromInt(pos)) * freq;
+                                const cos_val = @cos(angle);
+                                const sin_val = @sin(angle);
+                                const k0 = krow[offset + i];
+                                const k1 = krow[offset + i + 1];
+                                krow[offset + i] = k0 * cos_val - k1 * sin_val;
+                                krow[offset + i + 1] = k0 * sin_val + k1 * cos_val;
+                            }
+                        }
+                    } else {
+                        self.applyRoPETo(qrow, krow, base_pos + @as(u32, @intCast(t)));
+                    }
                 }
                 if (self.kv_cache) |*cache| cache.append(layer_idx, krow.ptr, vrow.ptr);
                 const ab_row = sc.ab[t * q_dim ..][0..q_dim];
@@ -1122,7 +1224,8 @@ pub const Engine = struct {
                     for (0..num_heads) |head_index| {
                         const h: u32 = @intCast(head_index);
                         const kv_head = h / (num_heads / num_kv_heads);
-                        const head_q = qrow[@as(usize, h) * head_dim ..][0..head_dim];
+                        const q_offset = if (is_qwen35) @as(usize, h) * head_dim * 2 else @as(usize, h) * head_dim;
+                        const head_q = qrow[q_offset..][0..head_dim];
                         if (self.config.use_kv_quantization) {
                             for (0..cache_len) |pos_index| {
                                 const pos: u32 = @intCast(pos_index);
@@ -1159,6 +1262,15 @@ pub const Engine = struct {
                                 for (0..head_dim) |d| head_out[d] += self.scores[pos] * value_head[d];
                             }
                         }
+                        if (is_qwen35) {
+                            const gate_offset = @as(usize, h) * head_dim * 2 + head_dim;
+                            const gate = qrow[gate_offset..][0..head_dim];
+                            for (0..head_dim) |d| {
+                                const g = gate[d];
+                                const sig = 1.0 / (1.0 + @exp(-g));
+                                head_out[d] *= sig;
+                            }
+                        }
                     }
                 }
             }
@@ -1178,10 +1290,8 @@ pub const Engine = struct {
         try self.ensureKvCache();
         const T: u32 = @intCast(token_ids.len);
         if (T == 0) return self.logits;
-        if (T < 4) {
-            var logits: []f32 = self.logits;
-            for (token_ids) |tok_id| logits = try self.forwardToken(tok_id);
-            return logits;
+        if (T == 1) {
+            return self.forwardToken(token_ids[0]);
         }
         const hidden = self.config.hidden_dim;
         const Ts: usize = @intCast(T);
@@ -1189,7 +1299,9 @@ pub const Engine = struct {
         const value_dim = @max(self.config.ssm_inner_size, 1);
         const conv_dim_b = value_dim * 3;
         const num_v_heads = @max(self.config.ssm_dt_rank, 1);
+        const is_qwen35 = self.config.full_attention_interval > 0;
         const q_dim = @max(self.config.num_heads * self.config.head_dim, 1);
+        const q_proj_dim = if (is_qwen35) q_dim * 2 else q_dim;
         const kv_dim = @max(self.config.num_kv_heads * self.config.head_dim, 1);
         const ffn_h = @max(self.config.ffn_hidden_dim, 1);
 
@@ -1208,7 +1320,7 @@ pub const Engine = struct {
         defer alloc.free(sc.alphab);
         sc.betab = try alloc.alloc(f32, Ts * num_v_heads);
         defer alloc.free(sc.betab);
-        sc.qb = try alloc.alloc(f32, Ts * q_dim);
+        sc.qb = try alloc.alloc(f32, Ts * q_proj_dim);
         defer alloc.free(sc.qb);
         sc.kb = try alloc.alloc(f32, Ts * kv_dim);
         defer alloc.free(sc.kb);
@@ -1251,7 +1363,11 @@ pub const Engine = struct {
     }
     /// Prefill prompt tokens into KV cache, return logits of last token.
     pub fn prefill(self: *Engine, token_ids: []const u32) ![]f32 {
-        return self.prefillBatched(token_ids);
+        var logits: []f32 = self.logits;
+        for (token_ids) |tok_id| {
+            logits = try self.forwardToken(tok_id);
+        }
+        return logits;
     }
 
     /// Decode one step: process token_id, return logits.

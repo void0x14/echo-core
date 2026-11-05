@@ -182,17 +182,8 @@ pub fn matvecDispatchQuant(
     }
 }
 
-fn matvecQ80Int(
-    blocks: [*]const u8,
-    x: [*]const f32,
-    y: [*]f32,
-    M: u32,
-    K: u32,
-) void {
+pub fn quantizeXToQ80(x: [*]const f32, q8: [*]quant.block_q8_0, K: usize) void {
     const blocks_per_row = K / 32;
-    const block_stride: usize = 34;
-    var xq: [16384]i8 = undefined;
-    var xs: [512]f32 = undefined;
     var b: usize = 0;
     while (b < blocks_per_row) : (b += 1) {
         const xb = x + b * 32;
@@ -202,17 +193,30 @@ fn matvecQ80Int(
             if (a > amax) amax = a;
         }
         if (amax < 1e-30) {
-            xs[b] = 0;
-            for (0..32) |j| xq[b * 32 + j] = 0;
+            q8[b].d = 0;
+            @memset(&q8[b].qs, 0);
             continue;
         }
-        xs[b] = amax / 127.0;
+        const d = amax / 127.0;
+        q8[b].d = types.fp32_to_fp16(d);
         const inv = 127.0 / amax;
         for (0..32) |j| {
             const v: i32 = @intFromFloat(@round(xb[j] * inv));
-            xq[b * 32 + j] = @intCast(@max(-127, @min(127, v)));
+            q8[b].qs[j] = @intCast(@max(-127, @min(127, v)));
         }
     }
+}
+
+pub fn matvecQ80IntPre(
+    blocks: [*]const u8,
+    q8_x: [*]const quant.block_q8_0,
+    y: [*]f32,
+    M: u32,
+    K: u32,
+) void {
+    const blocks_per_row = K / 32;
+    const block_stride: usize = 34;
+
     var m: u32 = 0;
     while (m < M) : (m += 1) {
         const row_ptr = blocks + @as(usize, m) * blocks_per_row * block_stride;
@@ -220,16 +224,17 @@ fn matvecQ80Int(
         var s1: f32 = 0;
         var s2: f32 = 0;
         var s3: f32 = 0;
-        b = 0;
+        var b: usize = 0;
         while (b + 4 <= blocks_per_row) : (b += 4) {
             inline for (0..4) |q| {
                 const bp = row_ptr + (b + q) * block_stride;
                 @prefetch(bp + 16 * block_stride, .{ .rw = .read, .locality = 2, .cache = .data });
-                const d = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+                const d_w = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+                const d_x = types.fp16_to_fp32(q8_x[b + q].d);
                 const wv: @Vector(32, i8) = @as(*align(1) const [32]i8, @ptrCast(bp + 2)).*;
-                const xv: @Vector(32, i8) = xq[(b + q) * 32 ..][0..32].*;
+                const xv: @Vector(32, i8) = q8_x[b + q].qs;
                 const prod: @Vector(32, i32) = @as(@Vector(32, i32), @intCast(wv)) * @as(@Vector(32, i32), @intCast(xv));
-                const term = d * xs[b + q] * @as(f32, @floatFromInt(@reduce(.Add, prod)));
+                const term = (d_w * d_x) * @as(f32, @floatFromInt(@reduce(.Add, prod)));
                 switch (q) {
                     0 => s0 += term,
                     1 => s1 += term,
@@ -241,13 +246,31 @@ fn matvecQ80Int(
         }
         while (b < blocks_per_row) : (b += 1) {
             const bp = row_ptr + b * block_stride;
-            const d = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+            const d_w = types.fp16_to_fp32(std.mem.readInt(u16, bp[0..2], .little));
+            const d_x = types.fp16_to_fp32(q8_x[b].d);
             const wv: @Vector(32, i8) = @as(*align(1) const [32]i8, @ptrCast(bp + 2)).*;
-            const xv: @Vector(32, i8) = xq[b * 32 ..][0..32].*;
+            const xv: @Vector(32, i8) = q8_x[b].qs;
             const prod: @Vector(32, i32) = @as(@Vector(32, i32), @intCast(wv)) * @as(@Vector(32, i32), @intCast(xv));
-            s0 += d * xs[b] * @as(f32, @floatFromInt(@reduce(.Add, prod)));
+            s0 += (d_w * d_x) * @as(f32, @floatFromInt(@reduce(.Add, prod)));
         }
         y[m] += (s0 + s1) + (s2 + s3);
+    }
+}
+
+fn matvecQ80Int(
+    blocks: [*]const u8,
+    x: [*]const f32,
+    y: [*]f32,
+    M: u32,
+    K: u32,
+) void {
+    const blocks_per_row = K / 32;
+    var q8_buf: [512]quant.block_q8_0 = undefined;
+    if (blocks_per_row <= 512) {
+        quantizeXToQ80(x, &q8_buf, K);
+        matvecQ80IntPre(blocks, &q8_buf, y, M, K);
+    } else {
+        matvecQ80(blocks, x, y, M, K);
     }
 }
 

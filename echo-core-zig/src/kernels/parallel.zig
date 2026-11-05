@@ -129,6 +129,12 @@ const MatvecJob = struct {
 };
 
 pub fn parallelMatvec(w: [*]const u8, x: [*]const f32, y: [*]f32, m: u32, k: u32, dtype: gguf.GGMLType) void {
+    if (dtype == .q8_0 and k % 32 == 0 and k <= 16384) {
+        var q8_buf: [512]quantK.block_q8_0 = undefined;
+        matvec.quantizeXToQ80(x, &q8_buf, k);
+        parallelMatvecQ80Pre(w, &q8_buf, y, m, k);
+        return;
+    }
     if (m < MIN_PARALLEL_ROWS) {
         matvec.matvecDispatchQuant(0, 0, w, x, y, m, k, dtype);
         return;
@@ -139,6 +145,36 @@ pub fn parallelMatvec(w: [*]const u8, x: [*]const f32, y: [*]f32, m: u32, k: u32
     };
     var job = MatvecJob{ .w = w, .x = x, .y = y, .m = m, .k = k, .stride = rowStride(k, dtype), .dtype = dtype };
     p.run(MatvecJob.work, &job);
+}
+
+const PreJobQ80 = struct {
+    w: [*]const u8,
+    q8: [*]const quantK.block_q8_0,
+    y: [*]f32,
+    m: u32,
+    k: u32,
+    stride: usize,
+
+    fn work(ctx: *anyopaque, tid: u32, total: u32) void {
+        const self: *PreJobQ80 = @ptrCast(@alignCast(ctx));
+        const r = chunkRange(self.m, tid, total);
+        if (r.end <= r.start) return;
+        const row_ptr = self.w + @as(usize, r.start) * self.stride;
+        matvec.matvecQ80IntPre(row_ptr, self.q8, self.y + r.start, r.end - r.start, self.k);
+    }
+};
+
+pub fn parallelMatvecQ80Pre(w: [*]const u8, q8: [*]const quantK.block_q8_0, y: [*]f32, m: u32, k: u32) void {
+    if (m < MIN_PARALLEL_ROWS) {
+        matvec.matvecQ80IntPre(w, q8, y, m, k);
+        return;
+    }
+    const p = getPool() orelse {
+        matvec.matvecQ80IntPre(w, q8, y, m, k);
+        return;
+    };
+    var job = PreJobQ80{ .w = w, .q8 = q8, .y = y, .m = m, .k = k, .stride = (@as(usize, k) / 32) * 34 };
+    p.run(PreJobQ80.work, &job);
 }
 
 const PreJob = struct {
