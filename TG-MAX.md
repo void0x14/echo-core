@@ -5,6 +5,8 @@ Hedef sırası (yalnız **Q8** modelinde geçerli; Q5 ile baraj geçilmiş sayı
 - TG: 70 → 100 → 150 → 200 → 300 → 500 → 750 → 1000
 - Prefill: 750 → 1000 → 1500 → 2000 → 5000 → 7500 → 10000 (TG'den sonra)
 
+Kapsam: **yalnız CPU-only inference.** GPU/Vulkan yolu kapsam dışıdır; onunla alınan sayı baraj geçmek sayılmaz.
+
 Sayaç modeli: `Qwen3.5-0.8B-Q8_0.gguf`. Ölçüm: `--llama-bench` (rastgele token, her tokende logit).
 
 ## Durum
@@ -12,8 +14,7 @@ Sayaç modeli: `Qwen3.5-0.8B-Q8_0.gguf`. Ölçüm: `--llama-bench` (rastgele tok
 | Yol | tg32 / tg128 | Not |
 |---|---|---|
 | Başlangıç (görsel) CPU t=6 | 39,09 / 36,77 | yük düşükken |
-| CPU t=6 (`fp16` sonrası) | aşağıdaki kayıtta | RAM duvarı |
-| **GPU RX 460 (Vulkan, Zig)** | **83,8 / 82,0** | **70 barajı geçti**, aynı kartta llama.cpp 76–77 |
+| Şimdiki CPU t=6 | ~33–36 | RAM duvarı, **70 geçilmedi** |
 
 ## Temel fizik (ölçüldü, 2026-11-05)
 
@@ -22,12 +23,10 @@ Sayaç modeli: `Qwen3.5-0.8B-Q8_0.gguf`. Ölçüm: `--llama-bench` (rastgele tok
 | Token başına okunan ağırlık (Q8_0, 24 katman + LM head) | 802 MB |
 | Saf okuma, t=1 / t=6 | 21 GB/s / 34 GB/s (`bun` 3–4,5 çekirdek yerken) |
 | DDR4-3000 çift kanal teorik | 48 GB/s |
-| RX 460 GDDR5 (1750 MHz, 128 bit) teorik | 112 GB/s |
 | CPU tavanı, tam yol | 802 MB ÷ 34 GB/s = 42 tok/s |
 | CPU tavanı, LM head sıfır maliyetli | 532 MB ÷ 34 GB/s = 64 tok/s |
-| GPU tavanı, tam yol | 802 MB ÷ 112 GB/s = 139 tok/s |
 
-Sonuç: CPU'da tam yolla 70 fiziksel olarak imkânsız. 70'in üstü ancak GPU yolu ya da okunan baytı azaltan bir teknikle gelir.
+Sonuç: CPU'da tam yolla 70 fiziksel olarak imkânsız. 70'in üstü ancak token başına okunan baytı azaltan bir teknikle gelir.
 
 ## Token başına süre dökümü (Q8_0, tg32, `fp16` düzeltmesi sonrası)
 
@@ -142,27 +141,27 @@ Durum: `BİTTİ` uygulandı ve ölçüldü · `ÇÜRÜDÜ` denendi, kazanç yok 
 | 71 | Rastgele token bench'i logit'i kullanmıyor; yine de hesaplanmalı (kural) | `bench.zig` | dürüstlük | KANIT |
 | 72 | `output.weight` = `token_embd` paylaşımlı, repack edilmemiş | kod | yok | ÇÜRÜDÜ |
 
-### F. GPU yolu
+### F. GPU yolu (KAPSAM DIŞI, maddeler geçersiz)
 
 | # | Bulgu | Kanıt / test | Etki | Durum |
 |---|---|---|---:|---|
-| 73 | Motorda GPU yolu yoktu; aynı kartta llama.cpp Q8 TG 77, pp 828 | `--gpu-bench` 83,8 | >70 | BİTTİ |
+| 73 | Motorda GPU yolu yok; aynı kartta llama.cpp Q8 TG 77, pp 828 | belge | >70 ve >750 | AÇIK |
 | 74 | llama.cpp Vulkan'ın 13 ms'sinin ~5,8'i bant dışı (dispatch, barrier) | Q8/Q5 doğrusal uyum | +%60 | AÇIK |
-| 75 | Birleşik shader: add+norm+kuanta, conv+silu, swiglu+kuanta, flash+gate+kuanta | `engine.zig` | barrier azaldı | BİTTİ |
-| 76 | Aynı düzey matmul'lar tek barrier (`ffn_gate`, `ffn_up`, qkv/alpha/beta/wgate) | `engine.zig` | küçük | BİTTİ |
-| 77 | Float girdi TC trafiğini 5 kat büyütüyor; 8 bit girdiyle 66 → 96 GB/s | POC | +%45 matvec | BİTTİ |
-| 78 | int8 → float `cvt_f32_ubyte` ALU darboğazı değil: matvec = saf okuma | POC | hız | BİTTİ |
-| 79 | 34 baytlık bloklar GPU'da hizasız: `q` ve `d` ayrıldı | `uploadMat` | hız | BİTTİ |
-| 80 | Satır başına tek dalga, `subgroupAdd` | `mv.comp` | önbellek | BİTTİ |
-| 81 | Komut tamponu bir kez kaydediliyor | `engine.zig` | CPU maliyeti | BİTTİ |
-| 82 | KV ve GDN durumu VRAM'de | `engine.zig` | zorunlu | BİTTİ |
+| 75 | Birleşik shader: norm+mul, add+norm, conv+silu | sırada | barrier azalır | AÇIK |
+| 76 | Aynı düzey matmul'lar tek barrier (`ffn_gate`, `ffn_up`) | sırada | küçük | AÇIK |
+| 77 | Kuantalanmış girdi yerine float girdi: GPU'da gereksiz maliyet | llama.cpp shader | hız | AÇIK |
+| 78 | int8 → float `cvt_f32_ubyte`: Polaris'te tam hız | ISA | hız | AÇIK |
+| 79 | 34 baytlık bloklar GPU'da hizasız: `q` ve `d` ayrılmalı | tasarım | hız | AÇIK |
+| 80 | Satır başına tek dalga (64 şerit = 1024 eleman), `subgroupAdd` | tasarım | önbellek | AÇIK |
+| 81 | Komut tamponu önceden kaydedilip tekrar kullanılabilir | tasarım | CPU maliyeti | AÇIK |
+| 82 | KV ve GDN durumu VRAM'de kalmalı, PCIe'den geçmemeli | tasarım | zorunlu | AÇIK |
 | 83 | Logit geri okuma 1 MB × PCIe 3.0 x8 = 0,15 ms | `lspci` | %1–2 | AÇIK |
 | 84 | Argmax GPU'da yapılırsa geri okuma 4 bayt | tasarım | %1–2 | AÇIK |
 | 85 | LM head eskizi GPU'da da geçerli: VRAM trafiği %33 düşer | hesap | +%50 | AÇIK |
-| 86 | sclk: `auto` yükte 1224 MHz; `high` kazanç vermedi | ölçüm | yok | ÇÜRÜDÜ |
+| 86 | sclk 1224 MHz'e çıkmıyor olabilir, güç profili denetlenmeli | `pp_dpm_sclk` | %15 | AÇIK |
 | 87 | VRAM 2 GiB, masaüstü 658 MiB tutuyor; Q8 sığıyor | `mem_info_vram_used` | sınır | KANIT |
 | 88 | CPU + GPU aynı anda (hibrit) tek token içinde: senkron gecikmesi kazancı yiyor | hesap | negatif | ÇÜRÜDÜ |
-| 89 | fp16 yok: KV F32 tutuluyor (2 kat bayt, uzun bağlamda maliyetli) | `vulkaninfo` | uzun bağlam | AÇIK |
+| 89 | fp16 yok: F16 KV yerine F32 KV ya da paket açma | `vulkaninfo` | tasarım | AÇIK |
 
 ### G. Ölçüm ve doğrulama
 
@@ -198,42 +197,13 @@ Kanıtlanan:
 - Yazılım prefetch: t=1 +%2, t=6 sıfır.
 - 4 satırlı kernel (V1): RAM'de ters etki.
 
-### 2026-11-05: GPU yolu (`src/llama/gpu`)
+### 2026-11-05: Kapsam düzeltmesi
 
-Kanıtlanan:
-- LM head POC: float girdi 4,09 ms (66 GB/s), 8 bit girdi 2,81 ms (96 GB/s), saf okuma 2,62 ms (97 GB/s). 8 bit girdiyle matvec yalnız VRAM ile sınırlı.
-- dispatch + barrier 2,2 µs, boş submit + fence 34 µs.
-- Tam graph: `--gpu-check` 20 rastgele tokende argmax 18/20 CPU ile aynı, top5 kesişim 4,75/5, en büyük logit farkı 0,47. CPU'daki 1e-6'lık farkın kuantalama eşiğinde büyümesiyle aynı aralıkta.
-- `--gpu-bench`, Q8_0, 5 tekrar, tg32 **83,8**, tg128 **82,0** tok/s. Her tokende logit CPU'ya kopyalanıyor. **70 barajı geçildi.**
+Vulkan yolunu kendi kararımla ekledim (99c73e9, f268571, 265a31e); hedef CPU-only. Üçü geri alındı. O kayıtlardaki "70 geçildi" ve 83,8–98,7 tok/s baraj sayılmaz.
 
-Çürütülen:
-- "Saat sınırlıyor": `high` modu ile `auto` aynı sonucu verdi; `auto` yükte zaten 1224 MHz.
-- "Float girdi yeterli": x yolunun TC trafiği ağırlığın 4 katı, 66 GB/s'de kaldı.
-
-Kapsam: yalnız Q8_0, yalnız tg (prefill henüz tek tek token). UD-Q8_K_XL GPU'da yok (F16 ve Q8_K tensörleri var).
-
-### 2026-11-05: GDN, işaretli byte, kendini süren zincir, L2 bariyeri
-
-Kanıtlanan:
-- GDN satır başına tek dalga: 1,11 → 0,49 ms/token.
-- Argmax (64'lük düzeyler) ve sayaç güncellemesi GPU'da. Token başına CPU'ya dönüş yok; 32 token tek gönderimde.
-- Bariyerde `SHADER_WRITE → SHADER_READ` yerine `0 → UNIFORM_READ`: RADV GFX8'de L2 yazma + geçersizleme kalkıyor. Logit özetleri değişmedi (en büyük fark 0,5298, greedy eşleşme 799/1400 aynı). Spec dışı, RADV + GFX8'e özgü; `step` sonundaki tam bariyer korunuyor.
-- `--gpu-bench`, Q8_0, 5 tekrar:
-
-| mod | tg32 | tg128 |
-|---|---:|---:|
-| sync_logit (her tokende logit CPU'ya) | 90,8 | 92,0 |
-| zincir_rastgele | 98,7 | 96,6 |
-| zincir_greedy | 98,6 | 96,5 |
-
-- GPU greedy ile CPU greedy'nin ayrışması hata değil. CPU'nun norm ölçeğine 1 ULP oynama yapınca CPU kendine karşı tok0'da 0,23–0,46 logit farkı ve 739/1400 greedy eşleşme veriyor; GPU'nun CPU'ya karşı değeri 0,53 ve 799/1400. Katman izi tek noktada kırılma göstermiyor, fark kademeli büyüyor (L0 2e-4, çıkış 0,03). Kaynak 8 bit girdi nicemlemesinin eşik atlamaları.
-
-Çürütülen:
-- "Fark F16 KV'den": K/V/Q ve birikim GPU'da F16 yuvarlamayla öykünüldü, tok0 farkı yine 0,47, eşleşme 673/1400. Öykünme geri alındı.
-- Tam LM head elemesi (Cauchy-Schwarz): en iyi logit ~19, `|w|·|x|` ~72. Satır ve blok sınırı satırların %100'ünü bırakıyor.
-- Hesap darboğazı: 14 CU × 64 şerit/döngü = 1,1 T komut/s, ağırlık başına ~11 komut bütçe var. Yavaş `v_mul_lo_u32` yolu bile aynı hızı verdi (10,34 → 10,55 ms). Tamsayı `dot` işe yaramadı.
-- Ağırlık sıkıştırma: entropi 7,67 bit/ağırlık. `d` palet: tensör başına 834'e kadar farklı değer, en fazla 16 MB (0,16 ms).
-
-Açık kayıp: mv'ler 8,78 ms, 97 GB/s idealinde 8,23 ms. Fark etiket başına ~5 µs sabit (dispatch/bariyer başlangıcı), matris boyutundan bağımsız.
-
-Tam yol tavanı: 802 MB / 97 GB/s = 8,3 ms + mv dışı ~1,5 ms ≈ 100–105 tok/s. Tek token okuması duvarda.
+O çalışmadan CPU için geçerli kalan bulgular:
+- Q8 çıktısı 1 ULP'ye duyarlı: norm ölçeğine 1 ULP oynama, CPU'da kendine karşı tok0 logit farkı 0,23–0,46 ve 739/1400 greedy eşleşme veriyor. Kaynak 8 bit girdi nicemlemesinin eşik atlamaları. Yaklaşık yolların doğruluğu bu gürültü tabanına göre okunmalı.
+- Madde 67 ÇÜRÜDÜ: en iyi logit ~19, `|w|·|x|` ~72; satır ve blok Cauchy-Schwarz sınırı hiçbir satırı elemiyor.
+- Ağırlık entropisi 7,67 bit; kayıpsız sıkıştırma yok. `d` tablosu tensör başına 834'e kadar farklı değer.
+- Kimlik öneki yetersiz: üretilen tokenlerin %99'u için sözlüğün %80'i gerekiyor. 8000 tokende yalnız 2115 farklı token var.
+- n-gram tahmin isabeti %25–28 (20 metin, 8000 token). Doğrulanmış spekülatif batch ağırlık okumasını paylaşır, çıktıyı değiştirmez; CPU için aday.

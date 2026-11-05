@@ -191,20 +191,6 @@ pub fn main(init: std.process.Init) !void {
         return runLlamaBench(init, args.items);
     }
 
-    if (args.items.len > 2 and std.mem.eql(u8, args.items[1], "--gpu-check")) {
-        const n = if (args.items.len > 3) try std.fmt.parseInt(usize, args.items[3], 10) else 40;
-        return @import("llama/gpu/engine.zig").check(args.items[2], init.gpa, n);
-    }
-    if (args.items.len > 2 and std.mem.eql(u8, args.items[1], "--gpu-prof")) {
-        return @import("llama/gpu/engine.zig").profile(args.items[2], 40.0, init.gpa, 64);
-    }
-    if (args.items.len > 2 and std.mem.eql(u8, args.items[1], "--gpu-bench")) {
-        var buf: [4096]u8 = undefined;
-        var w = std.Io.File.stdout().writer(init.io, &buf);
-        const reps = if (args.items.len > 3) try std.fmt.parseInt(usize, args.items[3], 10) else 5;
-        return @import("llama/gpu/engine.zig").bench(args.items[2], reps, &.{ 32, 128 }, init.gpa, init.io, &w.interface);
-    }
-
     var prompt: ?[]const u8 = null;
     var max_tokens: u32 = 100;
     var bench = false;
