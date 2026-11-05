@@ -140,4 +140,4 @@ Kapsam dışı kalanlar:
 - Tokenizer eski (`src/tokenizer`): BPE yerine en uzun eşleşme yapıyor, çıktıda `Ġ` kalıyor, başa BOS ekliyor. Logit ve hız ölçümleri token kimlikleriyle yapıldığı için bunlara etkisi yok, ama `--prompt` metni llama.cpp'den farklı token'lara çevriliyor.
 - `src/llama` yalnız `qwen35` mimarisini kapsar; öteki mimariler eski motordadır.
 
-Sıradaki tek adım: llama.cpp BPE tokenizer'ını port etmek (`--prompt` çıktısının da llama.cpp ile aynı olması için).
+Tokenizer bu işin hedefi değil, BPE portu planda yok: tek amaç throughput. Benchmark rastgele token kimlikleriyle çalıştığı için tablolardaki sayılarda tokenizer maliyeti yok. Sıradaki iş, bu taban üzerine kendi tarif ve tekniklerimiz.
