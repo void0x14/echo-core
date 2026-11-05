@@ -4,6 +4,7 @@ const std = @import("std");
 const avx = @import("avx.zig");
 const q = @import("quants.zig");
 const Params = @import("pool.zig").Params;
+const Pool = @import("pool.zig").Pool;
 const F8 = avx.F8;
 const F4 = avx.F4;
 
@@ -184,6 +185,7 @@ const gemm4x2_asm = blk: {
 const ones16: [16]i16 = @splat(1);
 
 pub const TinyBlasQ0 = struct {
+    pool: *Pool,
     k: usize,
     a: [*]const q.BlockQ80,
     lda: usize,
@@ -294,14 +296,30 @@ pub const TinyBlasQ0 = struct {
     noinline fn gemm4xN(self: *const TinyBlasQ0, comptime RN: usize, m0: usize, m: usize, n0: usize, n: usize) void {
         const ytiles = (m - m0) / 4;
         const xtiles = (n - n0) / RN;
+        if (RN == 2) {
+            // mnpack'te RN=2 yalnız ilk çağrıdır, sayaç ona ait: satır bloğu dinamik alınır, blok L2'de kalırken tüm x geçer.
+            const rb = 4;
+            const nblk = (ytiles + rb - 1) / rb;
+            var cur: i64 = @intCast(self.ith);
+            while (cur < nblk) {
+                const b0: usize = @as(usize, @intCast(cur)) * rb;
+                for (0..xtiles) |xt| {
+                    for (b0..@min(b0 + rb, ytiles)) |yt| self.tile4xN(RN, m0 + yt * 4, n0 + xt * RN);
+                }
+                cur = self.pool.chunkAdd(1);
+            }
+            return;
+        }
         const tiles = xtiles * ytiles;
         const duty = (tiles + self.nth - 1) / self.nth;
         const start = duty * self.ith;
         const end = @min(start + duty, tiles);
         var job = start;
-        while (job < end) : (job += 1) {
-            const ii = m0 + job / xtiles * 4;
-            const jj = n0 + job % xtiles * RN;
+        while (job < end) : (job += 1) self.tile4xN(RN, m0 + job / xtiles * 4, n0 + job % xtiles * RN);
+    }
+
+    inline fn tile4xN(self: *const TinyBlasQ0, comptime RN: usize, ii: usize, jj: usize) void {
+        {
             var cv: [RN][4]F8 = undefined;
             inline for (0..RN) |j| inline for (0..4) |i| {
                 cv[j][i] = @splat(0);

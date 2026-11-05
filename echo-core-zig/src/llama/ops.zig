@@ -195,6 +195,7 @@ pub fn mulMat(p: *const Params, a: Mat, x: [*]const f32, n: usize, y: [*]f32) vo
         .q8_0 => {
             if (n >= 2) {
                 const tb = sgemm.TinyBlasQ0{
+                    .pool = p.pool,
                     .k = a.k / 32,
                     .a = @ptrCast(@alignCast(a.data)),
                     .lda = a.nb1 / 34,

@@ -244,3 +244,9 @@ IVF sonrası LM head ~0,5 ms; token süresi 18,35 ms, gövde 532 MB ÷ 34 GB/s =
 | `MADV_COLLAPSE` ile huge page | 420 bloktan 4'ü; bellek parçalı, swap 11,7 GB dolu |
 
 Kod dışı kalan yollar (donanım/açılış): açılışta `hugepages=420`, RAM zamanlaması/frekansı.
+
+### 2026-11-05: Prefill, dinamik tile
+
+`TinyBlasQ0.gemm4xN` statik tile yerine 4 tile'lık dinamik satır bloklarıyla çalışıyor. Logit 9/9 aynı. A/B (6 tur, 3 tekrar, Q8_0, t=6): pp128 263 → 269, pp512 264 → 275; en kötü tur 214 → 254. 750 barajı geçilmedi.
+
+Çürütülen: satır bloğu büyütme (rb=16 ~245, rb=64 ~200, rb=256 ~105).
