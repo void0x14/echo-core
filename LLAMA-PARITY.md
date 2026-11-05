@@ -10,9 +10,7 @@ Yöntem: llama.cpp b11146 (`7fe450e`) sıcak yolunu Zig'e satır satır kopyalam
 | Araç | Ne yapar |
 |---|---|
 | `zig-out/bin/echo-core-zig --llama-bench -m M -t 6 -r 5 -p 128,512 -n 32,128` | `llama-bench` ile aynı döngü: taze context, warmup, tekrar başına memory clear, rastgele token |
-| `tools/llama_parity.py` | iki motoru aynı testte sırayla koşar, oran tablosu üretir |
 | `tools/doc_parity.py` | belgedeki CPU hücrelerini okur, echo-core'u ölçüp belge değerine oranlar |
-| `tools/ref_logits.cpp` + `tools/compare_logits.py` | aynı token dizisinde llama.cpp ve echo-core logit'lerini karşılaştırır |
 | `zig test -OReleaseSafe -fllvm -lc src/llama/ops.zig` | tiled/skaler flash, `simdGemm`, `vExpf` birim testleri |
 
 ## Kopyalanan parçalar (`echo-core-zig/src/llama/`)
@@ -86,6 +84,10 @@ Kanıtlanan:
 
 Çürütülen:
 - "Yük altında belge değerine ulaşılamaz": load 8,2 iken bile en kötü hücre %104,2. Önceki tek turda Q8_0 pp128 %92 kalmıştı, şimdi %108,4. Bu 16 puanın yaklaşık 6'sı kernel'den, kalanı turlar arasındaki yük farkından geliyor.
+
+### 2026-11-05: C/C++ ve llama.cpp araçları kaldırıldı
+
+Hız hedefi tuttuğu için repodan tüm C/C++/CMake dosyaları ve llama.cpp'ye bağlı araçlar silindi. Bu kayıttaki `llama_parity.py`, `compare_logits.py` ve `ref_logits.cpp` geçmişe aittir; son halleri `a0bd186` commit'inde. Bundan sonra llama.cpp ile yan yana hız veya logit karşılaştırması yapılmaz.
 
 ## Son durum
 

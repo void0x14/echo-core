@@ -1,12 +1,7 @@
-build/
-cmake-build-*/
 *.o
 *.a
 *.so
-echo_core
 *_test
-compile_commands.json
-.cache/
 *.gguf
 
 # Zig
