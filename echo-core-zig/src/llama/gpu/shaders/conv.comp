@@ -1,0 +1,13 @@
+#version 450
+// CONCAT + SSM_CONV + SILU + CPY(conv_state): şerit = satır (kc=3, d_conv=4)
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint qkv; uint st; uint c; uint o; } p;
+void main() {
+    uint row = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+    uint s = p.st + row * 3u;
+    float s0 = f[s], s1 = f[s + 1u], s2 = f[s + 2u], x = f[p.qkv + row];
+    f[p.o + row] = silu(dot(vec4(s0, s1, s2, x), v[p.c / 4u + row]));
+    f[s] = s1; f[s + 1u] = s2; f[s + 2u] = x;
+}

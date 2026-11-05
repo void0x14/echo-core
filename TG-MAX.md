@@ -12,7 +12,8 @@ Sayaç modeli: `Qwen3.5-0.8B-Q8_0.gguf`. Ölçüm: `--llama-bench` (rastgele tok
 | Yol | tg32 / tg128 | Not |
 |---|---|---|
 | Başlangıç (görsel) CPU t=6 | 39,09 / 36,77 | yük düşükken |
-| Şimdiki CPU t=6 | aşağıdaki kayıtta | RAM duvarı |
+| CPU t=6 (`fp16` sonrası) | aşağıdaki kayıtta | RAM duvarı |
+| **GPU RX 460 (Vulkan, Zig)** | **83,8 / 82,0** | **70 barajı geçti**, aynı kartta llama.cpp 76–77 |
 
 ## Temel fizik (ölçüldü, 2026-11-05)
 
@@ -145,23 +146,23 @@ Durum: `BİTTİ` uygulandı ve ölçüldü · `ÇÜRÜDÜ` denendi, kazanç yok 
 
 | # | Bulgu | Kanıt / test | Etki | Durum |
 |---|---|---|---:|---|
-| 73 | Motorda GPU yolu yok; aynı kartta llama.cpp Q8 TG 77, pp 828 | belge | >70 ve >750 | AÇIK |
+| 73 | Motorda GPU yolu yoktu; aynı kartta llama.cpp Q8 TG 77, pp 828 | `--gpu-bench` 83,8 | >70 | BİTTİ |
 | 74 | llama.cpp Vulkan'ın 13 ms'sinin ~5,8'i bant dışı (dispatch, barrier) | Q8/Q5 doğrusal uyum | +%60 | AÇIK |
-| 75 | Birleşik shader: norm+mul, add+norm, conv+silu | sırada | barrier azalır | AÇIK |
-| 76 | Aynı düzey matmul'lar tek barrier (`ffn_gate`, `ffn_up`) | sırada | küçük | AÇIK |
-| 77 | Kuantalanmış girdi yerine float girdi: GPU'da gereksiz maliyet | llama.cpp shader | hız | AÇIK |
-| 78 | int8 → float `cvt_f32_ubyte`: Polaris'te tam hız | ISA | hız | AÇIK |
-| 79 | 34 baytlık bloklar GPU'da hizasız: `q` ve `d` ayrılmalı | tasarım | hız | AÇIK |
-| 80 | Satır başına tek dalga (64 şerit = 1024 eleman), `subgroupAdd` | tasarım | önbellek | AÇIK |
-| 81 | Komut tamponu önceden kaydedilip tekrar kullanılabilir | tasarım | CPU maliyeti | AÇIK |
-| 82 | KV ve GDN durumu VRAM'de kalmalı, PCIe'den geçmemeli | tasarım | zorunlu | AÇIK |
+| 75 | Birleşik shader: add+norm+kuanta, conv+silu, swiglu+kuanta, flash+gate+kuanta | `engine.zig` | barrier azaldı | BİTTİ |
+| 76 | Aynı düzey matmul'lar tek barrier (`ffn_gate`, `ffn_up`, qkv/alpha/beta/wgate) | `engine.zig` | küçük | BİTTİ |
+| 77 | Float girdi TC trafiğini 5 kat büyütüyor; 8 bit girdiyle 66 → 96 GB/s | POC | +%45 matvec | BİTTİ |
+| 78 | int8 → float `cvt_f32_ubyte` ALU darboğazı değil: matvec = saf okuma | POC | hız | BİTTİ |
+| 79 | 34 baytlık bloklar GPU'da hizasız: `q` ve `d` ayrıldı | `uploadMat` | hız | BİTTİ |
+| 80 | Satır başına tek dalga, `subgroupAdd` | `mv.comp` | önbellek | BİTTİ |
+| 81 | Komut tamponu bir kez kaydediliyor | `engine.zig` | CPU maliyeti | BİTTİ |
+| 82 | KV ve GDN durumu VRAM'de | `engine.zig` | zorunlu | BİTTİ |
 | 83 | Logit geri okuma 1 MB × PCIe 3.0 x8 = 0,15 ms | `lspci` | %1–2 | AÇIK |
 | 84 | Argmax GPU'da yapılırsa geri okuma 4 bayt | tasarım | %1–2 | AÇIK |
 | 85 | LM head eskizi GPU'da da geçerli: VRAM trafiği %33 düşer | hesap | +%50 | AÇIK |
-| 86 | sclk 1224 MHz'e çıkmıyor olabilir, güç profili denetlenmeli | `pp_dpm_sclk` | %15 | AÇIK |
+| 86 | sclk: `auto` yükte 1224 MHz; `high` kazanç vermedi | ölçüm | yok | ÇÜRÜDÜ |
 | 87 | VRAM 2 GiB, masaüstü 658 MiB tutuyor; Q8 sığıyor | `mem_info_vram_used` | sınır | KANIT |
 | 88 | CPU + GPU aynı anda (hibrit) tek token içinde: senkron gecikmesi kazancı yiyor | hesap | negatif | ÇÜRÜDÜ |
-| 89 | fp16 yok: F16 KV yerine F32 KV ya da paket açma | `vulkaninfo` | tasarım | AÇIK |
+| 89 | fp16 yok: KV F32 tutuluyor (2 kat bayt, uzun bağlamda maliyetli) | `vulkaninfo` | uzun bağlam | AÇIK |
 
 ### G. Ölçüm ve doğrulama
 
@@ -197,4 +198,18 @@ Kanıtlanan:
 - Yazılım prefetch: t=1 +%2, t=6 sıfır.
 - 4 satırlı kernel (V1): RAM'de ters etki.
 
-Sıradaki tek adım: GPU bant genişliği POC'u (Vulkan, Zig).
+### 2026-11-05: GPU yolu (`src/llama/gpu`)
+
+Kanıtlanan:
+- LM head POC: float girdi 4,09 ms (66 GB/s), 8 bit girdi 2,81 ms (96 GB/s), saf okuma 2,62 ms (97 GB/s). 8 bit girdiyle matvec yalnız VRAM ile sınırlı.
+- dispatch + barrier 2,2 µs, boş submit + fence 34 µs.
+- Tam graph: `--gpu-check` 20 rastgele tokende argmax 18/20 CPU ile aynı, top5 kesişim 4,75/5, en büyük logit farkı 0,47. CPU'daki 1e-6'lık farkın kuantalama eşiğinde büyümesiyle aynı aralıkta.
+- `--gpu-bench`, Q8_0, 5 tekrar, tg32 **83,8**, tg128 **82,0** tok/s. Her tokende logit CPU'ya kopyalanıyor. **70 barajı geçildi.**
+
+Çürütülen:
+- "Saat sınırlıyor": `high` modu ile `auto` aynı sonucu verdi; `auto` yükte zaten 1224 MHz.
+- "Float girdi yeterli": x yolunun TC trafiği ağırlığın 4 katı, 66 GB/s'de kaldı.
+
+Kapsam: yalnız Q8_0, yalnız tg (prefill henüz tek tek token). UD-Q8_K_XL GPU'da yok (F16 ve Q8_K tensörleri var).
+
+Sıradaki tek adım: GPU zaman dökümü, 100 barajı.

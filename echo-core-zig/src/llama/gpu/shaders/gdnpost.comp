@@ -1,0 +1,23 @@
+#version 450
+// build_norm_gated + SILU(z) + MUL, sonuç 8 bite. 2048 eleman: şerit = 1 blok (32), 4 şerit = 1 başlık (128)
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint g; uint w; uint z; uint nq; uint nd; float eps; } p;
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    uint ig = p.g / 4u + lane * 8u, iz = p.z / 4u + lane * 8u, iw = p.w / 4u + (lane & 3u) * 8u;
+    vec4 g[8];
+    float s = 0.0;
+    for (uint i = 0u; i < 8u; i++) { g[i] = v[ig + i]; s += dot(g[i], g[i]); }
+    s = subgroupClusteredAdd(s, 4u);
+    float sc = 1.0 / sqrt(s / 128.0 + p.eps);
+    vec4 am = vec4(0.0);
+    for (uint i = 0u; i < 8u; i++) { g[i] = g[i] * sc * v[iw + i] * silu4(v[iz + i]); am = max(am, abs(g[i])); }
+    float m = max(max(am.x, am.y), max(am.z, am.w));
+    float id = m != 0.0 ? 127.0 / m : 0.0;
+    uint nq = p.nq / 4u + lane * 2u;
+    uq[nq] = uvec4(pack8(g[0], id), pack8(g[1], id), pack8(g[2], id), pack8(g[3], id));
+    uq[nq + 1u] = uvec4(pack8(g[4], id), pack8(g[5], id), pack8(g[6], id), pack8(g[7], id));
+    f[p.nd + lane] = dq16(m / 127.0);
+}

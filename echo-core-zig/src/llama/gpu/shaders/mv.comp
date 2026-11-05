@@ -1,0 +1,27 @@
+#version 450
+// Q8_0 matvec, girdi de 8 bit. Bir dalga bir satır: önbellek satırı tek geçişte biter.
+// -DL=64 -DW4=1 (k=1024), -DL=64 -DW4=2 (k=2048), -DL=56 -DW4=4 (k=3584)
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = L) in;
+layout(push_constant) uniform P { uint q; uint d; uint x; uint xd; uint y; uint y_dyn; } p;
+const uint ROW4 = uint(L) * uint(W4);
+const uint ROWB = ROW4 / 2u;
+float dq(uvec4 a, uvec4 b) { return dot(u8v(a.x), u8v(b.x)) + dot(u8v(a.y), u8v(b.y)) + dot(u8v(a.z), u8v(b.z)) + dot(u8v(a.w), u8v(b.w)); }
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationIndex;
+    uint qb = p.q / 4u + row * ROW4 + lane * uint(W4);
+    uint xb = p.x / 4u + lane * uint(W4);
+    float s;
+#if W4 == 1
+    s = dq(uq[qb], uq[xb]) * wscale(p.d, row * ROWB + lane / 2u) * f[p.xd + lane / 2u];
+#elif W4 == 2
+    s = (dq(uq[qb], uq[xb]) + dq(uq[qb + 1u], uq[xb + 1u])) * wscale(p.d, row * ROWB + lane) * f[p.xd + lane];
+#else
+    s = (dq(uq[qb], uq[xb]) + dq(uq[qb + 1u], uq[xb + 1u])) * wscale(p.d, row * ROWB + lane * 2u) * f[p.xd + lane * 2u]
+      + (dq(uq[qb + 2u], uq[xb + 2u]) + dq(uq[qb + 3u], uq[xb + 3u])) * wscale(p.d, row * ROWB + lane * 2u + 1u) * f[p.xd + lane * 2u + 1u];
+#endif
+    s = subgroupAdd(s);
+    if (lane == 0u) f[p.y + par.head * p.y_dyn + row] = s;
+}

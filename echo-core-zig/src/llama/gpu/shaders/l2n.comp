@@ -1,0 +1,12 @@
+#version 450
+// build_gdn_l2_norm: başlık başına 128 eleman, şerit = vec4
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = 32) in;
+layout(push_constant) uniform P { uint src; uint dst; float eps; float l2; } p;
+void main() {
+    uint h = gl_WorkGroupID.x, lane = gl_LocalInvocationIndex;
+    vec4 a = v[p.src / 4u + h * 32u + lane];
+    float s = subgroupAdd(dot(a, a));
+    v[p.dst / 4u + h * 32u + lane] = a * (1.0 / sqrt(s / 128.0 + p.eps)) * p.l2;
+}

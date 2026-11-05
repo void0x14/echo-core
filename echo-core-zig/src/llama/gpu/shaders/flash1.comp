@@ -1,0 +1,14 @@
+#version 450
+// FLASH_ATTN skor: s[h][c] = dot(Q[h], K[c][h/4]) * scale. Grup = 64 hücre.
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint qn; uint k; uint s; uint stride; float scale; } p;
+void main() {
+    uint h = gl_WorkGroupID.y, c = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+    if (c >= par.n_cells) return;
+    uint iq = p.qn / 4u + h * 64u, ik = p.k / 4u + (c * 2u + h / 4u) * 64u;
+    float a = 0.0;
+    for (uint i = 0u; i < 64u; i++) a += dot(v[iq + i], v[ik + i]);
+    f[p.s + h * p.stride + c] = a * p.scale;
+}

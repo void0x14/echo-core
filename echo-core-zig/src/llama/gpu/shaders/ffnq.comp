@@ -1,0 +1,20 @@
+#version 450
+// SWIGLU sonrası ffn_down girdisi: y = silu(g)*u, 3584 eleman: 56 şerit, şerit başına 2 blok
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = 56) in;
+layout(push_constant) uniform P { uint g; uint u_; uint nq; uint nd; } p;
+void main() {
+    uint lane = gl_LocalInvocationIndex;
+    uint ig = p.g / 4u + lane * 16u, iu = p.u_ / 4u + lane * 16u, nq = p.nq / 4u + lane * 4u;
+    for (uint b = 0u; b < 2u; b++) {
+        vec4 y[8];
+        vec4 am = vec4(0.0);
+        for (uint i = 0u; i < 8u; i++) { y[i] = silu4(v[ig + b * 8u + i]) * v[iu + b * 8u + i]; am = max(am, abs(y[i])); }
+        float m = max(max(am.x, am.y), max(am.z, am.w));
+        float id = m != 0.0 ? 127.0 / m : 0.0;
+        uq[nq + b * 2u] = uvec4(pack8(y[0], id), pack8(y[1], id), pack8(y[2], id), pack8(y[3], id));
+        uq[nq + b * 2u + 1u] = uvec4(pack8(y[4], id), pack8(y[5], id), pack8(y[6], id), pack8(y[7], id));
+        f[p.nd + lane * 2u + b] = dq16(m / 127.0);
+    }
+}

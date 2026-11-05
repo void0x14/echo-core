@@ -1,0 +1,27 @@
+#version 450
+// build_norm + rope (yalnız ilk 64 boyut): başlık başına 256 eleman, şerit = vec4
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = 64) in;
+layout(push_constant) uniform P { uint src; uint stride; uint dst; uint dstride; uint dyn; uint w; uint ts; float eps; } p;
+void main() {
+    uint h = gl_WorkGroupID.x, lane = gl_LocalInvocationIndex;
+    uint b = (p.src + h * p.stride) / 4u;
+    vec4 a = v[b + lane];
+    float s = subgroupAdd(dot(a, a));
+    float sc = 1.0 / sqrt(s / 256.0 + p.eps);
+    vec4 y = a * sc * v[p.w / 4u + lane];
+    if (lane < 16u) {
+        uint pair = lane < 8u ? lane : lane - 8u;
+        vec4 th = par.pos * v[p.ts / 4u + pair];
+        vec4 c = cos(th), sn = sin(th);
+        if (lane < 8u) {
+            vec4 o = v[b + lane + 8u] * sc * v[p.w / 4u + lane + 8u];
+            y = y * c - o * sn;
+        } else {
+            vec4 o = v[b + lane - 8u] * sc * v[p.w / 4u + lane - 8u];
+            y = o * sn + y * c;
+        }
+    }
+    v[(p.dst + par.head * p.dyn + h * p.dstride) / 4u + lane] = y;
+}
