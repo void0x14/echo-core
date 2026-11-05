@@ -20,11 +20,14 @@ Tarih: 2026-11-04 · echo-core: `/home/void0x14/Documents/Cachyos-Documents-Back
 | Model | Motor | pp128 | pp512 | tg32 | tg128 |
 |---|---|---:|---:|---:|---:|
 | Qwen3.5-0.8B-Q8_0 (Q8_0, 794.6 MiB) | llama.cpp | 263.39 | 253.33 | 33.28 | 30.01 |
-| Qwen3.5-0.8B-Q8_0 (Q8_0, 794.6 MiB) | echo-core | 25.50 | 26.25 | 24.48 | 26.80 |
+| Qwen3.5-0.8B-Q8_0 (Q8_0, 794.6 MiB) | echo-core (eski motor, 11-04) | 25.50 | 26.25 | 24.48 | 26.80 |
+| Qwen3.5-0.8B-Q8_0 (Q8_0, 794.6 MiB) | **echo-core (güncel, 11-05)** | **285.56** | **281.94** | **39.09** | **36.77** |
 | Qwen3.5-0.8B-UD-Q8_K_XL (UD-Q8_K_XL, 1149.4 MiB) | llama.cpp | 237.12 | 190.66 | 24.59 | 24.89 |
-| Qwen3.5-0.8B-UD-Q8_K_XL (UD-Q8_K_XL, 1149.4 MiB) | echo-core | 19.39 | 20.58 | 20.29 | 19.01 |
+| Qwen3.5-0.8B-UD-Q8_K_XL (UD-Q8_K_XL, 1149.4 MiB) | echo-core (eski motor, 11-04) | 19.39 | 20.58 | 20.29 | 19.01 |
+| Qwen3.5-0.8B-UD-Q8_K_XL (UD-Q8_K_XL, 1149.4 MiB) | **echo-core (güncel, 11-05)** | **253.81** | **258.90** | **25.61** | **27.22** |
 | unc-0.8b-q5km (Q5_K_M, 382.6 MiB) | llama.cpp | 169.59 | 161.86 | 53.60 | 55.42 |
-| unc-0.8b-q5km (Q5_K_M, 382.6 MiB) | echo-core | 20.34 | 24.21 | 24.13 | 25.41 |
+| unc-0.8b-q5km (Q5_K_M, 382.6 MiB) | echo-core (eski motor, 11-04) | 20.34 | 24.21 | 24.13 | 25.41 |
+| unc-0.8b-q5km (Q5_K_M, 382.6 MiB) | **echo-core (güncel, 11-05)** | **191.26** | **193.04** | **68.72** | **66.90** |
 
 ## Tek bakışta (GPU)
 
@@ -81,6 +84,29 @@ echo-core: `echo-core-zig <model> --prompt <p> --max-tokens <0|32|128> --bench -
 | unc-0.8b-q5km (Q5_K_M, 382.6 MiB) | pp512 | 161.86 | 24.21 | 15.0% |
 | unc-0.8b-q5km (Q5_K_M, 382.6 MiB) | tg32 | 53.60 | 24.13 | 45.0% |
 | unc-0.8b-q5km (Q5_K_M, 382.6 MiB) | tg128 | 55.42 | 25.41 | 45.8% |
+
+### CPU — güncel echo-core (2026-11-05)
+
+Yukarıdaki echo-core sütunu 11-04 tarihli eski motora aittir. Güncel motor: `echo-core-zig/src/llama`, commit `2f281fb`.
+
+echo-core: `tools/doc_parity.py --reps 5 --rounds 3` (`--llama-bench -t 6 -r 5`; `llama-bench` döngüsü, rastgele token). Değer: 3 turun medyanlarının medyanı. Ham veri: `echo-core-zig/benchmarks/doc-parity-2026-11-05.json`.
+
+llama.cpp sütunu 11-04 ölçümüdür, aynı anda alınmadı. echo-core koşusu sonunda load average 8,2 idi.
+
+| Model | Test | llama.cpp 11-04 (tok/s) | echo-core 11-05 (tok/s) | echo-core / llama.cpp |
+|---|---|---:|---:|---:|
+| Qwen3.5-0.8B-Q8_0 | pp128 | 263.39 | 285.56 | 108.4% |
+| Qwen3.5-0.8B-Q8_0 | pp512 | 253.33 | 281.94 | 111.3% |
+| Qwen3.5-0.8B-Q8_0 | tg32 | 33.28 | 39.09 | 117.5% |
+| Qwen3.5-0.8B-Q8_0 | tg128 | 30.01 | 36.77 | 122.5% |
+| Qwen3.5-0.8B-UD-Q8_K_XL | pp128 | 237.12 | 253.81 | 107.0% |
+| Qwen3.5-0.8B-UD-Q8_K_XL | pp512 | 190.66 | 258.90 | 135.8% |
+| Qwen3.5-0.8B-UD-Q8_K_XL | tg32 | 24.59 | 25.61 | 104.2% |
+| Qwen3.5-0.8B-UD-Q8_K_XL | tg128 | 24.89 | 27.22 | 109.4% |
+| unc-0.8b-q5km | pp128 | 169.59 | 191.26 | 112.8% |
+| unc-0.8b-q5km | pp512 | 161.86 | 193.04 | 119.3% |
+| unc-0.8b-q5km | tg32 | 53.60 | 68.72 | 128.2% |
+| unc-0.8b-q5km | tg128 | 55.42 | 66.90 | 120.7% |
 
 ### CPU — ham ölçümler
 
