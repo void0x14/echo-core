@@ -1,10 +1,12 @@
 const std = @import("std");
 const ports = @import("ports/inference.zig");
 const llama_bench = @import("llama/bench.zig");
+const llama_port = @import("llama/port.zig");
+const qwen35 = @import("llama/qwen35.zig");
 
 const ArrayList = std.array_list.Managed;
 
-fn formatBenchResult(allocator: std.mem.Allocator, result: ports.InferencePort.BenchResult, json: bool) ![]u8 {
+fn formatBenchResult(allocator: std.mem.Allocator, result: anytype, json: bool) ![]u8 {
     const pp_tps: f64 = if (result.prefill_ms > 0)
         @as(f64, @floatFromInt(result.prompt_tokens)) * 1000.0 / @as(f64, @floatFromInt(result.prefill_ms))
     else
@@ -29,23 +31,25 @@ fn formatBenchResult(allocator: std.mem.Allocator, result: ports.InferencePort.B
     );
 }
 
-pub const REPL = struct {
-    port: ports.InferencePort,
+fn REPL(comptime Port: type) type {
+    return struct {
+    const Self = @This();
+    port: Port,
     running: bool,
 
-    pub fn init(model_path: []const u8, allocator: std.mem.Allocator) !REPL {
-        const port = try ports.InferencePort.init(model_path, allocator);
+    pub fn init(model_path: []const u8, allocator: std.mem.Allocator) !Self {
+        const port = try Port.init(model_path, allocator);
         return .{
             .port = port,
             .running = false,
         };
     }
 
-    pub fn deinit(self: *REPL, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         self.port.deinit(allocator);
     }
 
-    pub fn run(self: *REPL, io: std.Io) !void {
+    pub fn run(self: *Self, io: std.Io) !void {
         self.running = true;
         std.debug.print("Echo Core REPL\nType :quit to exit, :reset to clear KV cache\n", .{});
 
@@ -80,7 +84,7 @@ pub const REPL = struct {
         }
     }
 
-    fn printStats(self: *const REPL) void {
+    fn printStats(self: *const Self) void {
         const cfg = self.port.getConfig();
         std.debug.print("Model Config:\n", .{});
         std.debug.print("  vocab_size: {}\n", .{cfg.vocab_size});
@@ -89,6 +93,7 @@ pub const REPL = struct {
         std.debug.print("  max_seq_len: {}\n", .{cfg.max_seq_len});
     }
 };
+}
 
 fn parseModelPath(args: []const []const u8) ?[]const u8 {
     var model_path: ?[]const u8 = null;
@@ -214,8 +219,15 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidArgs;
     };
 
+    if (qwen35.supported and qwen35.Model.isQwen35(model_path, init.gpa)) {
+        return drive(llama_port.Port, init, model_path, prompt, max_tokens, bench, json);
+    }
+    return drive(ports.InferencePort, init, model_path, prompt, max_tokens, bench, json);
+}
+
+fn drive(comptime Port: type, init: std.process.Init, model_path: []const u8, prompt: ?[]const u8, max_tokens: u32, bench: bool, json: bool) !void {
     if (prompt) |p| {
-        var port = try ports.InferencePort.init(model_path, init.gpa);
+        var port = try Port.init(model_path, init.gpa);
         defer port.deinit(init.gpa);
 
         if (bench) {
@@ -241,7 +253,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var repl = try REPL.init(model_path, init.gpa);
+    var repl = try REPL(Port).init(model_path, init.gpa);
     defer repl.deinit(init.gpa);
     try repl.run(init.io);
 }

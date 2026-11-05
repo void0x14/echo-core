@@ -599,7 +599,7 @@ fn flashTiled(p: *const Params, a: *const FlashArgs, ir0: usize, ir1: usize) voi
                     s_sum[tq] *= ms;
                 }
                 m_max[tq] = m_new;
-                s_sum[tq] += @floatCast(vec.softMax(KV_TILE, kq_row, kq_row, m_new));
+                s_sum[tq] = @floatCast(@as(f64, s_sum[tq]) + vec.softMax(KV_TILE, kq_row, kq_row, m_new));
             }
             for (0..kv_tile) |tk| vec.fp16to32Row(a.vRow(ic + tk, ik2), v32 + tk * dv, dv);
             for (0..tile_rows) |tq| {
