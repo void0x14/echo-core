@@ -22,6 +22,7 @@ pub const PIPE_COMPUTE: u32 = 0x800;
 pub const PIPE_HOST: u32 = 0x4000;
 pub const PIPE_INDIRECT: u32 = 0x2;
 pub const ACC_INDIRECT: u32 = 0x1;
+pub const ACC_UNIFORM_READ: u32 = 0x8;
 pub const ACC_SHADER_READ: u32 = 0x20;
 pub const ACC_SHADER_WRITE: u32 = 0x40;
 pub const ACC_XFER_READ: u32 = 0x800;

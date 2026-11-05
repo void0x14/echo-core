@@ -212,4 +212,28 @@ Kanıtlanan:
 
 Kapsam: yalnız Q8_0, yalnız tg (prefill henüz tek tek token). UD-Q8_K_XL GPU'da yok (F16 ve Q8_K tensörleri var).
 
-Sıradaki tek adım: GPU zaman dökümü, 100 barajı.
+### 2026-11-05: GDN, işaretli byte, kendini süren zincir, L2 bariyeri
+
+Kanıtlanan:
+- GDN satır başına tek dalga: 1,11 → 0,49 ms/token.
+- Argmax (64'lük düzeyler) ve sayaç güncellemesi GPU'da. Token başına CPU'ya dönüş yok; 32 token tek gönderimde.
+- Bariyerde `SHADER_WRITE → SHADER_READ` yerine `0 → UNIFORM_READ`: RADV GFX8'de L2 yazma + geçersizleme kalkıyor. Logit özetleri değişmedi (en büyük fark 0,5298, greedy eşleşme 799/1400 aynı). Spec dışı, RADV + GFX8'e özgü; `step` sonundaki tam bariyer korunuyor.
+- `--gpu-bench`, Q8_0, 5 tekrar:
+
+| mod | tg32 | tg128 |
+|---|---:|---:|
+| sync_logit (her tokende logit CPU'ya) | 90,8 | 92,0 |
+| zincir_rastgele | 98,7 | 96,6 |
+| zincir_greedy | 98,6 | 96,5 |
+
+- GPU greedy ile CPU greedy'nin ayrışması hata değil. CPU'nun norm ölçeğine 1 ULP oynama yapınca CPU kendine karşı tok0'da 0,23–0,46 logit farkı ve 739/1400 greedy eşleşme veriyor; GPU'nun CPU'ya karşı değeri 0,53 ve 799/1400. Katman izi tek noktada kırılma göstermiyor, fark kademeli büyüyor (L0 2e-4, çıkış 0,03). Kaynak 8 bit girdi nicemlemesinin eşik atlamaları.
+
+Çürütülen:
+- "Fark F16 KV'den": K/V/Q ve birikim GPU'da F16 yuvarlamayla öykünüldü, tok0 farkı yine 0,47, eşleşme 673/1400. Öykünme geri alındı.
+- Tam LM head elemesi (Cauchy-Schwarz): en iyi logit ~19, `|w|·|x|` ~72. Satır ve blok sınırı satırların %100'ünü bırakıyor.
+- Hesap darboğazı: 14 CU × 64 şerit/döngü = 1,1 T komut/s, ağırlık başına ~11 komut bütçe var. Yavaş `v_mul_lo_u32` yolu bile aynı hızı verdi (10,34 → 10,55 ms). Tamsayı `dot` işe yaramadı.
+- Ağırlık sıkıştırma: entropi 7,67 bit/ağırlık. `d` palet: tensör başına 834'e kadar farklı değer, en fazla 16 MB (0,16 ms).
+
+Açık kayıp: mv'ler 8,78 ms, 97 GB/s idealinde 8,23 ms. Fark etiket başına ~5 µs sabit (dispatch/bariyer başlangıcı), matris boyutundan bağımsız.
+
+Tam yol tavanı: 802 MB / 97 GB/s = 8,3 ms + mv dışı ~1,5 ms ≈ 100–105 tok/s. Tek token okuması duvarda.

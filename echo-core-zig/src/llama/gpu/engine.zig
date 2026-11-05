@@ -580,7 +580,9 @@ const Rec = struct {
         self.c.f.vkCmdDispatch(self.cb, x, y, 1);
     }
     fn bar(self: Rec) void {
-        self.c.barrier(self.cb, vk.PIPE_COMPUTE, vk.PIPE_COMPUTE, vk.ACC_SHADER_WRITE, vk.ACC_SHADER_READ);
+        // GFX8'de L2 hesap istemcileri arasında tutarlıdır; yalnız TC L1'in geçersizlenmesi gerekir.
+        // SHADER_WRITE -> SHADER_READ RADV'de bu kartta tüm L2'yi yazar + geçersizler.
+        self.c.barrier(self.cb, vk.PIPE_COMPUTE, vk.PIPE_COMPUTE, 0, vk.ACC_UNIFORM_READ);
     }
 };
 
