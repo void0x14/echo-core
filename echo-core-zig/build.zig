@@ -50,6 +50,54 @@ pub fn build(b: *std.Build) void {
         .root_module = dump_model_mod,
     }));
 
+    // Deney A (blok düzeyi): tek çekirdekli blok ring'i, gerçek GGUF tensör baytları üzerinde
+    const deney_a_mod = b.createModule(.{
+        .root_source_file = b.path("src/deney_a_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    deney_a_mod.addImport("gguf", gguf_mod);
+    b.installArtifact(b.addExecutable(.{
+        .name = "deney-a",
+        .root_module = deney_a_mod,
+    }));
+
+    // Deney A (uçtan uca): decode döngüsüne ring geçişi, token/s ölçümü
+    const deney_e2e_mod = b.createModule(.{
+        .root_source_file = b.path("src/deney_a_e2e_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    deney_e2e_mod.addImport("core_config", core_config_mod);
+    deney_e2e_mod.addImport("gguf", gguf_mod);
+    deney_e2e_mod.addImport("config", core_config_mod);
+    b.installArtifact(b.addExecutable(.{
+        .name = "deney-a-e2e",
+        .root_module = deney_e2e_mod,
+    }));
+
+    // Deney K: kolektif dolaşım (B tarifi). Deney B (SPSC yerleşimi) ile karıştırılmamalı.
+    const kolektif_mod = b.createModule(.{
+        .root_source_file = b.path("src/kolektif/kolektif_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(b.addExecutable(.{
+        .name = "kolektif",
+        .root_module = kolektif_mod,
+    }));
+
+    // Deney S: Satürn. Kolektif dolaşımın donanım gözlemleri (PMU/MSR/resctrl).
+    const saturn_mod = b.createModule(.{
+        .root_source_file = b.path("src/saturn/saturn_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(b.addExecutable(.{
+        .name = "saturn",
+        .root_module = saturn_mod,
+    }));
+
     // Analyze GGUF tool - standalone, needs Zig 0.17 API refactor
     // Temporarily disabled until old std.fs API calls are updated
     // const analyze_mod = b.createModule(.{
