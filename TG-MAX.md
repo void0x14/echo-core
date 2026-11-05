@@ -227,3 +227,20 @@ Kanıtlanan (Q8_0, t=6, 5 tekrar, aynı oturum):
 Thread: t=3 50,6, t=5 49,8, t=6 51,5–54,5 (t=4'te 37,8 tek sapma, arka plan yükü). 70 geçilmedi.
 
 `tools/logit_check.py` Zig'e taşındı: `--logit-check [--save]`, referans `benchmarks/logit-ref.txt`. `tools/doc_parity.py` kaldırıldı.
+
+### 2026-11-05: Gövde duvarı (CPU)
+
+IVF sonrası LM head ~0,5 ms; token süresi 18,35 ms, gövde 532 MB ÷ 34 GB/s = 15,6 ms. LM head bedava olsa bile tavan ~64 tok/s. **70 için token başına gövde okuması azalmalı ya da bant genişliği artmalı.**
+
+Çürütülen (hepsi ölçüldü, kod geri alındı):
+
+| Deney | Sonuç |
+|---|---|
+| SwiGLU kapısıyla `ffn_up` satır atlama | τ=%5: top-1 %71; τ=%10: %46; τ=%20: %17, hız 42,8 → 49,0. Hız için doğruluk yıkılıyor |
+| Thread'leri fiziksel çekirdeğe bağlama | 53,4'e karşı 53,0, gürültü içinde |
+| `mulMat` chunk 8–512 satır | 32–256 düz; 8 ve 16 biraz kötü |
+| Aynı girdiye `mulMat` grubu (tek nicemleme, az bariyer) | logit 9/9 aynı, A/B ≤%1–2, gürültü içinde |
+| Doğrulanmış spekülatif batch | Batch süresi n=1 18,35, n=2 22,8, n=3 25,95, n=4 23,25 ms. n-gram k=4'te 1,33 token/batch, 59 tok/s tahmini; token başına 19 MB GDN durum kopyası eklenince ~51 tok/s, kazanç yok |
+| `MADV_COLLAPSE` ile huge page | 420 bloktan 4'ü; bellek parçalı, swap 11,7 GB dolu |
+
+Kod dışı kalan yollar (donanım/açılış): açılışta `hugepages=420`, RAM zamanlaması/frekansı.
