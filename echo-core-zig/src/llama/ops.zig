@@ -322,32 +322,43 @@ pub fn gateAttn(p: *const Params, n_t: usize, heads: usize, dim: usize, attn: [*
     }
 }
 
+const CONV_ROWS = 64;
+
 /// CONCAT(conv_states, qkv^T) dim=0 + CPY(conv_state_last -> cache_r); satır bazında.
 pub fn convConcat(p: *const Params, rows: usize, kc: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, out: [*]f32) void {
     const r = p.range(rows);
     const ncs = kc + n_t;
-    for (r[0]..r[1]) |row| {
-        const o = out + row * ncs;
-        const s = state + row * kc;
-        for (0..kc) |c| o[c] = s[c];
-        for (0..n_t) |t| o[kc + t] = qkv[t * rows + row];
-        for (0..kc) |c| s[c] = o[n_t + c];
+    // qkv satırları `rows` adımlı: blok içinde t dış döngüde kalır, her t aynı önbellek satırlarını okur
+    var b0 = r[0];
+    while (b0 < r[1]) : (b0 += CONV_ROWS) {
+        const b1 = @min(b0 + CONV_ROWS, r[1]);
+        for (b0..b1) |row| {
+            for (0..kc) |c| out[row * ncs + c] = state[row * kc + c];
+        }
+        for (0..n_t) |t| {
+            for (b0..b1) |row| out[row * ncs + kc + t] = qkv[t * rows + row];
+        }
+        for (b0..b1) |row| {
+            for (0..kc) |c| state[row * kc + c] = out[row * ncs + n_t + c];
+        }
     }
 }
 
 /// ggml_compute_forward_ssm_conv_f32
 pub fn ssmConv(p: *const Params, nr: usize, nc: usize, ncs: usize, n_t: usize, src: [*]const f32, c: [*]const f32, dst: [*]f32) void {
     const rg = p.range(nr);
-    const ir0 = rg[0];
-    const ir = rg[1] - rg[0];
-    for (0..n_t) |t| {
-        const s = src + ir0 * ncs + t;
-        const cc = c + ir0 * nc;
-        const x = dst + ir0 + t * nr;
-        for (0..ir) |row| {
-            var sumf: f32 = 0;
-            for (0..nc) |w| sumf += s[w + row * ncs] * cc[w + row * nc];
-            x[row] = sumf;
+    var b0 = rg[0];
+    while (b0 < rg[1]) : (b0 += CONV_ROWS) {
+        const ir = @min(CONV_ROWS, rg[1] - b0);
+        for (0..n_t) |t| {
+            const s = src + b0 * ncs + t;
+            const cc = c + b0 * nc;
+            const x = dst + b0 + t * nr;
+            for (0..ir) |row| {
+                var sumf: f32 = 0;
+                for (0..nc) |w| sumf += s[w + row * ncs] * cc[w + row * nc];
+                x[row] = sumf;
+            }
         }
     }
 }
@@ -377,7 +388,6 @@ pub fn gatedDeltaNet(
     p.barrier();
     const dr = (nr + nchunk - 1) / nchunk;
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(s_v)));
-    const delta = p.fdata + p.ith * (s_v + 64);
 
     var current: i64 = p.ith;
     while (current < nchunk) {
@@ -392,15 +402,14 @@ pub fn gatedDeltaNet(
                 const k_d = k_in + t * h_n * s_v + iv1 * s_v;
                 const v_d = v_in + t * v_stride + iv1 * s_v;
                 const beta_val = beta[t * h_n + iv1];
-                vec.scaleF32(s_v * s_v, s_out, avx.expf(g[t * h_n + iv1]));
+                // satır başına tek geçiş: satır L1'de kalır, 64 KB durum üç kez dolaşılmaz
+                const e = avx.expf(g[t * h_n + iv1]);
                 for (0..s_v) |j| {
-                    const sum = vec.dotF32(s_v, s_out + j * s_v, k_d);
-                    delta[j] = (v_d[j] - sum) * beta_val;
-                }
-                for (0..s_v) |j| vec.madF32(s_v, s_out + j * s_v, k_d, delta[j]);
-                for (0..s_v) |j| {
-                    const sum = vec.dotF32(s_v, s_out + j * s_v, q_d);
-                    attn_data[j] = sum * scale;
+                    const row = s_out + j * s_v;
+                    vec.scaleF32(s_v, row, e);
+                    const sum = vec.dotF32(s_v, row, k_d);
+                    vec.madF32(s_v, row, k_d, (v_d[j] - sum) * beta_val);
+                    attn_data[j] = vec.dotF32(s_v, row, q_d) * scale;
                 }
                 attn_data += s_v * h_n;
             }

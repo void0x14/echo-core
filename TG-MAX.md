@@ -250,3 +250,7 @@ Kod dışı kalan yollar (donanım/açılış): açılışta `hugepages=420`, RA
 `TinyBlasQ0.gemm4xN` statik tile yerine 4 tile'lık dinamik satır bloklarıyla çalışıyor. Logit 9/9 aynı. A/B (6 tur, 3 tekrar, Q8_0, t=6): pp128 263 → 269, pp512 264 → 275; en kötü tur 214 → 254. 750 barajı geçilmedi.
 
 Çürütülen: satır bloğu büyütme (rb=16 ~245, rb=64 ~200, rb=256 ~105).
+
+### 2026-11-05: Prefill, `convConcat`/`ssmConv`/GDN önbellek düzeni
+
+`convConcat` ve `ssmConv` 64 satırlık bloklarla yürüyor; `gatedDeltaNet` durum satırını üç geçiş yerine tek geçişte işliyor (satır L1'de kalıyor, thread başına `delta` tamponu kalktı). Logit 9/9 aynı. A/B (5 tur, 2 tekrar, Q8_0, t=6): pp128 273,6 → 283,1, pp512 273,3 → 282,3 (~%3,4). TG IVF değişmedi: ~54 (tek aykırı tur 44,7 hariç). 750 barajı geçilmedi.
