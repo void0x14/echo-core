@@ -5,9 +5,19 @@ const avx = @import("avx.zig");
 const vec = @import("vec.zig");
 const q = @import("quants.zig");
 const sgemm = @import("sgemm.zig");
+const repack = @import("repack.zig");
 const Params = @import("pool.zig").Params;
 
-pub const Type = enum { f32, f16, q8_0, q4_k, q5_k, q6_k };
+pub const Type = enum {
+    f32,
+    f16,
+    q8_0,
+    q4_k,
+    q5_k,
+    q6_k,
+    /// ggml_repack_get_optimal_repack_type: Q4_K ve ne[1] % 8 == 0 ise block_q4_Kx8
+    q4_k_8x8,
+};
 
 pub const Mat = struct {
     data: [*]const u8,
@@ -25,7 +35,7 @@ pub fn rowSize(t: Type, k: usize) usize {
         .f32 => k * 4,
         .f16 => k * 2,
         .q8_0 => k / 32 * 34,
-        .q4_k => k / 256 * 144,
+        .q4_k, .q4_k_8x8 => k / 256 * 144,
         .q5_k => k / 256 * 176,
         .q6_k => k / 256 * 210,
     };
@@ -37,7 +47,7 @@ fn dotRowSize(t: Type, k: usize) usize {
         .f32 => k * 4,
         .f16 => k * 2,
         .q8_0 => k / 32 * 34,
-        .q4_k, .q5_k, .q6_k => k / 256 * 292,
+        .q4_k, .q4_k_8x8, .q5_k, .q6_k => k / 256 * 292,
     };
 }
 
@@ -49,6 +59,7 @@ inline fn vecDot(comptime T: Type, n: usize, s: *f32, x: [*]const u8, y: [*]cons
         .q4_k => q.dotQ4KQ8K(n, @ptrCast(@alignCast(x)), @ptrCast(@alignCast(y))),
         .q5_k => q.dotQ5KQ8K(n, @ptrCast(@alignCast(x)), @ptrCast(@alignCast(y))),
         .q6_k => q.dotQ6KQ8K(n, @ptrCast(@alignCast(x)), @ptrCast(@alignCast(y))),
+        .q4_k_8x8 => @compileError("repack yolu vec_dot kullanmaz"),
     };
 }
 
@@ -136,6 +147,7 @@ pub fn mulMat(p: *const Params, a: Mat, x: [*]const f32, n: usize, y: [*]f32) vo
             mulMatChunks(.f32, p, a, @ptrCast(x), a.k * 4, n, y);
             return;
         },
+        .q4_k_8x8 => return repack.forwardMulMat(p, a, x, n, y),
         else => {},
     }
 
@@ -201,7 +213,7 @@ pub fn mulMat(p: *const Params, a: Mat, x: [*]const f32, n: usize, y: [*]f32) vo
         .q4_k => mulMatChunks(.q4_k, p, a, wdata, row_size, n, y),
         .q5_k => mulMatChunks(.q5_k, p, a, wdata, row_size, n, y),
         .q6_k => mulMatChunks(.q6_k, p, a, wdata, row_size, n, y),
-        .f32 => unreachable,
+        .f32, .q4_k_8x8 => unreachable,
     }
 }
 

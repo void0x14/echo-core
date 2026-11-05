@@ -7,6 +7,7 @@ const avx = @import("avx.zig");
 const vec = @import("vec.zig");
 const q = @import("quants.zig");
 const ops = @import("ops.zig");
+const repack = @import("repack.zig");
 const pool_mod = @import("pool.zig");
 const Pool = pool_mod.Pool;
 const Params = pool_mod.Params;
@@ -45,6 +46,7 @@ pub const Layer = struct {
 pub const Model = struct {
     allocator: Alloc,
     map: []align(std.heap.page_size_min) const u8,
+    repacked: std.ArrayList([]repack.BlockQ4Kx8) = .empty,
     layers: []Layer,
     tok_embd: Mat,
     output: Mat,
@@ -169,13 +171,40 @@ pub const Model = struct {
                 l.q_norm = try ctx.vec1(try std.fmt.bufPrint(&nb, "blk.{d}.attn_q_norm.weight", .{il}));
                 l.k_norm = try ctx.vec1(try std.fmt.bufPrint(&nb, "blk.{d}.attn_k_norm.weight", .{il}));
             }
+            try self.repackLayer(l);
         }
         return self;
+    }
+
+    /// ggml-cpu repack buffer: MUL_MAT ağırlıkları yüklenirken block_q4_Kx8'e çevrilir.
+    /// token_embd (GET_ROWS + bağlı LM head) repack edilmez.
+    fn repackLayer(self: *Model, l: *Layer) !void {
+        try self.repackMat(&l.ffn_gate);
+        try self.repackMat(&l.ffn_up);
+        try self.repackMat(&l.ffn_down);
+        if (l.recr) {
+            for ([_]*Mat{ &l.wqkv, &l.wgate, &l.ssm_alpha, &l.ssm_beta, &l.ssm_out }) |w| try self.repackMat(w);
+        } else {
+            for ([_]*Mat{ &l.wq, &l.wk, &l.wv, &l.wo }) |w| try self.repackMat(w);
+        }
+    }
+
+    fn repackMat(self: *Model, w: *Mat) !void {
+        if (w.type != .q4_k or w.m % 8 != 0 or w.k % 8 != 0) return;
+        const nblocks = w.k / 256;
+        const dst = try self.allocator.alloc(repack.BlockQ4Kx8, w.m / 8 * nblocks);
+        errdefer self.allocator.free(dst);
+        repack.repackQ4K(@ptrCast(@alignCast(w.data)), dst.ptr, w.m, nblocks);
+        try self.repacked.append(self.allocator, dst);
+        w.data = @ptrCast(dst.ptr);
+        w.type = .q4_k_8x8;
     }
 
     pub fn deinit(self: *Model) void {
         const allocator = self.allocator;
         allocator.free(self.layers);
+        for (self.repacked.items) |b| allocator.free(b);
+        self.repacked.deinit(allocator);
         std.posix.munmap(self.map);
         allocator.destroy(self);
     }
@@ -417,6 +446,7 @@ pub const Context = struct {
             .q4_k => q.dequantizeQ4K(@ptrCast(@alignCast(row)), y, k),
             .q5_k => q.dequantizeQ5K(@ptrCast(@alignCast(row)), y, k),
             .q6_k => q.dequantizeQ6K(@ptrCast(@alignCast(row)), y, k),
+            .q4_k_8x8 => unreachable, // token_embd repack edilmez
         }
     }
 
