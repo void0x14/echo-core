@@ -139,11 +139,13 @@ pub inline fn loadB(p: *const anyopaque) B32 {
 pub inline fn loadW(p: *const anyopaque) W16 {
     return @as(*align(1) const [16]i16, @ptrCast(p)).*;
 }
-/// _cvtsh_ss. Doğrudan f16 -> f32 çevirimi vpinsrw üretir: hedef register'a sahte bağımlılık
-/// (FMA zincirinde gerçek gecikme). vmovd sıfırlayarak yükler.
+/// _cvtsh_ss. LLVM vektörlü çevirimde vpinsrw seçip sonucu rastgele bir xmm'e (çoğu kez FMA
+/// akümülatörüne) bağlıyor: dot döngüsünde 20 döngülük gecikme zinciri. vmovd üst bitleri sıfırlar.
 pub inline fn fp16(v: u16) f32 {
-    const w: @Vector(4, u32) = .{ v, 0, 0, 0 };
-    return fp16x4(@bitCast(w))[0];
+    return asm ("vmovd %[v], %[o]\n\tvcvtph2ps %[o], %[o]"
+        : [o] "=&x" (-> f32),
+        : [v] "r" (@as(u32, v)),
+    );
 }
 /// _mm_cvtph_ps: düşük 64 bit içinde 4 yarım duyarlıklı sayı
 pub inline fn fp16x4(w: @Vector(8, u16)) F4 {
