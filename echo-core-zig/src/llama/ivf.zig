@@ -4,6 +4,8 @@ const std = @import("std");
 const q = @import("quants.zig");
 const vec = @import("vec.zig");
 const ops = @import("ops.zig");
+const sgemm = @import("sgemm.zig");
+const F8 = @Vector(8, f32);
 const Alloc = std.mem.Allocator;
 /// Varsayılan LM head yolu: IVF (yaklaşık, yalnız top-1). 4096 küme, nprobe 512.
 pub const default_l: usize = 4096;
@@ -147,8 +149,15 @@ pub const Runtime = struct {
     start: []u32,
     order: []u32,
     rows: []align(64) u8,
+    /// H40: kümeler 8'lik R8 gruplarına paketli; g8[c] kümenin ilk grubu, pos8 satır konumu (dolguda maxInt).
+    g8: []u32,
+    pos8: []u32,
+    r8: []align(64) u8,
 
     pub fn deinit(self: *Runtime, a: Alloc) void {
+        a.free(self.g8);
+        a.free(self.pos8);
+        a.free(self.r8);
         a.free(self.cq);
         a.free(self.start);
         a.free(self.order);
@@ -172,8 +181,32 @@ fn makeRuntime(w: ops.Mat, l: usize, cq: []align(64) u8, assign: []const u32, a:
         order[j] = @intCast(i);
         @memcpy(rows[j * w.nb1..][0..w.nb1], (w.data + i * w.nb1)[0..w.nb1]);
     }
+    const nb = w.k / 32;
+    const g8 = try a.alloc(u32, l + 1);
+    g8[0] = 0;
+    for (0..l) |c| g8[c + 1] = g8[c] + (start[c + 1] - start[c] + 7) / 8;
+    const pos8 = try a.alloc(u32, g8[l] * 8);
+    @memset(pos8, std.math.maxInt(u32));
+    const r8 = try a.alignedAlloc(u8, .@"64", g8[l] * nb * sgemm.R8_BLOCK);
+    const tmp = try a.alloc(q.BlockQ80, 8 * nb);
+    defer a.free(tmp);
+    for (0..l) |c| {
+        var gi: usize = g8[c];
+        var r0: usize = start[c];
+        while (r0 < start[c + 1]) : ({
+            r0 += 8;
+            gi += 1;
+        }) {
+            @memset(std.mem.sliceAsBytes(tmp), 0);
+            for (0..@min(8, start[c + 1] - r0)) |i| {
+                @memcpy(std.mem.sliceAsBytes(tmp[i * nb ..][0..nb]), rows[(r0 + i) * w.nb1 ..][0..w.nb1]);
+                pos8[gi * 8 + i] = @intCast(r0 + i);
+            }
+            sgemm.repackQ80x8(tmp.ptr, r8.ptr + gi * nb * sgemm.R8_BLOCK, 8, nb);
+        }
+    }
     const r = try a.create(Runtime);
-    r.* = .{ .l = l, .k = w.k, .nb1 = w.nb1, .cq = cq, .start = start, .order = order, .rows = rows };
+    r.* = .{ .l = l, .k = w.k, .nb1 = w.nb1, .cq = cq, .start = start, .order = order, .rows = rows, .g8 = g8, .pos8 = pos8, .r8 = r8 };
     return r;
 }
 
@@ -209,6 +242,23 @@ pub fn open(model_path: []const u8, w: ops.Mat, l: usize, nth: usize, a: Alloc, 
 }
 
 pub const Best = extern struct { value: f32 = -std.math.inf(f32), token: u32 = 0, pad: [14]u32 = @splat(0) };
+/// H40: R8 ön elemesinin en iyi 4 adayı (satır konumu); reduce dotQ80Q80 ile kesin skorlar.
+pub const Best4 = extern struct {
+    v: [4]f32 = @splat(-std.math.inf(f32)),
+    pos: [4]u32 = @splat(std.math.maxInt(u32)),
+    pad: [8]u32 = @splat(0),
+
+    inline fn push(b: *Best4, v: f32, pos: u32) void {
+        if (!(v > b.v[3])) return;
+        var i: usize = 3;
+        while (i > 0 and v > b.v[i - 1]) : (i -= 1) {
+            b.v[i] = b.v[i - 1];
+            b.pos[i] = b.pos[i - 1];
+        }
+        b.v[i] = v;
+        b.pos[i] = pos;
+    }
+};
 
 /// En yüksek skorlu `nprobe` kümenin kimlikleri, artan sırada (quickselect + sort).
 fn topSel(sc: []const f32, ord: []u32, nprobe: usize) []u32 {
@@ -255,7 +305,7 @@ pub const Batch = struct {
     mask: []u32,
     pieces: []PieceC,
     n_pieces: usize = 0,
-    best: []Best,
+    best: []Best4,
     tokens: [MAXR]u32 = @splat(0),
 
     pub fn init(ix: *const Runtime, nprobe: usize, nth: usize, a: Alloc) !*Batch {
@@ -265,10 +315,10 @@ pub const Batch = struct {
             .nprobe = @min(nprobe, ix.l),
             .nth = nth,
             .scores = try a.alloc(f32, MAXR * ix.l),
-            .ord = try a.alloc(u32, ix.l),
+            .ord = try a.alloc(u32, nth * ix.l),
             .mask = try a.alloc(u32, ix.l),
-            .pieces = try a.alloc(PieceC, ix.order.len / PIECE_ROWS + ix.l + 1),
-            .best = try a.alloc(Best, nth * MAXR),
+            .pieces = try a.alloc(PieceC, ix.g8[ix.l] / PIECE_G + ix.l + 1),
+            .best = try a.alloc(Best4, nth * MAXR),
         };
         return s;
     }
@@ -294,20 +344,31 @@ pub const Batch = struct {
         }
     }
 
-    pub fn plan(s: *Batch, n: usize) void {
-        const l = s.ix.l;
+    /// Tek thread, scoreRange'den önce.
+    pub fn begin(s: *Batch, n: usize) void {
         s.n = n;
         @memset(s.mask, 0);
-        for (0..n) |r| {
-            for (topSel(s.scores[r * l ..][0..l], s.ord, s.nprobe)) |c| s.mask[c] |= @as(u32, 1) << @intCast(r);
+    }
+
+    /// H41: satır başı küme seçimi thread'lere dağıtılır (her thread kendi ord'u, maske atomik OR).
+    pub fn select(s: *Batch, ith: usize, nth: usize) void {
+        const l = s.ix.l;
+        const ord = s.ord[ith * l ..][0..l];
+        var r = ith;
+        while (r < s.n) : (r += nth) {
+            for (topSel(s.scores[r * l ..][0..l], ord, s.nprobe)) |c| _ = @atomicRmw(u32, &s.mask[c], .Or, @as(u32, 1) << @intCast(r), .monotonic);
         }
+    }
+
+    /// Tek thread, select'ten sonra: seçilen kümeleri parçalara böler.
+    pub fn plan(s: *Batch) void {
         var np: usize = 0;
         for (s.mask, 0..) |mk, c| {
             if (mk == 0) continue;
-            var a = s.ix.start[c];
-            const e = s.ix.start[c + 1];
+            var a = s.ix.g8[c];
+            const e = s.ix.g8[c + 1];
             while (a < e) {
-                const b = @min(a + PIECE_ROWS, e);
+                const b = @min(a + PIECE_G, e);
                 s.pieces[np] = .{ .first = a, .last = b, .cl = @intCast(c) };
                 np += 1;
                 a = b;
@@ -316,39 +377,63 @@ pub const Batch = struct {
         s.n_pieces = np;
     }
 
-    pub fn scan(s: *const Batch, x: [*]const q.BlockQ80, piece: usize, b: []Best) void {
+    /// xr: n satır quantR8 aktivasyonu. Parça = kümenin R8 grupları; maskedeki satırlar 4'erli çekirdekle.
+    pub fn scan(s: *const Batch, xr: [*]const q.BlockQ80, piece: usize, b: []Best4) void {
         const ix = s.ix;
         const p = s.pieces[piece];
-        const mk = s.mask[p.cl];
         const rb = ix.k / 32;
-        for (p.first..p.last) |row| {
-            const w: [*]const q.BlockQ80 = @ptrCast(@alignCast(ix.rows.ptr + row * ix.nb1));
-            const t = ix.order[row];
-            var bits = mk;
-            while (bits != 0) : (bits &= bits - 1) {
-                const r: usize = @ctz(bits);
-                const v = q.dotQ80Q80(ix.k, w, x + r * rb);
-                if (v > b[r].value or (v == b[r].value and t < b[r].token)) {
-                    b[r].value = v;
-                    b[r].token = t;
+        var cols: [MAXR + 3]u32 = undefined;
+        var nc: usize = 0;
+        var bits = s.mask[p.cl];
+        while (bits != 0) : (bits &= bits - 1) {
+            cols[nc] = @ctz(bits);
+            nc += 1;
+        }
+        const n4 = (nc + 3) / 4 * 4;
+        for (nc..n4) |i| cols[i] = cols[nc - 1];
+        var cv: [4]F8 align(32) = undefined;
+        for (p.first..p.last) |g| {
+            const w = ix.r8.ptr + g * rb * sgemm.R8_BLOCK;
+            var j: usize = 0;
+            while (j < n4) : (j += 4) {
+                sgemm.r8x4(w, .{ xr + cols[j] * rb, xr + cols[j + 1] * rb, xr + cols[j + 2] * rb, xr + cols[j + 3] * rb }, rb, &cv);
+                for (j..@min(j + 4, nc)) |ci| {
+                    const r = cols[ci];
+                    const sc: [8]f32 = cv[ci - j];
+                    for (sc, ix.pos8[g * 8 ..][0..8]) |v, ps| {
+                        if (ps != std.math.maxInt(u32)) b[r].push(v, ps);
+                    }
                 }
             }
         }
     }
 
-    pub fn reduce(s: *Batch) void {
+    /// Adayları 8 bit x (xq) ile kesin skorlar: eski tam taramayla aynı top-1 (aday listede olduğu sürece).
+    pub fn reduce(s: *Batch, xq: [*]const q.BlockQ80) void {
+        const ix = s.ix;
+        const rb = ix.k / 32;
         for (0..s.n) |r| {
-            var b = s.best[r];
-            for (1..s.nth) |th| {
-                const o = s.best[th * MAXR + r];
-                if (o.value > b.value or (o.value == b.value and o.token < b.token)) b = o;
+            var bv: f32 = -std.math.inf(f32);
+            var bt: u32 = 0;
+            for (0..s.nth) |th| {
+                const c = s.best[th * MAXR + r];
+                for (c.pos) |ps| {
+                    if (ps == std.math.maxInt(u32)) continue;
+                    const v = q.dotQ80Q80(ix.k, @ptrCast(@alignCast(ix.rows.ptr + ps * ix.nb1)), xq + r * rb);
+                    const t = ix.order[ps];
+                    if (v > bv or (v == bv and t < bt)) {
+                        bv = v;
+                        bt = t;
+                    }
+                }
             }
-            s.tokens[r] = b.token;
+            s.tokens[r] = bt;
         }
     }
 };
 const Piece = struct { first: u32, last: u32 };
 const PIECE_ROWS = 256;
+const PIECE_G = 32;
 
 /// Tek arama durumu. Evreler: scoreRange (paralel) -> plan (tek) -> scan (paralel) -> reduce (tek).
 pub const Search = struct {

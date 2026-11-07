@@ -554,6 +554,27 @@ const r8x4_asm = blk: {
     break :blk t;
 };
 
+/// 8 satırlık R8 grubu (w) × 4 keyfi sütun (quantR8 aktivasyonu) → cv[c][r]. nb çift olmalı.
+pub fn r8x4(w0: [*]const u8, b: [4][*]const q.BlockQ80, nb: usize, cv: *align(32) [4]F8) void {
+    var w = w0;
+    var b0 = b[0];
+    var b1 = b[1];
+    var b2 = b[2];
+    var b3 = b[3];
+    var cnt = nb / 2;
+    asm volatile (r8x4_asm
+        : [w] "+r" (w),
+          [b0] "+r" (b0),
+          [b1] "+r" (b1),
+          [b2] "+r" (b2),
+          [b3] "+r" (b3),
+          [cnt] "+r" (cnt),
+        : [tab] "r" (&avx.fp16_table),
+          [ones] "r" (&ones16),
+          [cv] "r" (cv),
+        : .{ .rax = true, .ymm0 = true, .ymm1 = true, .ymm2 = true, .ymm3 = true, .ymm7 = true, .ymm4 = true, .ymm5 = true, .ymm6 = true, .ymm8 = true, .ymm9 = true, .ymm10 = true, .ymm11 = true, .ymm12 = true, .ymm13 = true, .ymm14 = true, .ymm15 = true, .memory = true, .cc = true });
+}
+
 pub const GemmR8 = struct {
     pool: *Pool,
     nb: usize,
@@ -593,23 +614,8 @@ pub const GemmR8 = struct {
 
     fn tileAsm(self: *const GemmR8, g: usize, j0: usize) void {
         var cv: [4]F8 align(32) = undefined;
-        var w = self.a + g * self.nb * R8_BLOCK;
-        var b0: [*]const q.BlockQ80 = self.b + self.ldb * j0;
-        var b1 = b0 + self.ldb;
-        var b2 = b1 + self.ldb;
-        var b3 = b2 + self.ldb;
-        var cnt = self.nb / 2;
-        asm volatile (r8x4_asm
-            : [w] "+r" (w),
-              [b0] "+r" (b0),
-              [b1] "+r" (b1),
-              [b2] "+r" (b2),
-              [b3] "+r" (b3),
-              [cnt] "+r" (cnt),
-            : [tab] "r" (&avx.fp16_table),
-              [ones] "r" (&ones16),
-              [cv] "r" (&cv),
-            : .{ .rax = true, .ymm0 = true, .ymm1 = true, .ymm2 = true, .ymm3 = true, .ymm7 = true, .ymm4 = true, .ymm5 = true, .ymm6 = true, .ymm8 = true, .ymm9 = true, .ymm10 = true, .ymm11 = true, .ymm12 = true, .ymm13 = true, .ymm14 = true, .ymm15 = true, .memory = true, .cc = true });
+        const b0 = self.b + self.ldb * j0;
+        r8x4(self.a + g * self.nb * R8_BLOCK, .{ b0, b0 + self.ldb, b0 + 2 * self.ldb, b0 + 3 * self.ldb }, self.nb, &cv);
         inline for (0..4) |c| avx.storeF(self.c + self.ldc * (j0 + c) + g * 8, cv[c]);
     }
 

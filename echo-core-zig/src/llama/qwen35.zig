@@ -646,25 +646,32 @@ pub const Context = struct {
             const xq: [*]q.BlockQ80 = @ptrCast(@alignCast(p.wdata));
             const rb = m.n_embd / 32;
             const rr = p.range(n_t);
-            for (rr[0]..rr[1]) |t| q.quantizeRowQ80(self.b_norm.ptr + t * m.n_embd, xq + t * rb, m.n_embd);
+            const xr = xq + n_t * rb;
+            for (rr[0]..rr[1]) |t| {
+                q.quantizeRowQ80(self.b_norm.ptr + t * m.n_embd, xq + t * rb, m.n_embd);
+                sgemm.quantR8(self.b_norm.ptr + t * m.n_embd, xr + t * rb, m.n_embd);
+            }
             p.barrier();
+            if (p.ith == 0) b.begin(n_t);
             b.scoreRange(xq, n_t, p.ith, p.nth);
             p.barrier();
+            b.select(p.ith, p.nth);
+            p.barrier();
             if (p.ith == 0) {
-                b.plan(n_t);
+                b.plan();
                 p.pool.chunkSet(@intCast(p.nth));
             }
             p.barrier();
-            var best: [ivf.Batch.MAXR]ivf.Best = @splat(.{});
+            var best: [ivf.Batch.MAXR]ivf.Best4 = @splat(.{});
             var cur: i64 = p.ith;
             while (cur < b.n_pieces) {
-                b.scan(xq, @intCast(cur), best[0..n_t]);
+                b.scan(xr, @intCast(cur), best[0..n_t]);
                 cur = p.pool.chunkAdd(1);
             }
             @memcpy(b.best[p.ith * ivf.Batch.MAXR ..][0..n_t], best[0..n_t]);
             p.barrier();
             if (p.ith == 0) {
-                b.reduce();
+                b.reduce(xq);
                 @memcpy(self.verify_tokens[0..n_t], b.tokens[0..n_t]);
             }
             p.barrier();
