@@ -125,7 +125,7 @@ pub inline fn vSilu(x: F8) F8 {
     return x / (splat(1) + vExpf(splat(0) - x));
 }
 
-inline fn siluF32(x: f32) f32 {
+pub inline fn siluF32(x: f32) f32 {
     return x / (1.0 + avx.expf(-x));
 }
 

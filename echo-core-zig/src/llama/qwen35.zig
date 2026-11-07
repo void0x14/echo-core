@@ -701,15 +701,20 @@ pub const Context = struct {
         // H22: qkv, alpha, beta, z aynı girdiden tek geçişte; ardından bağımsız eleman işlemleri tek fazda.
         ops.mulMatMulti(p, &.{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate }, self.b_norm.ptr, n_t, &.{ self.b_qkv.ptr, self.b_gate.ptr, self.b_beta.ptr, self.b_z.ptr });
         // CONCAT + CPY(conv_state_last)
-        ops.convConcat(p, conv_dim, kc, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, self.b_conv_in.ptr, tr_conv);
+        if (m.d_conv == 4) {
+            // H35: concat + conv + silu tek fazda
+            ops.convFused(p, conv_dim, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, l.ssm_conv1d, self.b_conv_out.ptr, tr_conv);
+        } else ops.convConcat(p, conv_dim, kc, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, self.b_conv_in.ptr, tr_conv);
         ops.gateFromAlpha(p, h_n, n_t, self.b_gate.ptr, self.b_gate.ptr, l.ssm_dt, l.ssm_a);
         ops.sigmoidInPlace(p, h_n, n_t, self.b_beta.ptr);
         ops.silu(p, s, h_n * n_t, self.b_z.ptr, self.b_z.ptr);
         p.barrier();
-        ops.ssmConv(p, conv_dim, m.d_conv, kc + n_t, n_t, self.b_conv_in.ptr, l.ssm_conv1d, self.b_conv_out.ptr);
-        p.barrier();
-        ops.silu(p, conv_dim, n_t, self.b_conv_out.ptr, self.b_conv_out.ptr);
-        p.barrier();
+        if (m.d_conv != 4) {
+            ops.ssmConv(p, conv_dim, m.d_conv, kc + n_t, n_t, self.b_conv_in.ptr, l.ssm_conv1d, self.b_conv_out.ptr);
+            p.barrier();
+            ops.silu(p, conv_dim, n_t, self.b_conv_out.ptr, self.b_conv_out.ptr);
+            p.barrier();
+        }
         // build_gdn_l2_norm(q), (k)
         ops.rmsNorm(p, self.b_conv_out.ptr, s, conv_dim, self.b_q.ptr, s, m.d_inner, s, m.n_group, n_t, eps_l2, null, l2);
         ops.rmsNorm(p, self.b_conv_out.ptr + key_dim, s, conv_dim, self.b_k.ptr, s, m.d_inner, s, m.n_group, n_t, eps_l2, null, l2);

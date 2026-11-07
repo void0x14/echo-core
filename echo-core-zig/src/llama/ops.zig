@@ -403,6 +403,52 @@ pub fn convConcat(p: *const Params, rows: usize, kc: usize, n_t: usize, state: [
     }
 }
 
+/// H35: CONCAT + SSM_CONV + SILU tek fazda (satırlar bağımsız), 8 satır vektörel. d_conv = 4 (kc = 3).
+/// state[row][kc] güncellenir; trace varsa [t][row][kc] = t'den sonraki pencere.
+pub fn convFused(p: *const Params, rows: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, cw: [*]const f32, dst: [*]f32, trace: ?[*]f32) void {
+    const kc = 3;
+    const r = p.range(rows);
+    var row = r[0];
+    while (row + 8 <= r[1]) : (row += 8) {
+        var w: [4]avx.F8 = undefined;
+        var win: [kc]avx.F8 = undefined;
+        inline for (0..4) |j| {
+            inline for (0..8) |i| w[j][i] = cw[(row + i) * 4 + j];
+        }
+        inline for (0..kc) |j| {
+            inline for (0..8) |i| win[j][i] = state[(row + i) * kc + j];
+        }
+        for (0..n_t) |t| {
+            const v = avx.loadF(qkv + t * rows + row);
+            const x = win[0] * w[0] + win[1] * w[1] + win[2] * w[2] + v * w[3];
+            win[0] = win[1];
+            win[1] = win[2];
+            win[2] = v;
+            avx.storeF(dst + t * rows + row, vec.vSilu(x));
+            if (trace) |tr| inline for (0..8) |i| inline for (0..kc) |j| {
+                tr[(t * rows + row + i) * kc + j] = win[j][i];
+            };
+        }
+        inline for (0..kc) |j| {
+            inline for (0..8) |i| state[(row + i) * kc + j] = win[j][i];
+        }
+    }
+    while (row < r[1]) : (row += 1) {
+        var wn: [kc]f32 = .{ state[row * kc], state[row * kc + 1], state[row * kc + 2] };
+        const c = cw + row * 4;
+        for (0..n_t) |t| {
+            const v = qkv[t * rows + row];
+            const x = wn[0] * c[0] + wn[1] * c[1] + wn[2] * c[2] + v * c[3];
+            wn = .{ wn[1], wn[2], v };
+            dst[t * rows + row] = vec.siluF32(x);
+            if (trace) |tr| for (0..kc) |j| {
+                tr[(t * rows + row) * kc + j] = wn[j];
+            };
+        }
+        for (0..kc) |j| state[row * kc + j] = wn[j];
+    }
+}
+
 /// ggml_compute_forward_ssm_conv_f32
 pub fn ssmConv(p: *const Params, nr: usize, nc: usize, ncs: usize, n_t: usize, src: [*]const f32, c: [*]const f32, dst: [*]f32) void {
     const rg = p.range(nr);
