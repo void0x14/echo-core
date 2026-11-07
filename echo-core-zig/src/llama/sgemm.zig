@@ -490,57 +490,61 @@ pub fn quantR8(x: [*]const f32, b: [*]q.BlockQ80, k: usize) void {
 }
 
 /// H34: R8 4 sütunluk çekirdek, elle asm (derleyici 8 ağırlık + 4 akümülatörü yığına döküyordu).
-/// ymm0 w, ymm1 av/geçici, ymm3 düzeltme, ymm4 satır ölçeği, ymm5 sütun ölçeği, ymm6 bir(i16),
-/// ymm8-11 akümülatör, ymm12-15 i16 toplam. Döngü blok çifti başına (608 bayt).
+/// H36: yazılım boru hattı — bloğun sonu (subw/madd/cvt/ölçek/fma) bir sonraki bloğun iç döngüsüne
+/// serpiştirilir; iki i16 toplam seti dönüşümlü (A: ymm12-15, B: ymm2,3,4,7).
+/// ymm0 w, ymm1 av, ymm5 satır ölçeği, ymm6 geçici, ymm8-11 akümülatör. Döngü blok çifti başına (608 bayt).
+const r8_bn = [4][]const u8{ "%[b0]", "%[b1]", "%[b2]", "%[b3]" };
+const r8_SA = [4]u8{ 12, 13, 14, 15 };
+const r8_SB = [4]u8{ 2, 3, 4, 7 };
+
+fn r8Inner(comptime set: [4]u8, comptime h: usize, comptime k: usize) []const u8 {
+    var t: []const u8 = std.fmt.comptimePrint("vmovdqa {d}(%[w]), %%ymm0\n", .{96 + h * 256 + 32 * k});
+    for (0..4) |c| {
+        t = t ++ std.fmt.comptimePrint("vpbroadcastd {d}({s}), %%ymm1\n", .{ h * 34 + 2 + 4 * k, r8_bn[c] });
+        t = t ++ if (k == 0)
+            std.fmt.comptimePrint("vpmaddubsw %%ymm0, %%ymm1, %%ymm{d}\n", .{set[c]})
+        else
+            std.fmt.comptimePrint("vpmaddubsw %%ymm0, %%ymm1, %%ymm1\nvpaddw %%ymm1, %%ymm{0d}, %%ymm{0d}\n", .{set[c]});
+    }
+    return t;
+}
+
+/// Blok sonu, parça p: -1 satır ölçeği, 0..3 sütun c'nin i16→f32 kısmı, 4..7 sütun c'nin ölçek+fma kısmı.
+fn r8End(comptime set: [4]u8, comptime h: i32, comptime p: i32, comptime wo: i32, comptime bo: i32) []const u8 {
+    if (p < 0) return std.fmt.comptimePrint("vcvtph2ps {d}(%[w]), %%ymm5\n", .{wo + h * 16});
+    if (p < 4) {
+        const r = set[@intCast(p)];
+        return std.fmt.comptimePrint("vpsubw {1d}(%[w]), %%ymm{0d}, %%ymm{0d}\nvpmaddwd (%[ones]), %%ymm{0d}, %%ymm{0d}\nvcvtdq2ps %%ymm{0d}, %%ymm{0d}\n", .{ r, wo + 32 + h * 32 });
+    }
+    const c: usize = @intCast(p - 4);
+    return std.fmt.comptimePrint("movzwl {1d}({2s}), %%eax\nvbroadcastss (%[tab],%%rax,4), %%ymm6\nvmulps %%ymm5, %%ymm6, %%ymm6\nvfmadd231ps %%ymm6, %%ymm{0d}, %%ymm{3d}\n", .{ set[c], bo + h * 34, r8_bn[c], 8 + c });
+}
+
+fn r8Block(comptime si: [4]u8, comptime hi: usize, comptime se: [4]u8, comptime he: i32, comptime wo: i32, comptime bo: i32) []const u8 {
+    var t: []const u8 = r8End(se, he, -1, wo, bo);
+    for (0..8) |k| t = t ++ r8Inner(si, hi, k) ++ r8End(se, he, @intCast(k), wo, bo);
+    return t;
+}
+
 const r8x4_asm = blk: {
-    @setEvalBranchQuota(100000);
+    @setEvalBranchQuota(400000);
     var t: []const u8 =
         \\ vxorps %%ymm8, %%ymm8, %%ymm8
         \\ vxorps %%ymm9, %%ymm9, %%ymm9
         \\ vxorps %%ymm10, %%ymm10, %%ymm10
         \\ vxorps %%ymm11, %%ymm11, %%ymm11
-        \\ vmovdqu (%[ones]), %%ymm6
-        \\ .p2align 4
-        \\ 1:
         \\
     ;
-    const bn = [4][]const u8{ "%[b0]", "%[b1]", "%[b2]", "%[b3]" };
-    for (0..2) |h| {
-        const q0 = 96 + h * 256;
-        const bo = h * 34;
-        for (0..8) |k| {
-            t = t ++ std.fmt.comptimePrint("vmovdqa {d}(%[w]), %%ymm0\n", .{q0 + 32 * k});
-            for (0..4) |c| {
-                t = t ++ std.fmt.comptimePrint("vpbroadcastd {d}({s}), %%ymm1\n", .{ bo + 2 + 4 * k, bn[c] });
-                if (k == 0) {
-                    t = t ++ std.fmt.comptimePrint("vpmaddubsw %%ymm0, %%ymm1, %%ymm{d}\n", .{12 + c});
-                } else {
-                    t = t ++ "vpmaddubsw %%ymm0, %%ymm1, %%ymm1\n" ++ std.fmt.comptimePrint("vpaddw %%ymm1, %%ymm{d}, %%ymm{d}\n", .{ 12 + c, 12 + c });
-                }
-            }
-        }
-        t = t ++ std.fmt.comptimePrint("vmovdqa {d}(%[w]), %%ymm3\nvcvtph2ps {d}(%[w]), %%ymm4\n", .{ 32 + h * 32, h * 16 });
-        for (0..4) |c| {
-            t = t ++ std.fmt.comptimePrint(
-                \\vpsubw %%ymm3, %%ymm{0d}, %%ymm{0d}
-                \\vpmaddwd %%ymm6, %%ymm{0d}, %%ymm{0d}
-                \\vcvtdq2ps %%ymm{0d}, %%ymm{0d}
-                \\movzwl {2d}({3s}), %%eax
-                \\vbroadcastss (%[tab],%%rax,4), %%ymm5
-                \\vmulps %%ymm4, %%ymm5, %%ymm5
-                \\vfmadd231ps %%ymm5, %%ymm{0d}, %%ymm{1d}
-                \\
-            , .{ 12 + c, 8 + c, bo, bn[c] });
-        }
-    }
+    for (0..8) |k| t = t ++ r8Inner(r8_SA, 0, k);
+    t = t ++ "dec %[cnt]\njz 2f\n.p2align 4\n1:\n";
+    t = t ++ r8Block(r8_SB, 1, r8_SA, 0, 0, 0);
+    t = t ++ "add $68, %[b0]\nadd $68, %[b1]\nadd $68, %[b2]\nadd $68, %[b3]\nadd $608, %[w]\n";
+    t = t ++ r8Block(r8_SA, 0, r8_SB, 1, -608, -68);
+    t = t ++ "dec %[cnt]\njnz 1b\n2:\n";
+    t = t ++ r8Block(r8_SB, 1, r8_SA, 0, 0, 0);
+    t = t ++ r8End(r8_SB, 1, -1, 0, 0);
+    for (0..8) |p| t = t ++ r8End(r8_SB, 1, p, 0, 0);
     t = t ++
-        \\ add $68, %[b0]
-        \\ add $68, %[b1]
-        \\ add $68, %[b2]
-        \\ add $68, %[b3]
-        \\ add $608, %[w]
-        \\ dec %[cnt]
-        \\ jnz 1b
         \\ vmovups %%ymm8, 0x00(%[cv])
         \\ vmovups %%ymm9, 0x20(%[cv])
         \\ vmovups %%ymm10, 0x40(%[cv])
@@ -605,7 +609,7 @@ pub const GemmR8 = struct {
             : [tab] "r" (&avx.fp16_table),
               [ones] "r" (&ones16),
               [cv] "r" (&cv),
-            : .{ .rax = true, .ymm0 = true, .ymm1 = true, .ymm3 = true, .ymm4 = true, .ymm5 = true, .ymm6 = true, .ymm8 = true, .ymm9 = true, .ymm10 = true, .ymm11 = true, .ymm12 = true, .ymm13 = true, .ymm14 = true, .ymm15 = true, .memory = true, .cc = true });
+            : .{ .rax = true, .ymm0 = true, .ymm1 = true, .ymm2 = true, .ymm3 = true, .ymm7 = true, .ymm4 = true, .ymm5 = true, .ymm6 = true, .ymm8 = true, .ymm9 = true, .ymm10 = true, .ymm11 = true, .ymm12 = true, .ymm13 = true, .ymm14 = true, .ymm15 = true, .memory = true, .cc = true });
         inline for (0..4) |c| avx.storeF(self.c + self.ldc * (j0 + c) + g * 8, cv[c]);
     }
 
