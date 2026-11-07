@@ -37,6 +37,7 @@ pub const Pool = struct {
             .allocator = allocator,
         };
         if (n_threads > MAX_T) return error.TooManyThreads;
+        rtSelf(0);
         for (self.threads, 0..) |*t, i| {
             t.* = try std.Thread.spawn(.{}, worker, .{ self, @as(u32, @intCast(i + 1)) });
         }
@@ -53,6 +54,7 @@ pub const Pool = struct {
     }
 
     fn worker(self: *Pool, ith: u32) void {
+        rtSelf(ith);
         var seen: u32 = 0;
         while (true) {
             var spins: u32 = 0;
@@ -165,3 +167,17 @@ pub const Params = struct {
         return .{ @min(ir0, nr), @min(ir0 + dr, nr) };
     }
 };
+
+/// H70: SCHED_RR öncelik 1 (izin varsa; ECHO_NO_RT kapatır). Kirli ortamda CFS görevleri thread'lerimizi
+/// önalamaz, boş kardeş mantıksal CPU'lara gider; çekirdek RT kısması (%95) masaüstüne pay bırakır.
+fn rtSelf(ith: u32) void {
+    if (std.c.getenv("ECHO_NO_RT") != null) return;
+    // RT dengeleyici SMT'yi gözetmez: thread i → mantıksal CPU i (ayrı fiziksel çekirdek, Linux numaralaması)
+    if (std.c.getenv("ECHO_NO_PIN") == null) {
+        var set: linux.cpu_set_t = @splat(0);
+        set[ith / @bitSizeOf(usize)] |= @as(usize, 1) << @intCast(ith % @bitSizeOf(usize));
+        _ = linux.sched_setaffinity(0, &set) catch {};
+    }
+    const prm = linux.sched_param{ .priority = 1 };
+    _ = linux.sched_setscheduler(0, .{ .mode = .RR }, &prm);
+}
