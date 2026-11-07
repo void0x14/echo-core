@@ -294,7 +294,7 @@ fn topSel(sc: []const f32, ord: []u32, nprobe: usize) []u32 {
 /// H14: n satırın IVF araması tek geçişte. Her satır yalnız kendi seçtiği kümelerde skorlanır
 /// (Search ile aynı sonuç); satırlar kümelerin birleşimi üzerinden bir kez okunur.
 pub const Batch = struct {
-    pub const MAXR = 32;
+    pub const MAXR = 64;
     const PieceC = struct { first: u32, last: u32, cl: u32 };
     ix: *const Runtime,
     nprobe: usize,
@@ -302,7 +302,7 @@ pub const Batch = struct {
     n: usize = 0,
     scores: []f32,
     ord: []u32,
-    mask: []u32,
+    mask: []u64,
     pieces: []PieceC,
     n_pieces: usize = 0,
     best: []Best4,
@@ -316,7 +316,7 @@ pub const Batch = struct {
             .nth = nth,
             .scores = try a.alloc(f32, MAXR * ix.l),
             .ord = try a.alloc(u32, nth * ix.l),
-            .mask = try a.alloc(u32, ix.l),
+            .mask = try a.alloc(u64, ix.l),
             .pieces = try a.alloc(PieceC, ix.g8[ix.l] / PIECE_G + ix.l + 1),
             .best = try a.alloc(Best4, nth * MAXR),
         };
@@ -356,7 +356,7 @@ pub const Batch = struct {
         const ord = s.ord[ith * l ..][0..l];
         var r = ith;
         while (r < s.n) : (r += nth) {
-            for (topSel(s.scores[r * l ..][0..l], ord, s.nprobe)) |c| _ = @atomicRmw(u32, &s.mask[c], .Or, @as(u32, 1) << @intCast(r), .monotonic);
+            for (topSel(s.scores[r * l ..][0..l], ord, s.nprobe)) |c| _ = @atomicRmw(u64, &s.mask[c], .Or, @as(u64, 1) << @intCast(r), .monotonic);
         }
     }
 

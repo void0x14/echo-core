@@ -392,3 +392,10 @@ Bench üretimi 5 tokenlik döngüye giriyor; taslaklar %100 kabul (360/360). Sü
 - (a) Kanıtlanan: README TG 500 geçildi (kirli ortam, Chrome açık; varsayılan tg128 8 koşu ortanca 506.7, aralık 475–541; tg32 409–432).
 - (b) Çürütülen: H37, H42 (i16 şeridi 16 çarpımdan fazlasını taşıyamıyor), nprobe düşürme, GB 1/2, SMT (t 8/12), önden getirme mesafesi 2.
 - (c) Sıradaki tek adım: 750. Çekirdek gerçek koşuda hâlâ ~1.6–1.7 döngü/çift (tek thread 1.37); kalan fark çok çekirdek bellek çekişmesi + kirli ortamda SMT kardeş paylaşımı.
+
+## Tur 20 — 750'ye doğru
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| — | Mikro 1/3/6 kopya DRAM boyutlu (m=65536), uzun tekrar | Çok çekirdek bellek çekişmesi | par.sh | 1 kopya 1.40; 3 kopya 1.41–1.47; 6 kopya 1.39–1.70 (ort. 1.53). Bariyer duvarı: matmul segmentleri %78, GDN %7.2, LM %6.5, flash %2 |
+| H48 | k=64 (MAXR 64, maske u64, taslak tamponu 64); taslak kalan token sayısıyla sınırlı (tg32 değişmez) | Çekirdek artık bellek/tur sabitiyle sınırlı → k=64 amorti eder (Tur 18'de ölmüştü) | 3 tur döngü + bayt + tg | k=64: 560.6/536.7/530.4 vs 521.5/483.7/487.8 (3/3), çekirdek −%6, graph −%10. Varsayılan: 6/6 bayt aynı, kabul 63.5, tg128 552/491/523 vs 501/274/532, tg32 403 vs 406. **Yaşadı** |
