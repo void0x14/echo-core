@@ -175,6 +175,7 @@ pub fn mulMat(p: *const Params, a: Mat, x: [*]const f32, n: usize, y: [*]f32) vo
         }
     }
     if (p.ith == 0) p.pool.chunkSet(@intCast(p.nth));
+    if (a.rep != null) p.pool.rangeInit(p.ith, sgemm.GemmR8.chunks(a.m));
     p.barrier();
 
     switch (a.type) {
@@ -248,13 +249,12 @@ pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usiz
             sgemm.quantR8(x + row * k + start * 32, @ptrCast(@alignCast(dst)), (end - start) * 32);
         }
     }
-    if (p.ith == 0) p.pool.chunkSet(@intCast(p.nth));
-    p.barrier();
     var total: usize = 0;
     for (mats) |a| total += sgemm.GemmR8.chunks(a.m);
-    var cur: i64 = @intCast(p.ith);
-    while (cur < total) {
-        var c: usize = @intCast(cur);
+    p.pool.rangeInit(p.ith, total);
+    p.barrier();
+    while (p.pool.rangeNext(p.ith)) |cur| {
+        var c: usize = cur;
         for (mats, ys) |a, y| {
             const nc = sgemm.GemmR8.chunks(a.m);
             if (c < nc) {
@@ -264,7 +264,6 @@ pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usiz
             }
             c -= nc;
         }
-        cur = p.pool.chunkAdd(1);
     }
     p.barrier();
 }

@@ -5,6 +5,8 @@ const linux = std.os.linux;
 const Atomic = std.atomic.Value;
 
 const SPIN_BEFORE_SLEEP = 300_000; // GOMP_SPINCOUNT varsayılanı
+const MAX_T = 64;
+const Slot = struct { v: Atomic(u64) align(64) = .init(0) };
 
 pub const Pool = struct {
     threads: []std.Thread,
@@ -20,6 +22,8 @@ pub const Pool = struct {
     n_barrier: Atomic(u32) align(64) = .init(0),
     n_barrier_passed: Atomic(u32) align(64) = .init(0),
     current_chunk: Atomic(i32) align(64) = .init(0),
+    /// H47: thread başına bitişik iş aralığı (lo | hi << 32); sahibi baştan, hırsız sondan alır.
+    slots: [MAX_T]Slot = @splat(.{}),
 
     pub fn init(allocator: std.mem.Allocator, n_threads: u32) !*Pool {
         const self = try allocator.create(Pool);
@@ -29,6 +33,7 @@ pub const Pool = struct {
             .n_threads = n_threads,
             .allocator = allocator,
         };
+        if (n_threads > MAX_T) return error.TooManyThreads;
         for (self.threads, 0..) |*t, i| {
             t.* = try std.Thread.spawn(.{}, worker, .{ self, @as(u32, @intCast(i + 1)) });
         }
@@ -102,6 +107,32 @@ pub const Pool = struct {
     }
     pub inline fn chunkAdd(self: *Pool, v: i32) i32 {
         return self.current_chunk.fetchAdd(v, .monotonic);
+    }
+
+    /// Her thread kendi aralığını kurar; kullanımdan önce bir bariyer gerekir.
+    pub fn rangeInit(self: *Pool, ith: usize, total: usize) void {
+        const n = self.n_threads;
+        const lo: u64 = ith * total / n;
+        const hi: u64 = (ith + 1) * total / n;
+        self.slots[ith].v.store(lo | hi << 32, .release);
+    }
+
+    /// Sıradaki iş birimi: önce kendi aralığının başı (bitişik akış), bitince diğerlerinin sonu.
+    pub fn rangeNext(self: *Pool, ith: usize) ?usize {
+        const n = self.n_threads;
+        const own = &self.slots[ith].v;
+        var v = own.load(.acquire);
+        while (@as(u32, @truncate(v)) < v >> 32) {
+            v = own.cmpxchgWeak(v, v + 1, .acq_rel, .acquire) orelse return @as(u32, @truncate(v));
+        }
+        for (1..n) |d| {
+            const t = &self.slots[(ith + d) % n].v;
+            var w = t.load(.acquire);
+            while (@as(u32, @truncate(w)) < w >> 32) {
+                w = t.cmpxchgWeak(w, w - (1 << 32), .acq_rel, .acquire) orelse return (w >> 32) - 1;
+            }
+        }
+        return null;
     }
 };
 

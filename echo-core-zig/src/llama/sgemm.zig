@@ -591,13 +591,9 @@ pub const GemmR8 = struct {
         return (m / 8 + GB - 1) / GB;
     }
 
+    /// H47: iş birimleri Pool.rangeNext ile (rangeInit bariyerden önce yapılmış olmalı).
     pub fn matmul(self: *const GemmR8, m: usize, n: usize) void {
-        const nblk = chunks(m);
-        var cur: i64 = @intCast(self.ith);
-        while (cur < nblk) {
-            self.chunk(@intCast(cur), m, n);
-            cur = self.pool.chunkAdd(1);
-        }
+        while (self.pool.rangeNext(self.ith)) |cur| self.chunk(cur, m, n);
     }
 
     pub fn chunk(self: *const GemmR8, cb: usize, m: usize, n: usize) void {
