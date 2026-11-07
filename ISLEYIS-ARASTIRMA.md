@@ -276,3 +276,18 @@ Tur 10'daki "tavan ~296" hesabı bugünkü komut düzenine aitti, fizik sınır�
 - (a) Kanıtlanan: H20 kayıpsız; saf batch 8 boş makinede 300'ü geçti (310.8). README TG 150 işaretlendi (H13'ten beri tg128 ≥ 164).
 - (b) Çürütülen: "Tam Q8_0 bedeliyle bu CPU'da tavan ~296" (tur 10) → öldü.
 - (c) Sıradaki tek adım: makine boşken varsayılan + `--memory` tg128'i ölçmek (200 ve 300 barajı için).
+
+## Tur 12 — R8 sonrası (yüklü makine)
+
+Ortam: `/opt/operasyonel-kurtarma/kurtarici-runner` (root, ~%97 CPU, 17 saattir), btrfs-transaction, camoufox (~%106), Tctl 95 °C. Aynı ikili ±%20–30 oynuyor.
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| — | Varsayılan TG profili (R8, `--memory 1`) | — | perf | mulMat %61.5, graph %28.3; bariyer spin toplam ~%20 (yükle şişiyor). alpha 0.973, taslaksız 21 / 4 koşu. |
+| H21 | P2 dengesi: R8 iş parçası 32 satır → 1024 satırda 8 parça / 6 thread dengesiz | parçayı küçült / statik böl | gb4 vs gb1, gb2, statik; art arda 3 çift, batch 8 | gb4: 273/269/242, 268/218/274; gb1: 226/149/177; gb2: 191/203/248; statik: 114/226/236. **Öldü**, gb4 kaldı. |
+| Ölçüm gürültüsü (K2) | Gürültüyü kendim düşürebilirim | — | 1) art arda A/B çiftleri, 2) t=5 (bir çekirdek boş), 3) `taskset -c 0-5` | Üçü de ±%20 altına inmedi (sabitlenmiş: 225/169/158/212). Blocker: makinedeki diğer yük + ısıl kısma. |
+
+### Tur 12 sonucu
+- (a) Kanıtlanan: R8 kayıpsız ve yük altında da pp512, tg128, batch 8'de önde. gb4 en iyi parça boyu.
+- (b) Çürütülen: H21.
+- Blocker: 200 / 300 barajı için mutlak ölçüm bu yükte alınamıyor. Kurtarıcı servis + tarayıcı kapalıyken ölçülmeli.
