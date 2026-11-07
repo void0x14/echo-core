@@ -438,6 +438,8 @@ pub const TinyBlasQ0 = struct {
 /// H24: ölçekler f16 (kaynakla aynı değer) ve bloklar çiftli: (2p, 2p+1) =
 /// [16B ölçek 2p][16B ölçek 2p+1][256B quant 2p][256B quant 2p+1] → blok 272 bayt, ymm'ler 32 hizalı. nb çift olmalı.
 pub const R8_BLOCK = 272;
+/// H28 (kayıplı): R8_SAT k adımının maddubs çıktısı i16'da doygun toplanır, tek madd. 1 = kayıpsız.
+const R8_SAT = 8;
 
 inline fn r8Scale(gbase: [*]const u8, l: usize) [*]const u8 {
     return gbase + (l / 2) * 2 * R8_BLOCK + (l % 2) * 16;
@@ -511,15 +513,21 @@ pub const GemmR8 = struct {
             const base = r8Quant(gbase, l);
             const sa: F8 = @floatCast(@as(@Vector(8, f16), @as(*align(16) const [8]f16, @ptrCast(@alignCast(r8Scale(gbase, l)))).*));
             var isum: [NC]avx.I8 = @splat(@splat(0));
-            inline for (0..8) |k| {
-                const w = avx.loadB(base + 32 * k);
-                const aw: avx.B32 = @bitCast(@abs(w));
-                inline for (0..NC) |c| {
-                    const blk = &self.b[self.ldb * (j0 + c) + l];
-                    const a4: i32 = @as(*align(1) const i32, @ptrCast(&blk.qs[4 * k])).*;
-                    const av: avx.B32 = @bitCast(@as(avx.I8, @splat(a4)));
-                    isum[c] += avx.madd(ones, avx.maddubs(aw, avx.sign8(av, w)));
+            inline for (0..8 / R8_SAT) |kk| {
+                var s16: [NC]avx.W16 = @splat(@splat(0));
+                inline for (0..R8_SAT) |ki| {
+                    const k = kk * R8_SAT + ki;
+                    const w = avx.loadB(base + 32 * k);
+                    const aw: avx.B32 = @bitCast(@abs(w));
+                    inline for (0..NC) |c| {
+                        const blk = &self.b[self.ldb * (j0 + c) + l];
+                        const a4: i32 = @as(*align(1) const i32, @ptrCast(&blk.qs[4 * k])).*;
+                        const av: avx.B32 = @bitCast(@as(avx.I8, @splat(a4)));
+                        const p = avx.maddubs(aw, avx.sign8(av, w));
+                        s16[c] = if (ki == 0) p else s16[c] +| p;
+                    }
                 }
+                inline for (0..NC) |c| isum[c] += avx.madd(ones, s16[c]);
             }
             inline for (0..NC) |c| {
                 const db: F8 = @splat(avx.fp16_table[self.b[self.ldb * (j0 + c) + l].d]);

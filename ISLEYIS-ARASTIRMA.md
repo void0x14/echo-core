@@ -327,3 +327,16 @@ Bench üretimi 5 tokenlik döngüye giriyor; taslaklar %100 kabul (360/360). Sü
 |---|---|---|---|---|
 | — | min_draft 1/2/4/6 | — | 4 tur | Etkisiz: zincir ya 0 ya tam |
 | H25 | P2 "tek seferde": taslak tavanı 16 → 32 (ivf.Batch MAXR 32, maske u32), uyarlamalı: tam kabulde ×2, rette ½ (en az 8); varsayılan k=32 | Tur sayısı yarıya iner | k=8/16/32 6 çift; h24 vs h25 3 çift | k ortanca 163.0 / 174.3 / 182.1. Varsayılan: tg128 161.5 → 168.7, tg32 99.8 → 125.3. **Yaşadı** (u6 taşma hatası düzeltildi: `lim` tipi `@min(k, 32)` ile daralıyordu) |
+
+## Tur 16 — hız öncelikli (kullanıcı 2026-11-07: "kalite düşse de hıza odaklan")
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| H27 | t: H25 sonrası turlar hesap-sınırlı | t=6 kazanır | t=4/5/6 × 3 tur | tg128 ortanca 183 / 185 / 195. Port varsayılanı tüm fiziksel çekirdek. **Yaşadı** |
+| H26 | Kayıplı: FFN ara boyutunu 32'lik gruplarla statik buda (önem ‖gate‖·‖up‖·‖down‖) | Hesap %12–37 azalır | keep 1 / 0.75 / 0.5 / 0.25, t=6 | Model döngüye temiz girmiyor: tur başı kabul 32 → 18.9 / 8.1 / 3.7; tg128 222 → 174 / 81 / 72. **Öldü**: büyük kalite kaybı taslak kabulünü, dolayısıyla hızı yıkıyor |
+| H28 | Kayıplı, küçük: FP0 işinin yarısı `vpmaddwd` genişletmesi. R8_SAT k adımının `maddubs` çıktısı i16'da doygun toplanıp (`+|`) tek `madd` | Hata küçük kalırsa kabul bozulmaz | mikro (FP0 doluluk), 3 tur bench, 12 istem metin | Mikro çekirdek hızı SAT2/4/8: ×1.12 / ×1.18 / ×1.25. Bench t=6 tg128 ortanca SAT1/2/4/8: 256.6 / 266.8 / 271.4 / 286.1, tg32 168.2 / 168.9 / 171.0 / 177.9; kabul 32/32 korunuyor. Metin: SAT8 kayıpsızla 5/12 istemde bayt aynı, diğerlerinde küçük alan farkı (ör. "phone" değeri). **Yaşadı**, varsayılan SAT8 |
+
+### Tur 16 sonucu
+- (a) Kanıtlanan: kirli ortamda (sakin anında) varsayılan tg128 286 tok/s; README TG 200 geçildi.
+- (b) Çürütülen: H26 (büyük kalite kaybı hızı da düşürüyor).
+- (c) Sıradaki tek adım: 300 için kalan pay ~%5; tur başı tek-token adımları (7 × T1) ve graph/spin payı.
