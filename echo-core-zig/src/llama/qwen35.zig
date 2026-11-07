@@ -299,6 +299,8 @@ pub const Context = struct {
     wdata2: []align(64) u8,
     /// H63: conv parça sonunda q/k başlığı başına biten kanal sayısı
     l2_cnt: [64]std.atomic.Value(u32) = @splat(.init(0)),
+    /// H65: GDN'de başlık başına biten kalem sayısı
+    gdn_cnt: [64]std.atomic.Value(u32) = @splat(.init(0)),
     fdata: []align(64) f32,
     theta_scale: f32,
 
@@ -748,6 +750,9 @@ pub const Context = struct {
         const out4 = [_][*]f32{ self.b_qkv.ptr, self.b_gate.ptr, self.b_beta.ptr, self.b_z.ptr };
         // convPost: başlık parça sınırına hizalı ve sayaçlar yeterli olmalı
         const fast_in = m.d_conv == 4 and ops.r8Ok(&in4) and s % ops.GemmRows == 0 and 2 * m.n_group <= self.l2_cnt.len;
+        // H65: GDN + gated norm tek fazda; GDN aralıkları (set 1) bu GEMM fazında hazırlanır
+        const gfast = fast_in and tr_recr == null and s % 32 == 0 and h_n <= self.gdn_cnt.len;
+        if (gfast) p.pool.rangeInitS(1, p.ith, h_n * (s / 32));
         if (fast_in) {
             // H61: conv + gate + sigmoid + silu GEMM parça sonunda (satır yerel); ayrı faz ve bariyeri yok
             const Epi = struct {
@@ -813,12 +818,19 @@ pub const Context = struct {
             }
             p.barrier();
         }
+        const qo = ops.r8Ok(&.{l.ssm_out});
+        const st_in = if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr;
+        if (gfast) {
+            ops.gdnNormQ(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, vh, s, n_t * s, self.b_gate.ptr, self.b_beta.ptr, st_in, self.rs_state[il].ptr, self.b_gdn.ptr, &self.gdn_cnt, self.b_z.ptr, m.eps, l.ssm_norm, qo);
+            if (qo) ops.r8Pre(p, &.{l.ssm_out});
+            p.barrier();
+            return ops.mulMatMultiQ(p, &.{l.ssm_out}, self.b_gdn.ptr, n_t, &.{self.b_attn.ptr});
+        }
         // GATED_DELTA_NET (+ CPY new_state: yerinde)
         ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, vh, s, n_t * s, self.b_gate.ptr, self.b_beta.ptr, if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
         p.barrier();
         // build_norm_gated
         // + mul z + ssm_out girdisi nicemleme (H58: tek faz)
-        const qo = ops.r8Ok(&.{l.ssm_out});
         ops.gatedNormQ(p, s, h_n, n_t, self.b_gdn.ptr, self.b_z.ptr, m.eps, l.ssm_norm, qo);
         if (qo) ops.r8Pre(p, &.{l.ssm_out});
         p.barrier();

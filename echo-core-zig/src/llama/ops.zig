@@ -683,6 +683,26 @@ fn gdnItem(s_v: usize, j0: usize, n_t: usize, h_n: usize, iv1: usize, q_in: [*]c
     }
 }
 
+/// H65: GDN kalemleri set 1 aralıklarından (rangeInitS(1) önceki fazda, kendi bariyeri yok). Başlığın son kalemini
+/// bitiren thread o başlık için tüm tokenlarda gated norm * z + R8 nicemleme yapar (Q8 blokları başlık yerel).
+pub fn gdnNormQ(p: *const Params, s_v: usize, h_n: usize, n_t: usize, q_in: [*]const f32, k_in: [*]const f32, v_in: [*]const f32, v_stride: usize, v_hs: usize, g: [*]const f32, beta: [*]const f32, state_in: [*]const f32, state: [*]f32, out: [*]f32, cnt: [*]std.atomic.Value(u32), z: [*]const f32, eps: f32, w: [*]const f32, rq: bool) void {
+    const nbr = s_v / 32;
+    const d = s_v * h_n;
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(s_v)));
+    while (p.pool.rangeNextS(1, p.ith)) |ir| {
+        const iv1 = ir / nbr;
+        gdnItem(s_v, (ir % nbr) * 32, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, state_in + iv1 * s_v * s_v, state + iv1 * s_v * s_v, out, scale);
+        if (cnt[iv1].fetchAdd(1, .acq_rel) + 1 != nbr) continue;
+        cnt[iv1].store(0, .monotonic);
+        for (0..n_t) |t| {
+            const row = out + t * d + iv1 * s_v;
+            rmsRow(row, row, s_v, eps, w, 1.0);
+            vec.mulF32(s_v, row, row, z + t * d + iv1 * s_v);
+            if (rq) sgemm.quantR8(row, @ptrCast(@alignCast(p.wdata + t * dotRowSize(.q8_0, d) + iv1 * (s_v / 32) * @sizeOf(q.BlockQ80))), s_v);
+        }
+    }
+}
+
 /// ggml_compute_forward_gated_delta_net_f32 (K=1, GDA, n_seqs=1).
 /// Durum yerinde güncellenir: ggml'deki GET_ROWS + memcpy + CPY üçlüsü aynı sonucu verir.
 /// q_in, k_in başlık-öncelikli: [h_n][n_t][s_v] (H55).
