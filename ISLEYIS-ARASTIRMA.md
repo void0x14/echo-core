@@ -226,3 +226,18 @@ Veri: Crossref başlık kelimesi eşliyor; "TL" Türk lirası değil "Teacher Li
 - (a) Kanıtlanan: H18 +%4.5 (bench, `--memory 1`). TG tavanı = prefill hızı = 289.5 tok/s.
 - (b) Çürütülen: H17. "300'e taslak/doğrulama tarafında ulaşılır" varsayımı öldü (tavan 289.5).
 - (c) Sıradaki tek adım: H19 — Q8_0 ağırlıklarını yükleme anında satır-iç içe (8 satır) yeniden dizip batch çekirdeğini buna göre yazmak; ölçüt saf batch 8 ve pp512.
+
+## Tur 9 (ölçümlü)
+
+Gemm'e giren ağırlık: 518.1M parametre, hepsi Q8_0 (token_embd 254.3M ayrı, LM head ona bağlı).
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| — | `perf stat` saf batch 8 (r=10) | — | — | cycles 131.6G; FP boru atamaları: FP0 72.7G, FP1 40.6G, FP2 39.5G, FP3 55.3G. Zorunlu tamsayı çarpma (maddubs+madd) 161 turda 41.7G = çekirdek döngülerinin ~%41'i. Toplam FP kapasitesinin ~%42'si dolu. |
+| H19 | P4 "kasa fizik", ama kasada sıra düzensiz: 34 baytlık Q8_0 blokları 32 baytlık yüklemeleri cache satırında bölüyor, ölçekler skaler kaydırma+OR ile toplanıyor → yüklemede 4 satır iç içe, hizalı quant + f32 ölçek; aynı aritmetik sıra | çekirdek düzen yüzünden yavaş | 4 istem bayt + batch 8 + perf | 4/4 bayt aynı (bit-bit aynı aritmetik). batch 8: H19 193.9/219.5/233.4, eski 230.6/228.1. Çekirdek payı %77 vs %78, değişmedi. **Öldü**, kod geri alındı (+550 MB RAM, kazanç yok). |
+
+### Tur 9 sonucu
+- (a) Kanıtlanan: düzen (hizalama, ölçek toplama) çekirdeğin hızını belirlemiyor. FP0 borusu çekirdekte ~%70 dolu (toplam atama). Zen 2'de tamsayı çarpma yalnız FP0'da; FMA da kısmen FP0'a düşüyor.
+- (b) Çürütülen: H19.
+- Fizik hesabı: FP0 %90'a çıkarılsa bile çekirdek ~1.25x hızlanır → tur 35 ms → ~29 ms → ~275 tok/s (taslak kusursuz, alpha=1). Bu CPU'da, Q8_0'ın tam bedeli ödenirken (P3) 300 tok/s FP0 borusunun sınırının üstünde.
+- (c) Sıradaki tek adım: kullanıcının kararı gereken nokta — P3 ("fiyatı her zaman ödersin") korunursa bu CPU'da 300'ün önünde fiziksel duvar var. Tek kalan kaldıraç ödenen fiyatı değiştirmek (ör. çarpma başına FP0 işini azaltan farklı sayı biçimi), bu da P3'e dokunuyor.
