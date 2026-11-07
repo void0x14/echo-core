@@ -112,6 +112,8 @@ fn parseModelPath(args: []const []const u8) ?[]const u8 {
             if (i + 1 < args.len) {
                 i += 1;
             }
+        } else if (std.mem.eql(u8, args[i], "--ngram")) {
+            if (i + 1 < args.len) i += 1;
         } else if (args[i].len > 0 and args[i][0] != '-') {
             model_path = args[i];
         }
@@ -159,6 +161,12 @@ fn runLlamaBench(init: std.process.Init, args: []const []const u8) !void {
             opt.lm_nprobe = lv[1];
         } else if (std.mem.eql(u8, a, "--greedy")) {
             opt.greedy = !std.mem.eql(u8, v, "0");
+        } else if (std.mem.eql(u8, a, "--gen-batch")) {
+            opt.gen_batch = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--ngram")) {
+            opt.ngram_k = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--grammar")) {
+            opt.grammar = !std.mem.eql(u8, v, "0");
         } else if (std.mem.eql(u8, a, "--dump-logits")) {
             dump = v;
         } else if (std.mem.eql(u8, a, "--tokens")) {
@@ -210,6 +218,8 @@ pub fn main(init: std.process.Init) !void {
     var prompt: ?[]const u8 = null;
     var max_tokens: u32 = 100;
     var bench = false;
+    var ngram_k: usize = 8; // H01 varsayılan; --ngram 0 kapatır
+    var grammar = false; // H06 çıktıyı JSON iskeletine zorlar, bu yüzden yalnız --grammar ile
     var json = false;
     var i: usize = 1;
     while (i < args.items.len) : (i += 1) {
@@ -220,6 +230,13 @@ pub fn main(init: std.process.Init) !void {
             }
         } else if (std.mem.eql(u8, args.items[i], "--bench")) {
             bench = true;
+        } else if (std.mem.eql(u8, args.items[i], "--ngram")) {
+            if (i + 1 < args.items.len) {
+                ngram_k = try std.fmt.parseInt(usize, args.items[i + 1], 10);
+                i += 1;
+            }
+        } else if (std.mem.eql(u8, args.items[i], "--grammar")) {
+            grammar = true;
         } else if (std.mem.eql(u8, args.items[i], "--json")) {
             json = true;
         } else if (std.mem.eql(u8, args.items[i], "--max-tokens") or std.mem.eql(u8, args.items[i], "-n")) {
@@ -236,14 +253,18 @@ pub fn main(init: std.process.Init) !void {
     };
 
     if (qwen35.supported and qwen35.Model.isQwen35(model_path, init.gpa)) {
-        return drive(llama_port.Port, init, model_path, prompt, max_tokens, bench, json);
+        return drive(llama_port.Port, init, model_path, prompt, max_tokens, bench, json, ngram_k, grammar);
     }
-    return drive(ports.InferencePort, init, model_path, prompt, max_tokens, bench, json);
+    return drive(ports.InferencePort, init, model_path, prompt, max_tokens, bench, json, ngram_k, grammar);
 }
 
-fn drive(comptime Port: type, init: std.process.Init, model_path: []const u8, prompt: ?[]const u8, max_tokens: u32, bench: bool, json: bool) !void {
+fn drive(comptime Port: type, init: std.process.Init, model_path: []const u8, prompt: ?[]const u8, max_tokens: u32, bench: bool, json: bool, ngram_k: usize, grammar: bool) !void {
     if (prompt) |p| {
         var port = try Port.init(model_path, init.gpa);
+        if (comptime @hasField(Port, "ngram_k")) {
+            port.ngram_k = ngram_k;
+            port.grammar = grammar;
+        }
         defer port.deinit(init.gpa);
 
         if (bench) {

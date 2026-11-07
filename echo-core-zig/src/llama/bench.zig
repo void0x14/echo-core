@@ -3,6 +3,8 @@
 const std = @import("std");
 const qwen35 = @import("qwen35.zig");
 const ivf = @import("ivf.zig");
+const ngram = @import("ngram.zig");
+const tokenizer = @import("../tokenizer/tokenizer.zig");
 
 const Test = struct { n_prompt: usize, n_gen: usize };
 
@@ -30,6 +32,17 @@ fn testGen(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: usize, 
         }
     }
 }
+/// Toplu TG ölçümü: her decode çağrısına batch token verir.
+/// Gerçek üretim değil; ağırlık okumasını batch'e yaymanın tavanını ölçer.
+fn testGenBatch(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: usize, batch: usize, tokens: []u32) !void {
+    var done: usize = 0;
+    while (done < n_gen) {
+        const n = @min(@max(batch, 1), n_gen - done);
+        for (tokens[0..n]) |*t| t.* = @intCast(rng.uintLessThan(usize, n_vocab));
+        try ctx.decode(tokens[0..n]);
+        done += n;
+    }
+}
 
 pub const Options = struct {
     n_threads: u32 = 6,
@@ -40,8 +53,259 @@ pub const Options = struct {
     lm_clusters: usize = ivf.default_l,
     lm_nprobe: usize = ivf.default_nprobe,
     greedy: bool = false,
+    /// >1: TG'yi batch'li ölç (pipeline/batch tavanı); gerçek üretim değil.
+    gen_batch: usize = 1,
+    /// >0: H01 n-gram taslağı + doğrulama, k = taslak uzunluğu.
+    ngram_k: usize = 8,
+    /// true: H06 grammar fast-forward (JSON iskeleti zorunlu blok).
+    grammar: bool = false,
 };
 
+
+pub const Stats = struct {
+    rounds: usize = 0,
+    drafted: usize = 0,
+    accepted: usize = 0,
+    forced_blocks: usize = 0,
+    forced_tokens: usize = 0,
+};
+
+fn nextToken(ctx: *qwen35.Context) u32 {
+    if (ctx.lm) |s| return s.token;
+    return @intCast(std.mem.indexOfMax(f32, ctx.logits));
+}
+
+/// H01: n-gram taslağı + tek zincir doğrulama. Token akışı modelin kendi ürettiği
+/// tokenlar olduğu için pencere birebir hizalı.
+fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: usize, k: usize, st: *Stats, a: std.mem.Allocator) !usize {
+    var d = try ngram.TokenDrafter.init(a, 3);
+    defer d.deinit();
+    var buf: [16]u32 = undefined;
+    var pending: u32 = @intCast(rng.uintLessThan(usize, n_vocab));
+    try ctx.decode(&.{pending});
+    try d.add(pending);
+    var produced: usize = 1;
+    pending = nextToken(ctx);
+    while (produced < n_gen) {
+        const m = d.chain(buf[0..@min(k, buf.len)]);
+        if (m >= @min(6, k) and buf[0] == pending) {
+            st.rounds += 1;
+            st.drafted += m;
+            const before = ctx.head;
+            try ctx.decodeVerify(buf[0..m]);
+            var j: usize = 0;
+            while (j + 1 < m and ctx.verify_tokens[j] == buf[j + 1]) j += 1;
+            var acc: usize = 0;
+            if (j + 1 == m) {
+                acc = m;
+                pending = ctx.verify_tokens[m - 1];
+            } else {
+                acc = j + 1;
+                pending = ctx.verify_tokens[j];
+                ctx.restore(before, acc);
+            }
+            st.accepted += acc;
+            for (buf[0..acc]) |x| try d.add(x);
+            produced += acc;
+        } else {
+            try ctx.decode(&.{pending});
+            try d.add(pending);
+            produced += 1;
+            pending = nextToken(ctx);
+        }
+    }
+    return produced;
+}
+
+pub const SegKind = enum { lit, string, number };
+pub const Seg = struct { kind: SegKind, text: []const u8 };
+pub const TEMPLATE = [_]Seg{
+    .{ .kind = .lit, .text = "{\"name\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\", \"age\": " },
+    .{ .kind = .number, .text = "" },
+    .{ .kind = .lit, .text = ", \"city\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\"}" },
+};
+pub const TEMPLATE_BIG = [_]Seg{
+    .{ .kind = .lit, .text = "{\"name\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\", \"age\": " },
+    .{ .kind = .number, .text = "" },
+    .{ .kind = .lit, .text = ", \"city\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\", \"country\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\", \"email\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\", \"phone\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\", \"job\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\", \"company\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\", \"street\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\", \"zip\": " },
+    .{ .kind = .number, .text = "" },
+    .{ .kind = .lit, .text = ", \"notes\": \"" },
+    .{ .kind = .string, .text = "" },
+    .{ .kind = .lit, .text = "\"}" },
+};
+
+pub fn validFree(kind: SegKind, s: []const u8) bool {
+    if (s.len == 0) return false;
+    return switch (kind) {
+        .lit => true,
+        .string => blk: {
+            for (s) |c| if (c == '"' or c == '\\' or c == '\n' or c == '\r') break :blk false;
+            break :blk true;
+        },
+        .number => blk: {
+            for (s) |c| {
+                const ok = std.ascii.isDigit(c) or c == '.' or c == '-' or c == '+' or c == 'e' or c == 'E' or c == ' ';
+                if (!ok) break :blk false;
+            }
+            break :blk true;
+        },
+    };
+}
+
+/// H06: zorunlu literal blokları tek forward'da ekler, serbest alanlarda token maskeler.
+fn testGenGrammar(ctx: *qwen35.Context, tk: *const tokenizer.SimpleTokenizer, n_gen: usize, st: *Stats) !usize {
+    var produced: usize = 0;
+    var pending: u32 = 0;
+    var have_pending = false;
+    for (TEMPLATE) |seg| {
+        if (produced >= n_gen) break;
+        switch (seg.kind) {
+            .lit => {
+                const ids = try tk.encode(seg.text);
+                defer ids.deinit();
+                var cnt = ids.items.len;
+                if (produced + cnt > n_gen) cnt = n_gen - produced;
+                if (cnt == 0) break;
+                try ctx.decode(ids.items[0..cnt]);
+                produced += cnt;
+                st.forced_blocks += 1;
+                st.forced_tokens += cnt;
+                pending = nextToken(ctx);
+                have_pending = true;
+            },
+            .string, .number => {
+                if (!have_pending) break;
+                const cap: usize = if (seg.kind == .string) 24 else 4;
+                var emitted: usize = 0;
+                while (emitted < cap and produced < n_gen) {
+                    const txt = try tk.decode(&.{pending});
+                    defer tk.allocator.free(txt);
+                    if (!validFree(seg.kind, txt)) break;
+                    try ctx.decode(&.{pending});
+                    produced += 1;
+                    emitted += 1;
+                    pending = nextToken(ctx);
+                }
+            },
+        }
+    }
+    // şablon bittiyse n_gen'e kadar normal greedy (bench eşitliği)
+    while (produced < n_gen) {
+        if (!have_pending) break;
+        try ctx.decode(&.{pending});
+        produced += 1;
+        pending = nextToken(ctx);
+    }
+    return produced;
+}
+
+fn runGen(ctx: *qwen35.Context, opt: Options, rng: std.Random, n_vocab: usize, n_gen: usize, tk: ?*const tokenizer.SimpleTokenizer, tokens: []u32, st: *Stats, a: std.mem.Allocator) !usize {
+    if (opt.grammar) return testGenGrammarSpec(ctx, tk orelse return error.NoTokenizer, n_gen, st, a, opt.ngram_k);
+    if (opt.ngram_k > 0) return testGenNgram(ctx, rng, n_vocab, n_gen, opt.ngram_k, st, a);
+    if (opt.gen_batch > 1) {
+        try testGenBatch(ctx, rng, n_vocab, n_gen, opt.gen_batch, tokens);
+        return n_gen;
+    }
+    try testGen(ctx, rng, n_vocab, n_gen, opt.greedy);
+    return n_gen;
+}
+
+/// H06 + (opsiyonel) H01: zorunlu bloklar tek forward, serbest alanlarda n-gram taslağı.
+fn testGenGrammarSpec(ctx: *qwen35.Context, tk: *const tokenizer.SimpleTokenizer, n_gen: usize, st: *Stats, a: std.mem.Allocator, ngram_k: usize) !usize {
+    var d = try ngram.TokenDrafter.init(a, 3);
+    defer d.deinit();
+    var buf: [16]u32 = undefined;
+    var produced: usize = 0;
+    var pending: u32 = 0;
+    var have = false;
+    for (TEMPLATE_BIG) |seg| {
+        if (produced >= n_gen) break;
+        switch (seg.kind) {
+            .lit => {
+                const ids = try tk.encode(seg.text);
+                defer ids.deinit();
+                var cnt = ids.items.len;
+                if (produced + cnt > n_gen) cnt = n_gen - produced;
+                if (cnt == 0) break;
+                try ctx.decode(ids.items[0..cnt]);
+                for (ids.items[0..cnt]) |t| try d.add(t);
+                produced += cnt;
+                st.forced_blocks += 1;
+                st.forced_tokens += cnt;
+                pending = nextToken(ctx);
+                have = true;
+            },
+            .string, .number => {
+                if (!have) break;
+                const cap: usize = if (seg.kind == .string) 24 else 4;
+                var emitted: usize = 0;
+                while (emitted < cap and produced < n_gen) {
+                    const maxm = @min(@min(ngram_k, cap - emitted), n_gen - produced);
+                    var m: usize = 0;
+                    if (maxm >= 2) {
+                        const raw = d.chain(buf[0..@min(maxm, buf.len)]);
+                        while (m < raw) : (m += 1) {
+                            const tx = try tk.decode(&.{buf[m]});
+                            defer tk.allocator.free(tx);
+                            if (!validFree(seg.kind, tx)) break;
+                        }
+                    }
+                    if (m >= 2 and m >= @min(4, maxm) and buf[0] == pending) {
+                        st.rounds += 1;
+                        st.drafted += m;
+                        const before = ctx.head;
+                        try ctx.decodeVerify(buf[0..m]);
+                        var j: usize = 0;
+                        while (j + 1 < m and ctx.verify_tokens[j] == buf[j + 1]) j += 1;
+                        var acc: usize = 0;
+                        if (j + 1 == m) {
+                            acc = m;
+                            pending = ctx.verify_tokens[m - 1];
+                        } else {
+                            acc = j + 1;
+                            pending = ctx.verify_tokens[j];
+                            ctx.restore(before, acc);
+                        }
+                        st.accepted += acc;
+                        for (buf[0..acc]) |t| try d.add(t);
+                        produced += acc;
+                        emitted += acc;
+                    } else {
+                        const tx = try tk.decode(&.{pending});
+                        defer tk.allocator.free(tx);
+                        if (!validFree(seg.kind, tx)) break;
+                        try ctx.decode(&.{pending});
+                        try d.add(pending);
+                        produced += 1;
+                        emitted += 1;
+                        pending = nextToken(ctx);
+                    }
+                }
+            },
+        }
+    }
+    return produced;
+}
 /// Her test için bir JSON satırı yazar: llama-bench -o json ile aynı alan adları.
 pub fn run(model_path: []const u8, opt: Options, allocator: std.mem.Allocator, io: std.Io, out: *std.Io.Writer) !void {
     const model = try qwen35.Model.load(model_path, allocator);
@@ -60,30 +324,53 @@ pub fn run(model_path: []const u8, opt: Options, allocator: std.mem.Allocator, i
     const lm_ix = if (opt.lm_clusters > 0) try ivf.open(model_path, model.output, opt.lm_clusters, opt.n_threads, allocator, io) else null;
     defer if (lm_ix) |ix| ix.deinit(allocator);
 
+    var tk_store: tokenizer.SimpleTokenizer = undefined;
+    var tk_ptr: ?*const tokenizer.SimpleTokenizer = null;
+    if (opt.grammar) {
+        var reader = try @import("../gguf/reader.zig").Reader.openWithAllocator(model_path, allocator);
+        defer reader.deinit();
+        tk_store = try tokenizer.SimpleTokenizer.initFromReader(&reader, allocator);
+        tk_ptr = &tk_store;
+    }
+    defer if (opt.grammar) tk_store.deinit();
+
     for (tests.items) |t| {
         const ctx = try qwen35.Context.init(model, t.n_prompt + t.n_gen, opt.n_threads, allocator);
         defer ctx.deinit();
         if (lm_ix) |ix| ctx.lm = try ivf.Search.init(ix, opt.lm_nprobe, opt.n_threads, allocator);
         defer if (ctx.lm) |s| s.deinit(allocator);
+        if (opt.ngram_k > 0) {
+            ctx.enableTrace(@max(opt.ngram_k, 2)) catch |e| {
+                std.debug.print("trace kurulamadi: {}\n", .{e});
+                return e;
+            };
+        }
+        var st = Stats{};
 
         // warmup
         ctx.clear();
         if (t.n_prompt > 0) try testPrompt(ctx, rng, model.n_vocab, t.n_prompt, tokens);
-        if (t.n_gen > 0) try testGen(ctx, rng, model.n_vocab, 1, opt.greedy);
+        if (t.n_gen > 0) _ = try runGen(ctx, opt, rng, model.n_vocab, @min(t.n_gen, 8), tk_ptr, tokens, &st, allocator);
 
         const samples = try allocator.alloc(f64, opt.reps);
         defer allocator.free(samples);
         for (samples) |*s| {
+            // İçerik bağımlı modlarda tekrarlar aynı metni ölçsün (deterministik).
+            if (opt.greedy or opt.ngram_k > 0 or opt.grammar) prng = std.Random.DefaultPrng.init(1234);
+            const rng_r = prng.random();
             ctx.clear();
             const t0 = std.Io.Timestamp.now(io, .awake);
-            if (t.n_prompt > 0) try testPrompt(ctx, rng, model.n_vocab, t.n_prompt, tokens);
-            if (t.n_gen > 0) try testGen(ctx, rng, model.n_vocab, t.n_gen, opt.greedy);
+            if (t.n_prompt > 0) try testPrompt(ctx, rng_r, model.n_vocab, t.n_prompt, tokens);
+            var produced: usize = 0;
+            if (t.n_gen > 0) produced = try runGen(ctx, opt, rng_r, model.n_vocab, t.n_gen, tk_ptr, tokens, &st, allocator);
             const ns: f64 = @floatFromInt(t0.untilNow(io, .awake).toNanoseconds());
-            s.* = @as(f64, @floatFromInt(t.n_prompt + t.n_gen)) * 1e9 / ns;
+            s.* = @as(f64, @floatFromInt(t.n_prompt + produced)) * 1e9 / ns;
         }
         var sum: f64 = 0;
         for (samples) |s| sum += s;
-        try out.print("{{\"n_prompt\":{d},\"n_gen\":{d},\"n_threads\":{d},\"lm_clusters\":{d},\"lm_nprobe\":{d},\"greedy\":{},\"avg_ts\":{d:.3},\"samples_ts\":[", .{ t.n_prompt, t.n_gen, opt.n_threads, opt.lm_clusters, if (opt.lm_clusters > 0) opt.lm_nprobe else 0, opt.greedy, sum / @as(f64, @floatFromInt(samples.len)) });
+        const alpha: f64 = if (st.drafted > 0) @as(f64, @floatFromInt(st.accepted)) / @as(f64, @floatFromInt(st.drafted)) else 0;
+        const per_round: f64 = if (st.rounds > 0) @as(f64, @floatFromInt(st.accepted)) / @as(f64, @floatFromInt(st.rounds)) else 0;
+        try out.print("{{\"n_prompt\":{d},\"n_gen\":{d},\"gen_batch\":{d},\"n_threads\":{d},\"lm_clusters\":{d},\"lm_nprobe\":{d},\"greedy\":{},\"ngram_k\":{d},\"grammar\":{},\"alpha\":{d:.3},\"accept_per_round\":{d:.2},\"drafted\":{d},\"accepted\":{d},\"forced_tokens\":{d},\"forced_blocks\":{d},\"avg_ts\":{d:.3},\"samples_ts\":[", .{ t.n_prompt, t.n_gen, opt.gen_batch, opt.n_threads, opt.lm_clusters, if (opt.lm_clusters > 0) opt.lm_nprobe else 0, opt.greedy, opt.ngram_k, opt.grammar, alpha, per_round, st.drafted, st.accepted, st.forced_tokens, st.forced_blocks, sum / @as(f64, @floatFromInt(samples.len)) });
         for (samples, 0..) |s, i| {
             if (i > 0) try out.writeAll(",");
             try out.print("{d:.3}", .{s});

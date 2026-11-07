@@ -305,6 +305,14 @@ pub const Context = struct {
     n_t: usize = 0,
     want_logits: bool = false,
     n_kv: usize = 0,
+    /// Spekülatif doğrulama: her pozisyon için top-1 ve geri alma izleri.
+    /// want_all true iken graph her satır için LM head çalıştırır (verify_tokens).
+    want_all: bool = false,
+    verify_tokens: []u32 = &.{},
+    trace_k: usize = 0,
+    trace_conv: [][]f32 = &.{},
+    trace_recr: [][]f32 = &.{},
+    verify_len: usize = 0,
 
     fn buf(allocator: Alloc, n: usize) ![]align(64) f32 {
         const b = try allocator.alignedAlloc(f32, .@"64", n);
@@ -394,6 +402,7 @@ pub const Context = struct {
         a.free(self.kv_v);
         a.free(self.rs_conv);
         a.free(self.rs_state);
+        self.freeTrace();
         a.free(self.logits);
         a.free(self.wdata);
         a.free(self.fdata);
@@ -403,6 +412,68 @@ pub const Context = struct {
         a.destroy(self);
     }
 
+    /// Doğrulama/geri alma için pozisyon başına GDN ve conv durum izlerini hazırlar.
+    pub fn enableTrace(self: *Context, k: usize) !void {
+        if (k == 0) return error.TraceTooSmall;
+        self.freeTrace();
+        const a = self.allocator;
+        const m = self.model;
+        const conv_len = (m.d_conv - 1) * (m.d_inner + 2 * m.n_group * m.d_state);
+        const s_size = m.d_state * m.d_state * m.dt_rank;
+        const tc = try a.alloc([]f32, m.layers.len);
+        errdefer a.free(tc);
+        const tr = try a.alloc([]f32, m.layers.len);
+        errdefer a.free(tr);
+        for (m.layers, 0..) |*l, il| {
+            tc[il] = &.{};
+            tr[il] = &.{};
+            if (!l.recr) continue;
+            tc[il] = try a.alloc(f32, k * conv_len);
+            tr[il] = try a.alloc(f32, k * s_size);
+        }
+        self.trace_conv = tc;
+        self.trace_recr = tr;
+        self.trace_k = k;
+        self.verify_tokens = try a.alloc(u32, k);
+    }
+
+    fn freeTrace(self: *Context) void {
+        const a = self.allocator;
+        if (self.trace_k == 0) return;
+        for (self.trace_conv) |b| if (b.len > 0) a.free(b);
+        for (self.trace_recr) |b| if (b.len > 0) a.free(b);
+        a.free(self.trace_conv);
+        a.free(self.trace_recr);
+        a.free(self.verify_tokens);
+        self.trace_conv = &.{};
+        self.trace_recr = &.{};
+        self.verify_tokens = &.{};
+        self.trace_k = 0;
+    }
+
+    /// Aday diziyi tek forward'da işler; her pozisyonun top-1'i verify_tokens'a yazılır.
+    pub fn decodeVerify(self: *Context, tokens: []const u32) !void {
+        if (tokens.len == 0 or self.trace_k < tokens.len) return error.TraceTooSmall;
+        self.verify_len = tokens.len;
+        self.want_all = true;
+        defer self.want_all = false;
+        try self.decode(tokens);
+    }
+
+    /// Durumu batch başından j token sonrasına geri alır (j < batch uzunluğu).
+    /// KV cache kırpılmaz: head geri çekilir, mask ileriyi görmez, üzerine yazılır.
+    pub fn restore(self: *Context, batch_start: usize, j: usize) void {
+        if (j < self.verify_len) {
+        for (self.model.layers, 0..) |*l, il| {
+            if (!l.recr) continue;
+            const conv_len = self.rs_conv[il].len;
+            const s_len = self.rs_state[il].len;
+            @memcpy(self.rs_conv[il], self.trace_conv[il][j * conv_len ..][0..conv_len]);
+            @memcpy(self.rs_state[il], self.trace_recr[il][j * s_len ..][0..s_len]);
+        }
+        }
+        self.head = batch_start + j;
+    }
     /// llama_memory_clear
     pub fn clear(self: *Context) void {
         self.head = 0;
@@ -515,7 +586,22 @@ pub const Context = struct {
             p.barrier();
         }
 
-        if (self.want_logits) {
+        if (self.want_all and self.trace_k > 0) {
+            var vt: usize = 0;
+            while (vt < n_t) : (vt += 1) {
+                const row = self.b_inp.ptr + vt * m.n_embd;
+                ops.rmsNorm(p, row, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, 1, 1, m.eps, m.output_norm, 1.0);
+                p.barrier();
+                if (self.lm) |s| {
+                    lmSearch(p, s, self.b_norm.ptr, m.n_embd);
+                    if (p.ith == 0) self.verify_tokens[vt] = s.token;
+                } else {
+                    ops.mulMat(p, m.output, self.b_norm.ptr, 1, self.logits.ptr);
+                    p.barrier();
+                    if (p.ith == 0) self.verify_tokens[vt] = @intCast(std.mem.indexOfMax(f32, self.logits));
+                }
+            }
+        } else if (self.want_logits) {
             const last = self.b_inp.ptr + (n_t - 1) * m.n_embd;
             ops.rmsNorm(p, last, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, 1, 1, m.eps, m.output_norm, 1.0);
             p.barrier();
@@ -541,11 +627,14 @@ pub const Context = struct {
         const key_dim = m.n_group * m.d_state;
         const l2 = 1.0 / @sqrt(@as(f32, @floatFromInt(s)));
         const eps_l2 = m.eps / @as(f32, @floatFromInt(s));
+        const tracing = self.want_all and self.trace_k >= n_t;
+        const tr_conv: ?[*]f32 = if (tracing) self.trace_conv[il].ptr else null;
+        const tr_recr: ?[*]f32 = if (tracing) self.trace_recr[il].ptr else null;
 
         ops.mulMat(p, l.wqkv, self.b_norm.ptr, n_t, self.b_qkv.ptr);
         p.barrier();
         // CONCAT + CPY(conv_state_last)
-        ops.convConcat(p, conv_dim, kc, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, self.b_conv_in.ptr);
+        ops.convConcat(p, conv_dim, kc, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, self.b_conv_in.ptr, tr_conv);
         p.barrier();
         ops.ssmConv(p, conv_dim, m.d_conv, kc + n_t, n_t, self.b_conv_in.ptr, l.ssm_conv1d, self.b_conv_out.ptr);
         p.barrier();
@@ -567,7 +656,7 @@ pub const Context = struct {
         ops.sigmoidInPlace(p, h_n, n_t, self.b_beta.ptr);
         p.barrier();
         // GATED_DELTA_NET (+ CPY new_state: yerinde)
-        ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, self.b_conv_out.ptr + 2 * key_dim, conv_dim, self.b_gate.ptr, self.b_beta.ptr, self.rs_state[il].ptr, self.b_gdn.ptr);
+        ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, self.b_conv_out.ptr + 2 * key_dim, conv_dim, self.b_gate.ptr, self.b_beta.ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
         p.barrier();
         // build_norm_gated
         ops.rmsNorm(p, self.b_gdn.ptr, s, m.d_inner, self.b_gdn.ptr, s, m.d_inner, s, h_n, n_t, m.eps, l.ssm_norm, 1.0);

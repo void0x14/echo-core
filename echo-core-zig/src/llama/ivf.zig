@@ -346,6 +346,15 @@ pub fn eval(model_path: []const u8, w: ops.Mat, x_path: []const u8, t_path: []co
         defer s.deinit(a);
         var hit: usize = 0;
         var rows: u64 = 0;
+        const TEXT_TOKENS = 400; // shortcut: girdi 20 metin × 400 token varsayar; farklı girdide metin sınırı dosyadan okunmalı
+        const per = try a.alloc(u32, n / TEXT_TOKENS + 1);
+        defer a.free(per);
+        @memset(per, 0);
+        const miss_i = try a.alloc(u32, n);
+        defer a.free(miss_i);
+        const miss_v = try a.alloc(f32, n);
+        defer a.free(miss_v);
+        var nm: usize = 0;
         const t0 = std.Io.Timestamp.now(io, .awake);
         for (0..n) |i| {
             @memcpy(std.mem.sliceAsBytes(xf), xb[i * k * 4..][0 .. k * 4]);
@@ -359,9 +368,33 @@ pub fn eval(model_path: []const u8, w: ops.Mat, x_path: []const u8, t_path: []co
             }
             s.best[0] = b;
             s.reduce();
-            if (s.token == @as(u32, @intCast(std.mem.readInt(i64, tb[i * 8..][0..8], .little)))) hit += 1;
+            if (s.token == @as(u32, @intCast(std.mem.readInt(i64, tb[i * 8..][0..8], .little)))) {
+                hit += 1;
+                per[i / TEXT_TOKENS] += 1;
+            } else {
+                miss_i[nm] = @intCast(i);
+                miss_v[nm] = s.value;
+                nm += 1;
+            }
         }
         const ms = @as(f64, @floatFromInt(t0.untilNow(io, .awake).toNanoseconds())) / 1e6 / @as(f64, @floatFromInt(n));
         std.debug.print("L={d} nprobe={d}: top-1 %{d:.2}, satır %{d:.2}, t=1 {d:.3} ms/arama\n", .{ l, np, @as(f64, @floatFromInt(hit)) * 100 / @as(f64, @floatFromInt(n)), @as(f64, @floatFromInt(rows)) * 100 / @as(f64, @floatFromInt(n * w.m)), ms });
+        // Kuyruk: metin başına doğruluk ve kaçan tokende doğru token ile bulunan arasındaki logit farkı.
+        const gaps = miss_v[0..nm];
+        for (gaps, miss_i[0..nm]) |*g, i| {
+            @memcpy(std.mem.sliceAsBytes(xf), xb[i * k * 4..][0 .. k * 4]);
+            q.quantizeRowQ80(xf.ptr, xq.ptr, k);
+            const want: u32 = @intCast(std.mem.readInt(i64, tb[i * 8..][0..8], .little));
+            const r = std.mem.indexOfScalar(u32, ix.order, want).?;
+            g.* = q.dotQ80Q80(ix.k, @ptrCast(@alignCast(ix.rows.ptr + r * ix.nb1)), xq.ptr) - g.*;
+        }
+        std.mem.sort(f32, gaps, {}, std.sort.asc(f32));
+        const texts = per[0 .. n / TEXT_TOKENS];
+        std.mem.sort(u32, texts, {}, std.sort.asc(u32));
+        var close: usize = 0;
+        for (gaps) |g| {
+            if (g < 0.5) close += 1;
+        }
+        if (nm > 0) std.debug.print("  metin top-1 (%): en kötü {d:.2}, medyan {d:.2}; kaçan {d}: fark medyan {d:.3}, p95 {d:.3}, <0,5 olan %{d:.1}\n", .{ @as(f64, @floatFromInt(texts[0])) * 100 / TEXT_TOKENS, @as(f64, @floatFromInt(texts[texts.len / 2])) * 100 / TEXT_TOKENS, nm, gaps[nm / 2], gaps[nm * 95 / 100], @as(f64, @floatFromInt(close)) * 100 / @as(f64, @floatFromInt(nm)) });
     }
 }

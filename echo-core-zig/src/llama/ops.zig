@@ -325,7 +325,7 @@ pub fn gateAttn(p: *const Params, n_t: usize, heads: usize, dim: usize, attn: [*
 const CONV_ROWS = 64;
 
 /// CONCAT(conv_states, qkv^T) dim=0 + CPY(conv_state_last -> cache_r); satır bazında.
-pub fn convConcat(p: *const Params, rows: usize, kc: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, out: [*]f32) void {
+pub fn convConcat(p: *const Params, rows: usize, kc: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, out: [*]f32, trace: ?[*]f32) void {
     const r = p.range(rows);
     const ncs = kc + n_t;
     // qkv satırları `rows` adımlı: blok içinde t dış döngüde kalır, her t aynı önbellek satırlarını okur
@@ -340,6 +340,14 @@ pub fn convConcat(p: *const Params, rows: usize, kc: usize, n_t: usize, state: [
         }
         for (b0..b1) |row| {
             for (0..kc) |c| state[row * kc + c] = out[row * ncs + n_t + c];
+        }
+        // trace: [t][row][c] = t token islendikten sonraki pencere (t+1..t+kc)
+        if (trace) |tr| {
+            for (0..n_t) |t| {
+                for (b0..b1) |row| {
+                    for (0..kc) |c| tr[(t * rows + row) * kc + c] = out[row * ncs + t + c];
+                }
+            }
         }
     }
 }
@@ -378,6 +386,7 @@ pub fn gatedDeltaNet(
     beta: [*]const f32,
     state: [*]f32,
     out: [*]f32,
+    trace: ?[*]f32,
 ) void {
     const nr = h_n;
     const nth_scaled = p.nth * 4;
@@ -403,6 +412,10 @@ pub fn gatedDeltaNet(
                 const v_d = v_in + t * v_stride + iv1 * s_v;
                 const beta_val = beta[t * h_n + iv1];
                 // satır başına tek geçiş: satır L1'de kalır, 64 KB durum üç kez dolaşılmaz
+                if (trace) |tr| {
+                    const dst = tr + (t * h_n + iv1) * s_v * s_v;
+                    @memcpy(dst[0 .. s_v * s_v], s_out[0 .. s_v * s_v]);
+                }
                 const e = avx.expf(g[t * h_n + iv1]);
                 for (0..s_v) |j| {
                     const row = s_out + j * s_v;

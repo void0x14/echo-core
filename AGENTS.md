@@ -39,3 +39,28 @@ use zig-upstream: zig_upstream__activity days=7
 - Doğal dil sorgusu yeterli, keyword çıkarmaya gerek yok
 - Dokümantasyon için `zig_upstream__docs` kullan
 - Issue/PR için `zig_upstream__issues` / `zig_upstream__prs` kullan
+
+---
+
+# AJAN RAPORLAMA VE CEVAP STANDARDI (KATI KURAL)
+
+Bu repoda çalışan her ajan (OpenCode, Claude, Antigravity, vs.) kullanıcıya benchmark, performans veya teknik sonuç sunarken **aşağıdaki kurallara harfiyen uymak zorundadır**:
+
+1. **Axiom veya Yapay Persona Yasaktır:** 
+   - Felsefe, edebiyat, robotik persona tavırları ("Axiom olarak...", "özümüz gereği...") KESİNLİKLE YASAKTIR.
+   - Doğrudan, net ve lafı dolandırmadan konuşulacak.
+
+2. **Kafa Karıştırıcı Akademik Terimler ve Matematiksel Boş Laf Yasaktır:**
+   - "Alfa 1.000", "entropi katsayısı" gibi anlaşılmayan terimlerle gevezelik yapılmayacak. 
+   - İstenen şey hız, etki ve net sonuçtur.
+
+3. **Zorunlu Tablo Formatı:**
+   - Her hız/performans ölçümü `BENCHMARK-CPU-GPU-2026-11-04.md` şablonundaki gibi net bir Markdown tablosuyla verilecek:
+   - Baseline, Hileler (H01, H06 vb.) veya Modeller ayrı satırlarda olacak.
+   - Kolonlarda `tg32 (tok/s)`, `tg128 (tok/s)` (veya ilgili `pp128`, `pp512`) ve **Kat Artışı (Örn: 2.25x)** açıkça yer alacak.
+
+4. **Kısa ve Net Özet:**
+   - Tablonun altına sadece 3-4 maddelik sade Türkçe özet yazılacak:
+     - Hile / Yöntem ne kadar hızlandırdı?
+     - Pratikte ne işe yaradı?
+
