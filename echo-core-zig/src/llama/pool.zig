@@ -87,7 +87,12 @@ pub const Pool = struct {
             _ = self.n_barrier_passed.fetchAdd(1, .seq_cst);
             return;
         }
-        while (self.n_barrier_passed.load(.monotonic) == passed) std.atomic.spinLoopHint();
+        // H46: uzun beklemede çekirdeği bırak (kirli ortamda önalınan thread'imiz daha çabuk döner)
+        var spins: u32 = 0;
+        while (self.n_barrier_passed.load(.monotonic) == passed) {
+            spins += 1;
+            if (spins & 2047 == 0) std.Thread.yield() catch {} else std.atomic.spinLoopHint();
+        }
         // ggml: exit barrier (full seq-cst fence)
         _ = self.n_barrier_passed.fetchAdd(0, .seq_cst);
     }
