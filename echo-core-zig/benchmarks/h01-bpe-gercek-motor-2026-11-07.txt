@@ -1,0 +1,8 @@
+istem 1 ngram 0: Generated tokens: 256 Decode: 4977 ms (51.44 tok/s) 
+istem 1 ngram 8: Generated tokens: 256 Decode: 4970 ms (51.51 tok/s) 
+istem 2 ngram 0: Generated tokens: 256 Decode: 4939 ms (51.83 tok/s) 
+istem 2 ngram 8: Generated tokens: 256 Decode: 3371 ms (75.94 tok/s) 
+istem 3 ngram 0: Generated tokens: 256 Decode: 4940 ms (51.82 tok/s) 
+istem 3 ngram 8: Generated tokens: 256 Decode: 4968 ms (51.53 tok/s) 
+istem 4 ngram 0: Generated tokens: 256 Decode: 4965 ms (51.56 tok/s) 
+istem 4 ngram 8: Generated tokens: 256 Decode: 4936 ms (51.86 tok/s) 

@@ -58,7 +58,7 @@ pub const Options = struct {
     /// >0: H01 n-gram taslağı + doğrulama, k = taslak uzunluğu.
     ngram_k: usize = 8,
     /// true: H06 grammar fast-forward (JSON iskeleti zorunlu blok).
-    grammar: bool = false,
+    grammar: bool = true,
 };
 
 
