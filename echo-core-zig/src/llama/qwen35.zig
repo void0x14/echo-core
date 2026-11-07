@@ -313,6 +313,8 @@ pub const Context = struct {
     trace_conv: [][]f32 = &.{},
     trace_recr: [][]f32 = &.{},
     verify_len: usize = 0,
+    /// true: decodeVerify iz yazmaz (geri alma yapılmayacaksa; H11/P6).
+    no_trace: bool = false,
 
     fn buf(allocator: Alloc, n: usize) ![]align(64) f32 {
         const b = try allocator.alignedAlloc(f32, .@"64", n);
@@ -474,6 +476,25 @@ pub const Context = struct {
         }
         self.head = batch_start + j;
     }
+    /// H13: tur başı durumunu iz yuvası 0'a kopyalar (no_trace ile birlikte kullanılır).
+    pub fn snapshot(self: *Context) void {
+        for (self.model.layers, 0..) |*l, il| {
+            if (!l.recr) continue;
+            @memcpy(self.trace_conv[il][0..self.rs_conv[il].len], self.rs_conv[il]);
+            @memcpy(self.trace_recr[il][0..self.rs_state[il].len], self.rs_state[il]);
+        }
+    }
+
+    /// H13: snapshot() anına döner; çağıran kabul edilen tokenları yeniden decode eder.
+    pub fn rollback(self: *Context, batch_start: usize) void {
+        for (self.model.layers, 0..) |*l, il| {
+            if (!l.recr) continue;
+            @memcpy(self.rs_conv[il], self.trace_conv[il][0..self.rs_conv[il].len]);
+            @memcpy(self.rs_state[il], self.trace_recr[il][0..self.rs_state[il].len]);
+        }
+        self.head = batch_start;
+    }
+
     /// llama_memory_clear
     pub fn clear(self: *Context) void {
         self.head = 0;
@@ -627,7 +648,7 @@ pub const Context = struct {
         const key_dim = m.n_group * m.d_state;
         const l2 = 1.0 / @sqrt(@as(f32, @floatFromInt(s)));
         const eps_l2 = m.eps / @as(f32, @floatFromInt(s));
-        const tracing = self.want_all and self.trace_k >= n_t;
+        const tracing = self.want_all and !self.no_trace and self.trace_k >= n_t;
         const tr_conv: ?[*]f32 = if (tracing) self.trace_conv[il].ptr else null;
         const tr_recr: ?[*]f32 = if (tracing) self.trace_recr[il].ptr else null;
 

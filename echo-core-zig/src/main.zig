@@ -167,6 +167,10 @@ fn runLlamaBench(init: std.process.Init, args: []const []const u8) !void {
             opt.ngram_k = try std.fmt.parseInt(usize, v, 10);
         } else if (std.mem.eql(u8, a, "--grammar")) {
             opt.grammar = !std.mem.eql(u8, v, "0");
+        } else if (std.mem.eql(u8, a, "--p6")) {
+            opt.p6 = !std.mem.eql(u8, v, "0");
+        } else if (std.mem.eql(u8, a, "--snap")) {
+            opt.snap = !std.mem.eql(u8, v, "0");
         } else if (std.mem.eql(u8, a, "--dump-logits")) {
             dump = v;
         } else if (std.mem.eql(u8, a, "--tokens")) {
@@ -220,6 +224,7 @@ pub fn main(init: std.process.Init) !void {
     var bench = false;
     var ngram_k: usize = 8; // H01 varsayılan; --ngram 0 kapatır
     var grammar = true; // H06 varsayılan; --no-grammar kapatır
+    var snap = true; // H13 varsayılan; --no-snap kapatır
     var json = false;
     var i: usize = 1;
     while (i < args.items.len) : (i += 1) {
@@ -239,6 +244,8 @@ pub fn main(init: std.process.Init) !void {
             grammar = true;
         } else if (std.mem.eql(u8, args.items[i], "--no-grammar")) {
             grammar = false;
+        } else if (std.mem.eql(u8, args.items[i], "--no-snap")) {
+            snap = false;
         } else if (std.mem.eql(u8, args.items[i], "--json")) {
             json = true;
         } else if (std.mem.eql(u8, args.items[i], "--max-tokens") or std.mem.eql(u8, args.items[i], "-n")) {
@@ -255,17 +262,18 @@ pub fn main(init: std.process.Init) !void {
     };
 
     if (qwen35.supported and qwen35.Model.isQwen35(model_path, init.gpa)) {
-        return drive(llama_port.Port, init, model_path, prompt, max_tokens, bench, json, ngram_k, grammar);
+        return drive(llama_port.Port, init, model_path, prompt, max_tokens, bench, json, ngram_k, grammar, snap);
     }
-    return drive(ports.InferencePort, init, model_path, prompt, max_tokens, bench, json, ngram_k, grammar);
+    return drive(ports.InferencePort, init, model_path, prompt, max_tokens, bench, json, ngram_k, grammar, snap);
 }
 
-fn drive(comptime Port: type, init: std.process.Init, model_path: []const u8, prompt: ?[]const u8, max_tokens: u32, bench: bool, json: bool, ngram_k: usize, grammar: bool) !void {
+fn drive(comptime Port: type, init: std.process.Init, model_path: []const u8, prompt: ?[]const u8, max_tokens: u32, bench: bool, json: bool, ngram_k: usize, grammar: bool, snap: bool) !void {
     if (prompt) |p| {
         var port = try Port.init(model_path, init.gpa);
         if (comptime @hasField(Port, "ngram_k")) {
             port.ngram_k = ngram_k;
             port.grammar = grammar;
+            port.snap = snap;
         }
         defer port.deinit(init.gpa);
 

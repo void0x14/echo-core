@@ -59,6 +59,10 @@ pub const Options = struct {
     ngram_k: usize = 8,
     /// true: H06 grammar fast-forward (JSON iskeleti zorunlu blok).
     grammar: bool = true,
+    /// H11 (P6): taslak zinciri tek forward'da ödenir, model farklı derse fark sayılır, geri alma yok.
+    p6: bool = false,
+    /// H13: iz yerine tur başı snapshot; tutmazsa geri dön + yeniden işle (kayıpsız).
+    snap: bool = true,
 };
 
 
@@ -66,6 +70,8 @@ pub const Stats = struct {
     rounds: usize = 0,
     drafted: usize = 0,
     accepted: usize = 0,
+    /// H11: modelin kendi seçimiyle tutmayan taslak pozisyonu ("kafaya yazılan +10 TL").
+    miss: usize = 0,
     forced_blocks: usize = 0,
     forced_tokens: usize = 0,
 };
@@ -77,7 +83,24 @@ fn nextToken(ctx: *qwen35.Context) u32 {
 
 /// H01: n-gram taslağı + tek zincir doğrulama. Token akışı modelin kendi ürettiği
 /// tokenlar olduğu için pencere birebir hizalı.
-fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: usize, k: usize, st: *Stats, a: std.mem.Allocator) !usize {
+/// Tutmayan turda durumu geri alır: H13 (no_trace) snapshot'a dönüp kabul edileni yeniden işler, H01 iz kullanır.
+fn undo(ctx: *qwen35.Context, before: usize, acc: []const u32) !void {
+    if (!ctx.no_trace) return ctx.restore(before, acc.len);
+    ctx.rollback(before);
+    try ctx.decode(acc);
+}
+
+/// H11: doğrulama çıktısını sayar, hepsini alır; sonraki token modelin son tahmini.
+fn payAll(ctx: *qwen35.Context, buf: []const u32, st: *Stats) u32 {
+    const m = buf.len;
+    for (0..m - 1) |i| {
+        if (ctx.verify_tokens[i] != buf[i + 1]) st.miss += 1;
+    }
+    st.accepted += m;
+    return ctx.verify_tokens[m - 1];
+}
+
+fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: usize, k: usize, p6: bool, st: *Stats, a: std.mem.Allocator) !usize {
     var d = try ngram.TokenDrafter.init(a, 3);
     defer d.deinit();
     var buf: [16]u32 = undefined;
@@ -92,7 +115,14 @@ fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: us
             st.rounds += 1;
             st.drafted += m;
             const before = ctx.head;
+            if (ctx.no_trace and !p6) ctx.snapshot();
             try ctx.decodeVerify(buf[0..m]);
+            if (p6) {
+                pending = payAll(ctx, buf[0..m], st);
+                for (buf[0..m]) |x| try d.add(x);
+                produced += m;
+                continue;
+            }
             var j: usize = 0;
             while (j + 1 < m and ctx.verify_tokens[j] == buf[j + 1]) j += 1;
             var acc: usize = 0;
@@ -102,7 +132,7 @@ fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: us
             } else {
                 acc = j + 1;
                 pending = ctx.verify_tokens[j];
-                ctx.restore(before, acc);
+                try undo(ctx, before, buf[0..acc]);
             }
             st.accepted += acc;
             for (buf[0..acc]) |x| try d.add(x);
@@ -220,8 +250,8 @@ fn testGenGrammar(ctx: *qwen35.Context, tk: *const tokenizer.SimpleTokenizer, n_
 }
 
 fn runGen(ctx: *qwen35.Context, opt: Options, rng: std.Random, n_vocab: usize, n_gen: usize, tk: ?*const tokenizer.SimpleTokenizer, tokens: []u32, st: *Stats, a: std.mem.Allocator) !usize {
-    if (opt.grammar) return testGenGrammarSpec(ctx, tk orelse return error.NoTokenizer, n_gen, st, a, opt.ngram_k);
-    if (opt.ngram_k > 0) return testGenNgram(ctx, rng, n_vocab, n_gen, opt.ngram_k, st, a);
+    if (opt.grammar) return testGenGrammarSpec(ctx, tk orelse return error.NoTokenizer, n_gen, st, a, opt.ngram_k, opt.p6);
+    if (opt.ngram_k > 0) return testGenNgram(ctx, rng, n_vocab, n_gen, opt.ngram_k, opt.p6, st, a);
     if (opt.gen_batch > 1) {
         try testGenBatch(ctx, rng, n_vocab, n_gen, opt.gen_batch, tokens);
         return n_gen;
@@ -231,7 +261,7 @@ fn runGen(ctx: *qwen35.Context, opt: Options, rng: std.Random, n_vocab: usize, n
 }
 
 /// H06 + (opsiyonel) H01: zorunlu bloklar tek forward, serbest alanlarda n-gram taslağı.
-fn testGenGrammarSpec(ctx: *qwen35.Context, tk: *const tokenizer.SimpleTokenizer, n_gen: usize, st: *Stats, a: std.mem.Allocator, ngram_k: usize) !usize {
+fn testGenGrammarSpec(ctx: *qwen35.Context, tk: *const tokenizer.SimpleTokenizer, n_gen: usize, st: *Stats, a: std.mem.Allocator, ngram_k: usize, p6: bool) !usize {
     var d = try ngram.TokenDrafter.init(a, 3);
     defer d.deinit();
     var buf: [16]u32 = undefined;
@@ -274,7 +304,15 @@ fn testGenGrammarSpec(ctx: *qwen35.Context, tk: *const tokenizer.SimpleTokenizer
                         st.rounds += 1;
                         st.drafted += m;
                         const before = ctx.head;
+                        if (ctx.no_trace and !p6) ctx.snapshot();
                         try ctx.decodeVerify(buf[0..m]);
+                        if (p6) {
+                            pending = payAll(ctx, buf[0..m], st);
+                            for (buf[0..m]) |t| try d.add(t);
+                            produced += m;
+                            emitted += m;
+                            continue;
+                        }
                         var j: usize = 0;
                         while (j + 1 < m and ctx.verify_tokens[j] == buf[j + 1]) j += 1;
                         var acc: usize = 0;
@@ -284,7 +322,7 @@ fn testGenGrammarSpec(ctx: *qwen35.Context, tk: *const tokenizer.SimpleTokenizer
                         } else {
                             acc = j + 1;
                             pending = ctx.verify_tokens[j];
-                            ctx.restore(before, acc);
+                            try undo(ctx, before, buf[0..acc]);
                         }
                         st.accepted += acc;
                         for (buf[0..acc]) |t| try d.add(t);
@@ -345,6 +383,7 @@ pub fn run(model_path: []const u8, opt: Options, allocator: std.mem.Allocator, i
                 return e;
             };
         }
+        ctx.no_trace = opt.p6 or opt.snap;
         var st = Stats{};
 
         // warmup
@@ -370,7 +409,7 @@ pub fn run(model_path: []const u8, opt: Options, allocator: std.mem.Allocator, i
         for (samples) |s| sum += s;
         const alpha: f64 = if (st.drafted > 0) @as(f64, @floatFromInt(st.accepted)) / @as(f64, @floatFromInt(st.drafted)) else 0;
         const per_round: f64 = if (st.rounds > 0) @as(f64, @floatFromInt(st.accepted)) / @as(f64, @floatFromInt(st.rounds)) else 0;
-        try out.print("{{\"n_prompt\":{d},\"n_gen\":{d},\"gen_batch\":{d},\"n_threads\":{d},\"lm_clusters\":{d},\"lm_nprobe\":{d},\"greedy\":{},\"ngram_k\":{d},\"grammar\":{},\"alpha\":{d:.3},\"accept_per_round\":{d:.2},\"drafted\":{d},\"accepted\":{d},\"forced_tokens\":{d},\"forced_blocks\":{d},\"avg_ts\":{d:.3},\"samples_ts\":[", .{ t.n_prompt, t.n_gen, opt.gen_batch, opt.n_threads, opt.lm_clusters, if (opt.lm_clusters > 0) opt.lm_nprobe else 0, opt.greedy, opt.ngram_k, opt.grammar, alpha, per_round, st.drafted, st.accepted, st.forced_tokens, st.forced_blocks, sum / @as(f64, @floatFromInt(samples.len)) });
+        try out.print("{{\"n_prompt\":{d},\"n_gen\":{d},\"gen_batch\":{d},\"n_threads\":{d},\"lm_clusters\":{d},\"lm_nprobe\":{d},\"greedy\":{},\"ngram_k\":{d},\"grammar\":{},\"alpha\":{d:.3},\"accept_per_round\":{d:.2},\"drafted\":{d},\"accepted\":{d},\"forced_tokens\":{d},\"forced_blocks\":{d},\"p6\":{},\"miss\":{d},\"avg_ts\":{d:.3},\"samples_ts\":[", .{ t.n_prompt, t.n_gen, opt.gen_batch, opt.n_threads, opt.lm_clusters, if (opt.lm_clusters > 0) opt.lm_nprobe else 0, opt.greedy, opt.ngram_k, opt.grammar, alpha, per_round, st.drafted, st.accepted, st.forced_tokens, st.forced_blocks, opt.p6, st.miss, sum / @as(f64, @floatFromInt(samples.len)) });
         for (samples, 0..) |s, i| {
             if (i > 0) try out.writeAll(",");
             try out.print("{d:.3}", .{s});

@@ -23,6 +23,8 @@ pub const Port = struct {
     ngram_k: usize = 8,
     /// H06 grammar fast-forward (JSON iskeleti); varsayılan açık, `--no-grammar` kapatır.
     grammar: bool = true,
+    /// H13: doğrulamada iz yerine tur başı snapshot; tutmazsa geri dön + yeniden işle (kayıpsız).
+    snap: bool = true,
 
     pub const BenchResult = struct {
         text: []u8,
@@ -79,6 +81,7 @@ pub const Port = struct {
         errdefer c.deinit();
         if (self.lm_ix) |ix| c.lm = try ivf.Search.init(ix, ivf.default_nprobe, self.n_threads, self.allocator);
         if (self.ngram_k > 0) try c.enableTrace(self.ngram_k);
+        c.no_trace = self.snap;
         self.ctx = c;
         return c;
     }
@@ -156,6 +159,7 @@ pub const Port = struct {
                         }
                         if (m >= 2 and m >= @min(4, maxm) and buf[0] == pending) {
                             const before = ctx.head;
+                            if (ctx.no_trace) ctx.snapshot();
                             try ctx.decodeVerify(buf[0..m]);
                             var j: usize = 0;
                             while (j + 1 < m and ctx.verify_tokens[j] == buf[j + 1]) j += 1;
@@ -166,7 +170,7 @@ pub const Port = struct {
                             } else {
                                 acc = j + 1;
                                 pending = ctx.verify_tokens[j];
-                                ctx.restore(before, acc);
+                                try undo(ctx, before, buf[0..acc]);
                             }
                             for (buf[0..acc]) |t| {
                                 try all_ids.append(t);
@@ -191,6 +195,12 @@ pub const Port = struct {
         }
         return produced;
     }
+    fn undo(ctx: *qwen35.Context, before: usize, acc: []const u32) !void {
+        if (!ctx.no_trace) return ctx.restore(before, acc.len);
+        ctx.rollback(before);
+        try ctx.decode(acc);
+    }
+
     fn runNgram(self: *Port, ctx: *qwen35.Context, prompt: []const u32, max_tokens: u32, all_ids: *ArrayList(u32)) !u32 {
         var d = try ngram.TokenDrafter.init(self.allocator, 3);
         defer d.deinit();
@@ -203,6 +213,7 @@ pub const Port = struct {
             const m = d.chain(buf[0..@min(@min(self.ngram_k, buf.len), max_tokens - generated)]);
             if (m >= @min(6, self.ngram_k) and buf[0] == pending) {
                 const before = ctx.head;
+                if (ctx.no_trace) ctx.snapshot();
                 try ctx.decodeVerify(buf[0..m]);
                 var j: usize = 0;
                 while (j + 1 < m and ctx.verify_tokens[j] == buf[j + 1]) j += 1;
@@ -213,7 +224,7 @@ pub const Port = struct {
                 } else {
                     acc = j + 1;
                     pending = ctx.verify_tokens[j];
-                    ctx.restore(before, acc);
+                    try undo(ctx, before, buf[0..acc]);
                 }
                 for (buf[0..acc]) |t| {
                     try all_ids.append(t);
