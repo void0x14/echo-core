@@ -30,6 +30,8 @@ pub const Mat = struct {
     nb1: usize,
     /// H20: Q8_0_R8 kopya (batch yolu); tek token yolu `data` kullanır.
     rep: ?[*]const u8 = null,
+    /// H56: rep R16 düzeninde
+    r16: bool = false,
 };
 
 pub fn rowSize(t: Type, k: usize) usize {
@@ -197,7 +199,7 @@ pub fn mulMat(p: *const Params, a: Mat, x: [*]const f32, n: usize, y: [*]f32) vo
         },
         .q8_0 => {
             if (a.rep != null) {
-                const g = sgemm.GemmR8{ .pool = p.pool, .nb = a.k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith };
+                const g = sgemm.GemmR8{ .pool = p.pool, .nb = a.k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith, .r16 = a.r16 };
                 g.matmul(a.m, n);
                 return;
             }
@@ -258,7 +260,7 @@ pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usiz
         for (mats, ys) |a, y| {
             const nc = sgemm.GemmR8.chunks(a.m);
             if (c < nc) {
-                const g = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith };
+                const g = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith, .r16 = a.r16 };
                 g.chunk(c, a.m, n);
                 break;
             }

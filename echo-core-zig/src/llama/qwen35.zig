@@ -197,7 +197,9 @@ pub const Model = struct {
             const nb = w.k / 32;
             const dst = try self.allocator.alignedAlloc(u8, .@"64", w.m / 8 * nb * sgemm.R8_BLOCK);
             errdefer self.allocator.free(dst);
-            sgemm.repackQ80x8(@ptrCast(@alignCast(w.data)), dst.ptr, w.m, nb);
+            // H56: 16'ya bölünen matrisler R16 (aynı bayt boyu)
+            w.r16 = w.m % 16 == 0 and std.c.getenv("ECHO_NO_R16") == null;
+            if (w.r16) sgemm.repackQ80x16(@ptrCast(@alignCast(w.data)), dst.ptr, w.m, nb) else sgemm.repackQ80x8(@ptrCast(@alignCast(w.data)), dst.ptr, w.m, nb);
             try self.repacked8.append(self.allocator, dst);
             w.rep = dst.ptr;
             return;

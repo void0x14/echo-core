@@ -571,6 +571,154 @@ pub fn r8xN(comptime nc: usize, w0: [*]const u8, b: [4][*]const q.BlockQ80, nb: 
         : .{ .rax = true, .ymm0 = true, .ymm1 = true, .ymm2 = true, .ymm3 = true, .ymm7 = true, .ymm4 = true, .ymm5 = true, .ymm6 = true, .ymm8 = true, .ymm9 = true, .ymm10 = true, .ymm11 = true, .ymm12 = true, .ymm13 = true, .ymm14 = true, .ymm15 = true, .memory = true, .cc = true });
 }
 
+/// H56: R16 düzeni — 16 satır × blok (608 B): [16 × f16 ölçek][corrA][corrB][8 adım × (V1, V2)].
+/// Adım j (eleman 4j..4j+3), i16 şerit 2m/2m+1:
+///   V1: satır m (4j,4j+1) | satır m+8 (4j+2,4j+3);  V2: satır m+8 (4j,4j+1) | satır m (4j+2,4j+3).
+/// Tek vpbroadcastd iki maddubs'u besler; şerit başına yarı toplam R8 ile aynı (bit-aynı sonuç).
+pub const R16_BLOCK = 608;
+
+pub fn repackQ80x16(src: [*]const q.BlockQ80, dst: [*]u8, m: usize, nb: usize) void {
+    for (0..m / 16) |g| {
+        for (0..nb) |l| {
+            const bb = dst + (g * nb + l) * R16_BLOCK;
+            const sc: [*]u16 = @ptrCast(@alignCast(bb));
+            const ca: [*]i16 = @ptrCast(@alignCast(bb + 32));
+            const cb: [*]i16 = @ptrCast(@alignCast(bb + 64));
+            const qd = bb + 96;
+            var c0: [16]i32 = @splat(0);
+            var c1: [16]i32 = @splat(0);
+            for (0..16) |r| {
+                const blk = &src[(g * 16 + r) * nb + l];
+                sc[r] = blk.d;
+                for (0..8) |k| {
+                    c0[r] += @as(i32, blk.qs[4 * k]) + blk.qs[4 * k + 1];
+                    c1[r] += @as(i32, blk.qs[4 * k + 2]) + blk.qs[4 * k + 3];
+                }
+            }
+            for (0..8) |mm| {
+                ca[2 * mm] = @truncate(c0[mm] * R8_AOFF);
+                ca[2 * mm + 1] = @truncate(c1[mm + 8] * R8_AOFF);
+                cb[2 * mm] = @truncate(c0[mm + 8] * R8_AOFF);
+                cb[2 * mm + 1] = @truncate(c1[mm] * R8_AOFF);
+            }
+            for (0..8) |j| {
+                const v1 = qd + 64 * j;
+                const v2 = v1 + 32;
+                for (0..8) |mm| {
+                    const lo = std.mem.asBytes(&src[(g * 16 + mm) * nb + l].qs);
+                    const hi = std.mem.asBytes(&src[(g * 16 + mm + 8) * nb + l].qs);
+                    v1[4 * mm] = lo[4 * j];
+                    v1[4 * mm + 1] = lo[4 * j + 1];
+                    v1[4 * mm + 2] = hi[4 * j + 2];
+                    v1[4 * mm + 3] = hi[4 * j + 3];
+                    v2[4 * mm] = hi[4 * j];
+                    v2[4 * mm + 1] = hi[4 * j + 1];
+                    v2[4 * mm + 2] = lo[4 * j + 2];
+                    v2[4 * mm + 3] = lo[4 * j + 3];
+                }
+            }
+        }
+    }
+}
+
+/// R16 asm: A = ymm8+c, B = ymm12+c (i16 yarı toplamları), ymm0 maddubs geçici, ymm1 aktivasyon,
+/// ymm2-5 blok sonu geçicileri, ymm6/7 önceki bloğun ağırlık ölçekleri. Blok sonu A/B'yi yığına (st) yazar;
+/// önceki bloğun genişletme/ölçek/FMA'sı sonraki bloğun iç döngüsüne serpiştirilir (FP zamanlayıcı tıkanmaz).
+/// Akümülatörler bellekte (cv): satır 0-7 cv[c][0..8], 8-15 cv[c][8..16].
+fn r16End(comptime nc: usize) []const []const u8 {
+    var e: []const []const u8 = &.{ "vcvtph2ps -608(%[w]), %%ymm6\n", "vcvtph2ps -592(%[w]), %%ymm7\n" };
+    for (0..nc) |c| {
+        const a = 64 * c;
+        e = e ++ [_][]const u8{
+            std.fmt.comptimePrint("vmovdqa {d}(%[st]), %%ymm2\n", .{a}),
+            "vpslld $16, %%ymm2, %%ymm3\n",
+            "vpsrad $16, %%ymm3, %%ymm3\n",
+            "vpsrad $16, %%ymm2, %%ymm2\n",
+            std.fmt.comptimePrint("vmovdqa {d}(%[st]), %%ymm4\n", .{a + 32}),
+            "vpslld $16, %%ymm4, %%ymm5\n",
+            "vpsrad $16, %%ymm5, %%ymm5\n",
+            "vpsrad $16, %%ymm4, %%ymm4\n",
+            "vpaddd %%ymm4, %%ymm3, %%ymm3\n",
+            "vpaddd %%ymm5, %%ymm2, %%ymm2\n",
+            "vcvtdq2ps %%ymm3, %%ymm3\n",
+            "vcvtdq2ps %%ymm2, %%ymm2\n",
+            std.fmt.comptimePrint("movzwl -34({s}), %%eax\n", .{r8_bn[c]}),
+            "vbroadcastss (%[tab],%%rax,4), %%ymm5\n",
+            "vmulps %%ymm6, %%ymm5, %%ymm4\n",
+            std.fmt.comptimePrint("vfmadd213ps {d}(%[cv]), %%ymm4, %%ymm3\n", .{a}),
+            "vmulps %%ymm7, %%ymm5, %%ymm4\n",
+            std.fmt.comptimePrint("vfmadd213ps {d}(%[cv]), %%ymm4, %%ymm2\n", .{a + 32}),
+            std.fmt.comptimePrint("vmovaps %%ymm3, {d}(%[cv])\n", .{a}),
+            std.fmt.comptimePrint("vmovaps %%ymm2, {d}(%[cv])\n", .{a + 32}),
+        };
+    }
+    return e;
+}
+
+fn r16Inner(comptime nc: usize, comptime with_end: bool) []const u8 {
+    const E = if (with_end) r16End(nc) else &[_][]const u8{};
+    var t: []const u8 = "";
+    var ei: usize = 0;
+    for (0..8) |j| {
+        for (0..nc) |c| {
+            t = t ++ std.fmt.comptimePrint("vpbroadcastd {d}({s}), %%ymm1\n", .{ 2 + 4 * j, r8_bn[c] });
+            for (0..2) |h| {
+                const w = 96 + 64 * j + 32 * h;
+                const acc = (if (h == 0) 8 else 12) + c;
+                t = t ++ if (j == 0)
+                    std.fmt.comptimePrint("vpmaddubsw {d}(%[w]), %%ymm1, %%ymm0\nvpsubw {d}(%[w]), %%ymm0, %%ymm{d}\n", .{ w, 32 + 32 * h, acc })
+                else
+                    std.fmt.comptimePrint("vpmaddubsw {0d}(%[w]), %%ymm1, %%ymm0\nvpaddw %%ymm0, %%ymm{1d}, %%ymm{1d}\n", .{ w, acc });
+            }
+            if (j >= 3) for (0..4) |_| {
+                if (ei < E.len) {
+                    t = t ++ E[ei];
+                    ei += 1;
+                }
+            };
+        }
+    }
+    while (ei < E.len) : (ei += 1) t = t ++ E[ei];
+    for (0..nc) |c| t = t ++ std.fmt.comptimePrint("vmovdqa %%ymm{d}, {d}(%[st])\nvmovdqa %%ymm{d}, {d}(%[st])\n", .{ 8 + c, 64 * c, 12 + c, 64 * c + 32 });
+    return t;
+}
+
+fn r16Asm(comptime nc: usize) []const u8 {
+    @setEvalBranchQuota(800000);
+    var t: []const u8 = "vxorps %%ymm2, %%ymm2, %%ymm2\n";
+    for (0..nc) |c| t = t ++ std.fmt.comptimePrint("vmovaps %%ymm2, {d}(%[cv])\nvmovaps %%ymm2, {d}(%[cv])\n", .{ 64 * c, 64 * c + 32 });
+    t = t ++ r16Inner(nc, false);
+    t = t ++ "dec %[cnt]\njz 2f\n.p2align 4\n1:\n";
+    var adv: []const u8 = "add $608, %[w]\n";
+    for (0..nc) |c| adv = adv ++ std.fmt.comptimePrint("add $34, {s}\n", .{r8_bn[c]});
+    t = t ++ adv ++ r16Inner(nc, true);
+    t = t ++ "dec %[cnt]\njnz 1b\n2:\n" ++ adv;
+    for (r16End(nc)) |x| t = t ++ x;
+    return t;
+}
+
+/// 16 satırlık R16 grubu × ilk nc sütun → cv[c] (16 f32).
+pub fn r16xN(comptime nc: usize, w0: [*]const u8, b: [4][*]const q.BlockQ80, nb: usize, cv: *align(32) [4][16]f32) void {
+    var st: [4][32]i16 align(32) = undefined; // sütun başına A, B (2 × 32 B)
+    var w = w0;
+    var b0 = b[0];
+    var b1 = b[1];
+    var b2 = b[2];
+    var b3 = b[3];
+    var cnt = nb;
+    asm volatile (r16Asm(nc)
+        : [w] "+r" (w),
+          [b0] "+r" (b0),
+          [b1] "+r" (b1),
+          [b2] "+r" (b2),
+          [b3] "+r" (b3),
+          [cnt] "+r" (cnt),
+        : [tab] "r" (&avx.fp16_table),
+          [st] "r" (&st),
+          [cv] "r" (cv),
+        : .{ .rax = true, .ymm0 = true, .ymm1 = true, .ymm2 = true, .ymm3 = true, .ymm7 = true, .ymm4 = true, .ymm5 = true, .ymm6 = true, .ymm8 = true, .ymm9 = true, .ymm10 = true, .ymm11 = true, .ymm12 = true, .ymm13 = true, .ymm14 = true, .ymm15 = true, .memory = true, .cc = true });
+}
+
 pub const GemmR8 = struct {
     pool: *Pool,
     nb: usize,
@@ -580,6 +728,8 @@ pub const GemmR8 = struct {
     c: [*]f32,
     ldc: usize,
     ith: usize,
+    /// H56: a R16 düzeninde (m % 16 == 0)
+    r16: bool = false,
 
     pub const GB = 4; // 32 satır / iş parçası
 
@@ -593,6 +743,7 @@ pub const GemmR8 = struct {
     }
 
     pub fn chunk(self: *const GemmR8, cb: usize, m: usize, n: usize) void {
+        if (self.r16) return self.chunk16(cb, m, n);
         const groups = m / 8;
         const g0 = cb * GB;
         const g1 = @min(g0 + GB, groups);
@@ -622,6 +773,42 @@ pub const GemmR8 = struct {
                 while (j < n) : (j += 1) self.tile(1, g, j);
             }
         }
+    }
+
+    /// R16: 16 satırlık grup, iş birimi 2 grup (R8 ile aynı 32 satır).
+    fn chunk16(self: *const GemmR8, cb: usize, m: usize, n: usize) void {
+        const groups = m / 16;
+        const g0 = cb * (GB / 2);
+        const g1 = @min(g0 + GB / 2, groups);
+        const glen = self.nb * R16_BLOCK;
+        const per = (glen / 64 + n / 4) / @max(n / 4, 1) + 1;
+        for (g0..g1) |g| {
+            var j: usize = 0;
+            var pf: usize = 0;
+            const nxt = self.a + (g + 1) * glen;
+            while (j + 4 <= n) : (j += 4) {
+                if (g + 1 < groups) {
+                    const e = @min(pf + per, glen / 64);
+                    while (pf < e) : (pf += 1) @prefetch(nxt + pf * 64, .{ .locality = 1 });
+                }
+                self.tile16(4, g, j);
+            }
+            switch (n - j) {
+                1 => self.tile16(1, g, j),
+                2 => self.tile16(2, g, j),
+                3 => self.tile16(3, g, j),
+                else => {},
+            }
+        }
+    }
+
+    inline fn tile16(self: *const GemmR8, comptime nc: usize, g: usize, j0: usize) void {
+        var cv: [4][16]f32 align(32) = undefined;
+        const b0 = self.b + self.ldb * j0;
+        var bs: [4][*]const q.BlockQ80 = @splat(b0);
+        inline for (1..nc) |c| bs[c] = b0 + c * self.ldb;
+        r16xN(nc, self.a + g * self.nb * R16_BLOCK, bs, self.nb, &cv);
+        inline for (0..nc) |c| @memcpy(self.c[self.ldc * (j0 + c) + g * 16 ..][0..16], &cv[c]);
     }
 
     fn tileAsm(self: *const GemmR8, g: usize, j0: usize) void {

@@ -35,6 +35,24 @@ test "r8 mikro" {
     for (0..reps) |_| {
         for (0..sgemm.GemmR8.chunks(m)) |cb| g.chunk(cb, m, n);
     }
+    // H56: R16 çekirdeği R8 ile bit-aynı olmalı
+    if (m % 16 == 0) {
+        const rep16 = try a.alignedAlloc(u8, .@"64", m * nb * sgemm.R8_BLOCK);
+        sgemm.repackQ80x16(src.ptr, rep16.ptr, m, nb);
+        const c16 = try a.alloc(f32, n * m);
+        var g16 = g;
+        g16.a = rep16.ptr;
+        g16.c = c16.ptr;
+        g16.r16 = true;
+        for (0..sgemm.GemmR8.chunks(m)) |cb| g16.chunk(cb, m, n);
+        var nd: usize = 0;
+        for (c, c16) |x, y| nd += @intFromBool(@as(u32, @bitCast(x)) != @as(u32, @bitCast(y)));
+        std.debug.print("r16 bit farkı: {d}/{d}\n", .{ nd, c.len });
+        try std.testing.expectEqual(0, nd);
+        if (std.c.getenv("R16_T") != null) for (0..reps) |_| {
+            for (0..sgemm.GemmR8.chunks(m)) |cb| g16.chunk(cb, m, n);
+        };
+    }
     var maxe: f32 = 0;
     var maxv: f32 = 0;
     for (0..n) |j| for (0..m) |row| {
