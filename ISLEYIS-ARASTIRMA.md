@@ -210,3 +210,19 @@ Veri: Crossref başlık kelimesi eşliyor; "TL" Türk lirası değil "Teacher Li
 - (b) Çürütülen: H15 (SMT), H16 (pmaddwd yerine kaydırma).
 - 300 için: tur (8 token) ≤ 26.7 ms. Bugün saf batch 8 ≈ 35–37 ms; çekirdek ~1.4x hızlanmalı. Ayrıca tg128'in ~%20'si taslak hazır olmadan tek tek üretilen tokenlar.
 - (c) Sıradaki tek adım: H17 — taslak yokken tek token üretmek yerine (P2: arabayı boş götürme) kalan pozisyonları da doldurup batch'le git.
+
+## Tur 8 (ölçümlü)
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| H17 | P2 "arabayı boş götürme": taslak eşiği 6 → 2 / 1 (`--min-draft`) | tek tek adımlar eşik yüzünden | `single` sayacı + tg | `single` her eşikte 28 (değişmedi); tg128 gürültü içinde aynı (143–177). Tek adımlar eşikten değil, taslakçının hiç geçmişi olmamasından. **Öldü.** |
+| H18 | P6 "önceden markete gitmişsindir, fiyatları hatırlarsın": taslak hafızası tekrarlar arasında silinmez (`--memory 1`). Literatür adı: SuffixDecoding (önceki çıktılardan küresel sonek ağacı) | ilk tokenlar da taslakla gelir | `single`, alpha, tg ×2 tur | `single` 28 → 16; alpha 1.000 → 0.982 (hatırlanan fiyat bazen tutmuyor, fark ödeniyor). tg128 178.1/175.7 → 182.0/187.9 (+%4.5), tekrar içi tepe 201.4/201.8. **Yaşadı, küçük.** |
+
+### Kritik veri: tavan
+- pp512 = 289.5 tok/s (hile tablosu). Her token modelden geçmek zorunda (P3, P4), o yüzden taslak kusursuz olsa ve araba sınırsız büyük olsa bile TG bu hızı geçemez.
+- 300 > 289.5. Yani 300 için taslak tarafında kapatılacak bir boşluk kalmadı; matris çekirdeğinin kendisi (%77.5) hızlanmalı.
+
+### Tur 8 sonucu
+- (a) Kanıtlanan: H18 +%4.5 (bench, `--memory 1`). TG tavanı = prefill hızı = 289.5 tok/s.
+- (b) Çürütülen: H17. "300'e taslak/doğrulama tarafında ulaşılır" varsayımı öldü (tavan 289.5).
+- (c) Sıradaki tek adım: H19 — Q8_0 ağırlıklarını yükleme anında satır-iç içe (8 satır) yeniden dizip batch çekirdeğini buna göre yazmak; ölçüt saf batch 8 ve pp512.

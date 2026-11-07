@@ -169,6 +169,10 @@ fn runLlamaBench(init: std.process.Init, args: []const []const u8) !void {
             opt.grammar = !std.mem.eql(u8, v, "0");
         } else if (std.mem.eql(u8, a, "--p6")) {
             opt.p6 = !std.mem.eql(u8, v, "0");
+        } else if (std.mem.eql(u8, a, "--memory")) {
+            opt.memory = !std.mem.eql(u8, v, "0");
+        } else if (std.mem.eql(u8, a, "--min-draft")) {
+            opt.min_draft = try std.fmt.parseInt(usize, v, 10);
         } else if (std.mem.eql(u8, a, "--snap")) {
             opt.snap = !std.mem.eql(u8, v, "0");
         } else if (std.mem.eql(u8, a, "--dump-logits")) {
