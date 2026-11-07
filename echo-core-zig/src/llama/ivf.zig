@@ -244,7 +244,7 @@ fn topSel(sc: []const f32, ord: []u32, nprobe: usize) []u32 {
 /// H14: n satırın IVF araması tek geçişte. Her satır yalnız kendi seçtiği kümelerde skorlanır
 /// (Search ile aynı sonuç); satırlar kümelerin birleşimi üzerinden bir kez okunur.
 pub const Batch = struct {
-    pub const MAXR = 16;
+    pub const MAXR = 32;
     const PieceC = struct { first: u32, last: u32, cl: u32 };
     ix: *const Runtime,
     nprobe: usize,
@@ -252,7 +252,7 @@ pub const Batch = struct {
     n: usize = 0,
     scores: []f32,
     ord: []u32,
-    mask: []u16,
+    mask: []u32,
     pieces: []PieceC,
     n_pieces: usize = 0,
     best: []Best,
@@ -266,7 +266,7 @@ pub const Batch = struct {
             .nth = nth,
             .scores = try a.alloc(f32, MAXR * ix.l),
             .ord = try a.alloc(u32, ix.l),
-            .mask = try a.alloc(u16, ix.l),
+            .mask = try a.alloc(u32, ix.l),
             .pieces = try a.alloc(PieceC, ix.order.len / PIECE_ROWS + ix.l + 1),
             .best = try a.alloc(Best, nth * MAXR),
         };
@@ -299,7 +299,7 @@ pub const Batch = struct {
         s.n = n;
         @memset(s.mask, 0);
         for (0..n) |r| {
-            for (topSel(s.scores[r * l ..][0..l], s.ord, s.nprobe)) |c| s.mask[c] |= @as(u16, 1) << @intCast(r);
+            for (topSel(s.scores[r * l ..][0..l], s.ord, s.nprobe)) |c| s.mask[c] |= @as(u32, 1) << @intCast(r);
         }
         var np: usize = 0;
         for (s.mask, 0..) |mk, c| {

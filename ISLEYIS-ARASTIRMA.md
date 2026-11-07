@@ -318,3 +318,12 @@ Araç: `echo-core-zig/src/llama/r8_mikro.zig` (tek thread, n=8, k=1024; kurulum 
 - (a) Kanıtlanan: kirli ortamda batch 8 bellek bandı sınırlı; bayt azaltmak doğrudan hız. H24 kayıpsız, +%6.
 - (b) Çürütülen: H-PF, H-COL.
 - (c) Sıradaki tek adım: tur başına okunan baytı token başına düşürmek — taslaksız (tek token) adımlar bant açısından neredeyse tam tur bedeli ödüyor.
+
+## Tur 15 — taslak boyu (H25)
+
+Bench üretimi 5 tokenlik döngüye giriyor; taslaklar %100 kabul (360/360). Süre = ~7 başlangıç tek-token adımı (T1 ≈ 20 ms) + turlar. Saf batch: T8 ≈ 42 ms, T16 ≈ 76 ms → T(n) ≈ 20 + 3.7 × (n−1) ms; uzun tur ucuz.
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| — | min_draft 1/2/4/6 | — | 4 tur | Etkisiz: zincir ya 0 ya tam |
+| H25 | P2 "tek seferde": taslak tavanı 16 → 32 (ivf.Batch MAXR 32, maske u32), uyarlamalı: tam kabulde ×2, rette ½ (en az 8); varsayılan k=32 | Tur sayısı yarıya iner | k=8/16/32 6 çift; h24 vs h25 3 çift | k ortanca 163.0 / 174.3 / 182.1. Varsayılan: tg128 161.5 → 168.7, tg32 99.8 → 125.3. **Yaşadı** (u6 taşma hatası düzeltildi: `lim` tipi `@min(k, 32)` ile daralıyordu) |

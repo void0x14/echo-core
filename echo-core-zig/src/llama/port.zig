@@ -20,7 +20,7 @@ pub const Port = struct {
     /// Varsayılan LM head: IVF (yaklaşık, yalnız top-1). null: tam yol.
     lm_ix: ?*ivf.Runtime = null,
     /// >0: H01 n-gram taslağı + tek zincir doğrulama.
-    ngram_k: usize = 8,
+    ngram_k: usize = 32,
     /// H06 grammar fast-forward (JSON iskeleti); varsayılan açık, `--no-grammar` kapatır.
     grammar: bool = true,
     /// H13: doğrulamada iz yerine tur başı snapshot; tutmazsa geri dön + yeniden işle (kayıpsız).
@@ -124,7 +124,7 @@ pub const Port = struct {
         var d = try ngram.TokenDrafter.init(self.allocator, 3);
         defer d.deinit();
         for (prompt) |t| try d.add(t);
-        var buf: [16]u32 = undefined;
+        var buf: [32]u32 = undefined;
         var produced: u32 = 0;
         var pending: u32 = 0;
         var have = false;
@@ -208,11 +208,12 @@ pub const Port = struct {
         defer d.deinit();
         for (prompt) |t| try d.add(t);
         var pending: u32 = if (ctx.lm) |s| s.token else greedy(ctx.logits);
-        var buf: [16]u32 = undefined;
+        var buf: [32]u32 = undefined;
         var generated: u32 = 0;
+        var lim: usize = @min(self.ngram_k, buf.len); // H25: tam kabulde ×2, rette ½ (en az 8)
         while (generated < max_tokens) {
             if (pending == self.tokenizer_.eos()) break;
-            const m = d.chain(buf[0..@min(@min(self.ngram_k, buf.len), max_tokens - generated)]);
+            const m = d.chain(buf[0..@min(lim, max_tokens - generated)]);
             if (m >= @min(6, self.ngram_k) and buf[0] == pending) {
                 const before = ctx.head;
                 if (ctx.no_trace) ctx.snapshot();
@@ -223,10 +224,12 @@ pub const Port = struct {
                 if (j + 1 == m) {
                     acc = m;
                     pending = ctx.verify_tokens[m - 1];
+                    if (m == lim) lim = @min(lim * 2, self.ngram_k, buf.len);
                 } else {
                     acc = j + 1;
                     pending = ctx.verify_tokens[j];
                     try undo(ctx, before, buf[0..acc]);
+                    lim = @max(lim / 2, @min(8, self.ngram_k));
                 }
                 for (buf[0..acc]) |t| {
                     try all_ids.append(t);

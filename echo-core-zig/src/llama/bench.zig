@@ -56,7 +56,7 @@ pub const Options = struct {
     /// >1: TG'yi batch'li ölç (pipeline/batch tavanı); gerçek üretim değil.
     gen_batch: usize = 1,
     /// >0: H01 n-gram taslağı + doğrulama, k = taslak uzunluğu.
-    ngram_k: usize = 8,
+    ngram_k: usize = 32,
     /// true: H06 grammar fast-forward (JSON iskeleti zorunlu blok).
     grammar: bool = true,
     /// H11 (P6): taslak zinciri tek forward'da ödenir, model farklı derse fark sayılır, geri alma yok.
@@ -110,14 +110,15 @@ fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: us
     var local = try ngram.TokenDrafter.init(a, 3);
     defer local.deinit();
     const d = mem orelse &local;
-    var buf: [16]u32 = undefined;
+    var buf: [32]u32 = undefined;
     var pending: u32 = @intCast(rng.uintLessThan(usize, n_vocab));
     try ctx.decode(&.{pending});
     try d.add(pending);
     var produced: usize = 1;
     pending = nextToken(ctx);
+    var lim: usize = @min(k, buf.len); // H25: tam kabulde ×2, rette ½ (en az 8)
     while (produced < n_gen) {
-        const m = d.chain(buf[0..@min(k, buf.len)]);
+        const m = d.chain(buf[0..lim]);
         if (m >= @max(@min(min_draft, k), 1) and buf[0] == pending) {
             st.rounds += 1;
             st.drafted += m;
@@ -136,10 +137,12 @@ fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: us
             if (j + 1 == m) {
                 acc = m;
                 pending = ctx.verify_tokens[m - 1];
+                if (m == lim) lim = @min(lim * 2, k, buf.len);
             } else {
                 acc = j + 1;
                 pending = ctx.verify_tokens[j];
                 try undo(ctx, before, buf[0..acc]);
+                lim = @max(lim / 2, @min(8, k));
             }
             st.accepted += acc;
             for (buf[0..acc]) |x| try d.add(x);
@@ -272,7 +275,7 @@ fn runGen(ctx: *qwen35.Context, opt: Options, rng: std.Random, n_vocab: usize, n
 fn testGenGrammarSpec(ctx: *qwen35.Context, tk: *const tokenizer.SimpleTokenizer, n_gen: usize, st: *Stats, a: std.mem.Allocator, ngram_k: usize, p6: bool) !usize {
     var d = try ngram.TokenDrafter.init(a, 3);
     defer d.deinit();
-    var buf: [16]u32 = undefined;
+    var buf: [32]u32 = undefined;
     var produced: usize = 0;
     var pending: u32 = 0;
     var have = false;
