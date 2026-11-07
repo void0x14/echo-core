@@ -153,8 +153,11 @@ pub const Runtime = struct {
     g8: []u32,
     pos8: []u32,
     r8: []align(64) u8,
+    /// H52: centroid'ler R8 (l % 8 == 0), Batch.scoreRange GemmR8 ile.
+    cr8: []align(64) u8,
 
     pub fn deinit(self: *Runtime, a: Alloc) void {
+        a.free(self.cr8);
         a.free(self.g8);
         a.free(self.pos8);
         a.free(self.r8);
@@ -205,8 +208,11 @@ fn makeRuntime(w: ops.Mat, l: usize, cq: []align(64) u8, assign: []const u32, a:
             sgemm.repackQ80x8(tmp.ptr, r8.ptr + gi * nb * sgemm.R8_BLOCK, 8, nb);
         }
     }
+    std.debug.assert(l % 8 == 0);
+    const cr8 = try a.alignedAlloc(u8, .@"64", l / 8 * nb * sgemm.R8_BLOCK);
+    sgemm.repackQ80x8(@ptrCast(@alignCast(cq.ptr)), cr8.ptr, l, nb);
     const r = try a.create(Runtime);
-    r.* = .{ .l = l, .k = w.k, .nb1 = w.nb1, .cq = cq, .start = start, .order = order, .rows = rows, .g8 = g8, .pos8 = pos8, .r8 = r8 };
+    r.* = .{ .l = l, .k = w.k, .nb1 = w.nb1, .cq = cq, .start = start, .order = order, .rows = rows, .g8 = g8, .pos8 = pos8, .r8 = r8, .cr8 = cr8 };
     return r;
 }
 
@@ -333,16 +339,13 @@ pub const Batch = struct {
     }
 
     /// x: n satır Q8_0, satır adımı ix.k/32 blok.
-    pub fn scoreRange(s: *Batch, x: [*]const q.BlockQ80, n: usize, ith: usize, nth: usize) void {
+    /// xr: n satır quantR8 aktivasyonu; scores[r * l + c] = centroid c · x_r (7 bit, yalnız küme seçimi için).
+    pub fn scoreRange(s: *Batch, xr: [*]const q.BlockQ80, n: usize, ith: usize, nth: usize) void {
         const ix = s.ix;
-        const dr = (ix.l + nth - 1) / nth;
-        const c0 = @min(dr * ith, ix.l);
-        const c1 = @min(c0 + dr, ix.l);
         const rb = ix.k / 32;
-        for (c0..c1) |c| {
-            const cr: [*]const q.BlockQ80 = @ptrCast(@alignCast(ix.cq.ptr + c * ix.nb1));
-            for (0..n) |r| s.scores[r * ix.l + c] = q.dotQ80Q80(ix.k, cr, x + r * rb);
-        }
+        const g = sgemm.GemmR8{ .pool = undefined, .nb = rb, .a = ix.cr8.ptr, .b = xr, .ldb = rb, .c = s.scores.ptr, .ldc = ix.l, .ith = ith };
+        const nc = sgemm.GemmR8.chunks(ix.l);
+        for (ith * nc / nth..(ith + 1) * nc / nth) |cb| g.chunk(cb, ix.l, n);
     }
 
     /// Tek thread, scoreRange'den önce.

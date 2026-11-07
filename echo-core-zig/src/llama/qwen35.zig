@@ -653,7 +653,7 @@ pub const Context = struct {
             }
             p.barrier();
             if (p.ith == 0) b.begin(n_t);
-            b.scoreRange(xq, n_t, p.ith, p.nth);
+            b.scoreRange(xr, n_t, p.ith, p.nth);
             p.barrier();
             b.select(p.ith, p.nth);
             p.barrier();
