@@ -113,10 +113,29 @@ fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: us
     try d.restart();
     var buf: [128]u32 = undefined;
     var pending: u32 = @intCast(rng.uintLessThan(usize, n_vocab));
-    try ctx.decode(&.{pending});
     try d.add(pending);
     var produced: usize = 1;
-    pending = nextToken(ctx);
+    // H51: başlangıç tokenı ayrı n=1 geçişi yerine ilk doğrulama turunun başına konur
+    // (n=1 geçişi tüm ağırlıkları DRAM'den okur: ~19 ms, tur süresinin ~%10'u).
+    buf[0] = pending;
+    const m0 = if (p6) 0 else d.chain(buf[1..@min(k, buf.len, n_gen)]);
+    if (m0 >= @max(@min(min_draft, k), 1)) {
+        st.rounds += 1;
+        st.drafted += m0;
+        const before = ctx.head;
+        if (ctx.no_trace) ctx.snapshot();
+        try ctx.decodeVerify(buf[0 .. m0 + 1]);
+        var j: usize = 0;
+        while (j < m0 and ctx.verify_tokens[j] == buf[j + 1]) j += 1;
+        pending = ctx.verify_tokens[j];
+        if (j < m0) try undo(ctx, before, buf[0 .. j + 1]);
+        st.accepted += j;
+        for (buf[1 .. j + 1]) |x| try d.add(x);
+        produced += j;
+    } else {
+        try ctx.decode(&.{pending});
+        pending = nextToken(ctx);
+    }
     var lim: usize = @min(k, buf.len); // H25: tam kabulde ×2, rette ½ (en az 8)
     while (produced < n_gen) {
         const m = d.chain(buf[0..@min(lim, n_gen - produced)]); // istenen uzunluğu aşma
