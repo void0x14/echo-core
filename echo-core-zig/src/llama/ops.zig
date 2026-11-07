@@ -470,10 +470,10 @@ pub fn ssmConv(p: *const Params, nr: usize, nc: usize, ncs: usize, n_t: usize, s
 
 /// H38: 4 satır birlikte, satır başına 2 geçiş: s = e·(row·k); row = e·row + k·(v−s)β; o = row·q.
 /// (ölçek dot'a katlanır; sonuç yuvarlama sırası kadar farklı)
-inline fn gdnRows4(s_v: usize, sr: [*]const f32, st: [*]f32, k_d: [*]const f32, q_d: [*]const f32, v_d: [*]const f32, e: f32, beta: f32, scale: f32, out: [*]f32) void {
+inline fn gdnRows4(s_v: usize, j0: usize, j1: usize, sr: [*]const f32, st: [*]f32, k_d: [*]const f32, q_d: [*]const f32, v_d: [*]const f32, e: f32, beta: f32, scale: f32, out: [*]f32) void {
     const ve = avx.splat(e);
-    var j: usize = 0;
-    while (j < s_v) : (j += 4) {
+    var j = j0;
+    while (j < j1) : (j += 4) {
         var a: [8]avx.F8 = @splat(@splat(0));
         var i: usize = 0;
         while (i < s_v) : (i += 16) {
@@ -503,6 +503,69 @@ inline fn gdnRows4(s_v: usize, sr: [*]const f32, st: [*]f32, k_d: [*]const f32, 
     }
 }
 
+/// H44: kalem = (başlık, 32 satır), tüm tokenlar; satırlar L1'de. Tembel bozunma: saklanan satır = gerçek / c,
+/// güncelleme row += (δ/c')·k tek FMA; çıktı dot'u ve sonraki tokenın k-dot'u aynı geçişte. Sonda c ile çarpılır.
+fn gdnItem(s_v: usize, j0: usize, n_t: usize, h_n: usize, iv1: usize, q_in: [*]const f32, k_in: [*]const f32, v_in: [*]const f32, v_stride: usize, g: [*]const f32, beta: [*]const f32, src0: [*]const f32, st: [*]f32, out: [*]f32, scale: f32) void {
+    const R = 32;
+    var d: [R]f32 = undefined;
+    const k0 = k_in + iv1 * s_v;
+    for (0..R) |r| d[r] = vec.dotF32(s_v, src0 + (j0 + r) * s_v, k0);
+    var c: f32 = 1;
+    var src: [*]const f32 = src0;
+    for (0..n_t) |t| {
+        const q_d = q_in + t * h_n * s_v + iv1 * s_v;
+        const k_d = k_in + t * h_n * s_v + iv1 * s_v;
+        const kn = if (t + 1 < n_t) k_in + (t + 1) * h_n * s_v + iv1 * s_v else k_d;
+        const v_d = v_in + t * v_stride + iv1 * s_v + j0;
+        const bt = beta[t * h_n + iv1];
+        var cp = c * avx.expf(g[t * h_n + iv1]);
+        var dl: [R]f32 = undefined;
+        for (0..R) |r| dl[r] = (v_d[r] - cp * d[r]) * bt;
+        if (cp < 1e-20) {
+            for (0..R) |r| for (0..s_v / 8) |i| {
+                const off = (j0 + r) * s_v + i * 8;
+                avx.storeF(st + off, avx.loadF(src + off) * avx.splat(cp));
+            };
+            src = st;
+            cp = 1;
+        }
+        const inv = 1.0 / cp;
+        const o_t = out + t * h_n * s_v + iv1 * s_v + j0;
+        var r0: usize = 0;
+        while (r0 < R) : (r0 += 4) {
+            var cf: [4]avx.F8 = undefined;
+            inline for (0..4) |r| cf[r] = avx.splat(dl[r0 + r] * inv);
+            var o: [4]avx.F8 = @splat(@splat(0));
+            var dn: [4]avx.F8 = @splat(@splat(0));
+            var i: usize = 0;
+            while (i < s_v) : (i += 8) {
+                const kv = avx.loadF(k_d + i);
+                const qv = avx.loadF(q_d + i);
+                const knv = avx.loadF(kn + i);
+                inline for (0..4) |r| {
+                    const off = (j0 + r0 + r) * s_v + i;
+                    const n = @mulAdd(avx.F8, cf[r], kv, avx.loadF(src + off));
+                    avx.storeF(st + off, n);
+                    o[r] = @mulAdd(avx.F8, n, qv, o[r]);
+                    dn[r] = @mulAdd(avx.F8, n, knv, dn[r]);
+                }
+            }
+            inline for (0..4) |r| {
+                o_t[r0 + r] = cp * avx.hsum(o[r]) * scale;
+                d[r0 + r] = avx.hsum(dn[r]);
+            }
+        }
+        src = st;
+        c = cp;
+    }
+    if (c != 1) {
+        for (0..R) |r| for (0..s_v / 8) |i| {
+            const off = (j0 + r) * s_v + i * 8;
+            avx.storeF(st + off, avx.loadF(st + off) * avx.splat(c));
+        };
+    }
+}
+
 /// ggml_compute_forward_gated_delta_net_f32 (K=1, GDA, n_seqs=1).
 /// Durum yerinde güncellenir: ggml'deki GET_ROWS + memcpy + CPY üçlüsü aynı sonucu verir.
 pub fn gatedDeltaNet(
@@ -521,24 +584,29 @@ pub fn gatedDeltaNet(
     out: [*]f32,
     trace: ?[*]f32,
 ) void {
-    const nr = h_n;
-    const nth_scaled = p.nth * 4;
-    const chunk_size = (nr + nth_scaled - 1) / nth_scaled;
-    var nchunk = (nr + chunk_size - 1) / chunk_size;
-    if (p.nth == 1 or nchunk < p.nth) nchunk = p.nth;
+    // H43: satırlar bağımsız → iş = (başlık, 32 satırlık blok); 16 başlık / 6 thread dengesizliği kalkar.
+    const rpb: usize = if (s_v % 32 == 0 and trace == null) 32 else s_v;
+    const nbr = s_v / rpb;
+    const nr = h_n * nbr;
+    const nchunk = nr;
     if (p.ith == 0) p.pool.chunkSet(@intCast(p.nth));
     p.barrier();
-    const dr = (nr + nchunk - 1) / nchunk;
+    const dr: usize = 1;
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(s_v)));
 
     var current: i64 = p.ith;
     while (current < nchunk) {
         const ir0 = dr * @as(usize, @intCast(current));
         const ir1 = @min(ir0 + dr, nr);
-        var iv1 = ir0;
-        while (iv1 < ir1) : (iv1 += 1) {
+        for (ir0..ir1) |ir| {
+            const iv1 = ir / nbr;
+            const j0 = (ir % nbr) * rpb;
             const s_out = state + iv1 * s_v * s_v;
             const s_in0 = state_in + iv1 * s_v * s_v;
+            if (rpb == 32) {
+                gdnItem(s_v, j0, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, g, beta, s_in0, s_out, out, scale);
+                continue;
+            }
             var attn_data = out + iv1 * s_v;
             for (0..n_t) |t| {
                 const q_d = q_in + t * h_n * s_v + iv1 * s_v;
@@ -553,7 +621,7 @@ pub fn gatedDeltaNet(
                 }
                 const e = avx.expf(g[t * h_n + iv1]);
                 if (s_v % 16 == 0) {
-                    gdnRows4(s_v, s_src, s_out, k_d, q_d, v_d, e, beta_val, scale, attn_data);
+                    gdnRows4(s_v, j0, j0 + rpb, s_src, s_out, k_d, q_d, v_d, e, beta_val, scale, attn_data);
                     attn_data += s_v * h_n;
                     continue;
                 }
