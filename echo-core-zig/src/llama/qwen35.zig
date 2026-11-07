@@ -615,20 +615,17 @@ pub const Context = struct {
         const r = p.range(n_t);
         for (r[0]..r[1]) |t| embedRow(m, self.tokens[t], self.b_inp.ptr + t * m.n_embd);
         p.barrier();
+        ops.rmsNorm(p, self.b_inp.ptr, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, n_t, 1, m.eps, m.layers[0].attn_norm, 1.0);
+        p.barrier();
 
         for (m.layers, 0..) |*l, il| {
-            ops.rmsNorm(p, self.b_inp.ptr, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, n_t, 1, m.eps, l.attn_norm, 1.0);
-            p.barrier();
             if (l.recr) {
                 self.layerLinear(p, l, il);
             } else {
                 self.layerAttn(p, l, il);
             }
-            // attn_residual
-            ops.add(p, m.n_embd, n_t, self.b_resid.ptr, self.b_attn.ptr, self.b_inp.ptr);
-            p.barrier();
-            // attn_post_norm
-            ops.rmsNorm(p, self.b_resid.ptr, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, n_t, 1, m.eps, l.post_norm, 1.0);
+            // attn_residual + attn_post_norm (H57: tek geçiş)
+            ops.addRmsNorm(p, m.n_embd, n_t, self.b_resid.ptr, self.b_attn.ptr, self.b_inp.ptr, self.b_norm.ptr, m.eps, l.post_norm);
             p.barrier();
             // build_ffn(LLM_FFN_SILU, LLM_FFN_PAR)
             ops.mulMatMulti(p, &.{ l.ffn_gate, l.ffn_up }, self.b_norm.ptr, n_t, &.{ self.b_ffn_g.ptr, self.b_ffn_u.ptr });
@@ -636,8 +633,11 @@ pub const Context = struct {
             p.barrier();
             ops.mulMat(p, l.ffn_down, self.b_ffn_g.ptr, n_t, self.b_attn.ptr);
             p.barrier();
-            // l_out
-            ops.add(p, m.n_embd, n_t, self.b_inp.ptr, self.b_attn.ptr, self.b_resid.ptr);
+            // l_out (+ sonraki katmanın attn_norm'u)
+            if (il + 1 < m.layers.len)
+                ops.addRmsNorm(p, m.n_embd, n_t, self.b_inp.ptr, self.b_attn.ptr, self.b_resid.ptr, self.b_norm.ptr, m.eps, m.layers[il + 1].attn_norm)
+            else
+                ops.add(p, m.n_embd, n_t, self.b_inp.ptr, self.b_attn.ptr, self.b_resid.ptr);
             p.barrier();
         }
 

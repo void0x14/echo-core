@@ -290,37 +290,46 @@ pub fn rmsNorm(
 ) void {
     for (0..n_groups) |g| {
         var r: usize = p.ith;
-        while (r < n_rows) : (r += p.nth) {
-            const x = x_in + g * x_group + r * x_row;
-            const y = y_in + g * y_group + r * y_row;
-            // ggml_float (double) toplam; SIMD ile aynı kesinlik
-            var sum: f64 = 0;
-            var i: usize = 0;
-            var acc0: avx.D4 = @splat(0);
-            var acc1: avx.D4 = @splat(0);
-            while (i + 8 <= nc) : (i += 8) {
-                const v = avx.loadF(x + i);
-                const sq = v * v;
-                const lo: avx.D4 = @floatCast(avx.low128(sq));
-                const hi: avx.D4 = @floatCast(avx.high128(sq));
-                acc0 += lo;
-                acc1 += hi;
-            }
-            sum = @reduce(.Add, acc0 + acc1);
-            while (i < nc) : (i += 1) sum += x[i] * x[i];
-            const mean: f32 = @floatCast(sum / @as(f64, @floatFromInt(nc)));
-            const scale = 1.0 / @sqrt(mean + eps);
-            const vs = avx.splat(scale);
-            i = 0;
-            if (w) |wp| {
-                while (i + 8 <= nc) : (i += 8) avx.storeF(y + i, avx.loadF(x + i) * vs * avx.loadF(wp + i));
-                while (i < nc) : (i += 1) y[i] = x[i] * scale * wp[i];
-            } else {
-                const vp = avx.splat(post);
-                while (i + 8 <= nc) : (i += 8) avx.storeF(y + i, avx.loadF(x + i) * vs * vp);
-                while (i < nc) : (i += 1) y[i] = x[i] * scale * post;
-            }
-        }
+        while (r < n_rows) : (r += p.nth) rmsRow(x_in + g * x_group + r * x_row, y_in + g * y_group + r * y_row, nc, eps, w, post);
+    }
+}
+
+inline fn rmsRow(x: [*]const f32, y: [*]f32, nc: usize, eps: f32, w: ?[*]const f32, post: f32) void {
+    // ggml_float (double) toplam; SIMD ile aynı kesinlik
+    var sum: f64 = 0;
+    var i: usize = 0;
+    var acc0: avx.D4 = @splat(0);
+    var acc1: avx.D4 = @splat(0);
+    while (i + 8 <= nc) : (i += 8) {
+        const v = avx.loadF(x + i);
+        const sq = v * v;
+        const lo: avx.D4 = @floatCast(avx.low128(sq));
+        const hi: avx.D4 = @floatCast(avx.high128(sq));
+        acc0 += lo;
+        acc1 += hi;
+    }
+    sum = @reduce(.Add, acc0 + acc1);
+    while (i < nc) : (i += 1) sum += x[i] * x[i];
+    const mean: f32 = @floatCast(sum / @as(f64, @floatFromInt(nc)));
+    const scale = 1.0 / @sqrt(mean + eps);
+    const vs = avx.splat(scale);
+    i = 0;
+    if (w) |wp| {
+        while (i + 8 <= nc) : (i += 8) avx.storeF(y + i, avx.loadF(x + i) * vs * avx.loadF(wp + i));
+        while (i < nc) : (i += 1) y[i] = x[i] * scale * wp[i];
+    } else {
+        const vp = avx.splat(post);
+        while (i + 8 <= nc) : (i += 8) avx.storeF(y + i, avx.loadF(x + i) * vs * vp);
+        while (i < nc) : (i += 1) y[i] = x[i] * scale * post;
+    }
+}
+
+/// H57: z = x + y ve out = rmsNorm(z) * w aynı satır geçişinde (aradaki bariyer kalkar).
+pub fn addRmsNorm(p: *const Params, nc: usize, nr: usize, z: [*]f32, x: [*]const f32, y: [*]const f32, out: [*]f32, eps: f32, w: [*]const f32) void {
+    const r = p.range(nr);
+    for (r[0]..r[1]) |i| {
+        vec.addF32(nc, z + i * nc, x + i * nc, y + i * nc);
+        rmsRow(z + i * nc, out + i * nc, nc, eps, w, 1.0);
     }
 }
 
