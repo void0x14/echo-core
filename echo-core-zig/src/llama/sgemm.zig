@@ -434,21 +434,30 @@ pub const TinyBlasQ0 = struct {
     }
 };
 
-/// H20: Q8_0_R8 — 8 satır iç içe. Grup g, blok l: [8 × f32 satır ölçeği][8 ymm quant];
-/// ymm k'nın r. 32-bit şeridi = satır r'nin 4k..4k+3 baytları. Aktivasyon standart Q8_0.
-/// Zorunlu tamsayı çarpma aynı; dönüştürme + FMA 8 satıra bir kez.
-pub const R8_BLOCK = 288;
+/// H20: Q8_0_R8 — 8 satır iç içe. ymm k'nın r. 32-bit şeridi = satır r'nin 4k..4k+3 baytları.
+/// H24: ölçekler f16 (kaynakla aynı değer) ve bloklar çiftli: (2p, 2p+1) =
+/// [16B ölçek 2p][16B ölçek 2p+1][256B quant 2p][256B quant 2p+1] → blok 272 bayt, ymm'ler 32 hizalı. nb çift olmalı.
+pub const R8_BLOCK = 272;
+
+inline fn r8Scale(gbase: [*]const u8, l: usize) [*]const u8 {
+    return gbase + (l / 2) * 2 * R8_BLOCK + (l % 2) * 16;
+}
+inline fn r8Quant(gbase: [*]const u8, l: usize) [*]const u8 {
+    return gbase + (l / 2) * 2 * R8_BLOCK + 32 + (l % 2) * 256;
+}
 
 pub fn repackQ80x8(src: [*]const q.BlockQ80, dst: [*]u8, m: usize, nb: usize) void {
+    std.debug.assert(nb % 2 == 0);
     for (0..m / 8) |g| {
+        const gbase = dst + g * nb * R8_BLOCK;
         for (0..nb) |l| {
-            const base = dst + (g * nb + l) * R8_BLOCK;
-            const sc: [*]f32 = @ptrCast(@alignCast(base));
+            const sc: [*]u16 = @ptrCast(@alignCast(@constCast(r8Scale(gbase, l))));
+            const qd: [*]u8 = @constCast(r8Quant(gbase, l));
             for (0..8) |r| {
                 const blk = &src[(g * 8 + r) * nb + l];
-                sc[r] = @floatCast(@as(f16, @bitCast(blk.d)));
+                sc[r] = blk.d;
                 const qs = std.mem.asBytes(&blk.qs);
-                for (0..8) |k| @memcpy(base[32 + 32 * k + 4 * r ..][0..4], qs[4 * k ..][0..4]);
+                for (0..8) |k| @memcpy(qd[32 * k + 4 * r ..][0..4], qs[4 * k ..][0..4]);
             }
         }
     }
@@ -497,12 +506,13 @@ pub const GemmR8 = struct {
     inline fn tile(self: *const GemmR8, comptime NC: usize, g: usize, j0: usize) void {
         var acc: [NC]F8 = @splat(@splat(0));
         const ones: avx.W16 = @splat(1);
+        const gbase = self.a + g * self.nb * R8_BLOCK;
         for (0..self.nb) |l| {
-            const base = self.a + (g * self.nb + l) * R8_BLOCK;
-            const sa = avx.loadF(@ptrCast(@alignCast(base)));
+            const base = r8Quant(gbase, l);
+            const sa: F8 = @floatCast(@as(@Vector(8, f16), @as(*align(16) const [8]f16, @ptrCast(@alignCast(r8Scale(gbase, l)))).*));
             var isum: [NC]avx.I8 = @splat(@splat(0));
             inline for (0..8) |k| {
-                const w = avx.loadB(base + 32 + 32 * k);
+                const w = avx.loadB(base + 32 * k);
                 const aw: avx.B32 = @bitCast(@abs(w));
                 inline for (0..NC) |c| {
                     const blk = &self.b[self.ldb * (j0 + c) + l];

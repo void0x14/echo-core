@@ -193,7 +193,7 @@ pub const Model = struct {
     }
 
     fn repackMat(self: *Model, w: *Mat) !void {
-        if (w.type == .q8_0 and w.m % 8 == 0 and w.k % 32 == 0 and std.c.getenv("ECHO_NO_R8") == null) {
+        if (w.type == .q8_0 and w.m % 8 == 0 and w.k % 64 == 0 and std.c.getenv("ECHO_NO_R8") == null) {
             const nb = w.k / 32;
             const dst = try self.allocator.alignedAlloc(u8, .@"64", w.m / 8 * nb * sgemm.R8_BLOCK);
             errdefer self.allocator.free(dst);

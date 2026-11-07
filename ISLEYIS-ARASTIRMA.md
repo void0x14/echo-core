@@ -300,3 +300,21 @@ Kullanıcı kuralı (2026-11-07): barajlar en kirli ortamda (PC kullanılırken,
 |---|---|---|---|---|
 | H22 | P2 "tek seferde": aynı girdiyi kullanan matrisler (doğrusal: qkv+alpha+beta+z; dikkat: q+v+k; FFN: gate+up) tek quantize + tek iş havuzu + tek bariyer; bağımsız eleman işlemleri (convConcat, gate, sigmoid, silu(z); q/k L2 norm) aynı fazda | Bariyer azalınca yük altında bekleme azalır | 6 istem bayt; 10 art arda çift (kirli ortam) | 6/6 bayt aynı (aritmetik değişmedi). Varsayılan tg128 ortanca: 137.3→162.9 (4 çift), 140.0→157.7 (6 çift); 6/10 çift H22 lehine. Hilesiz tg128 5/10 (nötr). Doğrusal katman bariyeri 18 → 11. **Yaşadı.** |
 | H23 | Kirli ortamda thread sayısı: 6 thread bariyerde kullanıcının işleriyle yarışıyor | t<6 daha dayanıklı | t=6/5/4, art arda 4 tur | Varsayılan tg128 ortanca 141.6 / 142.5 / 142.6; en kötü 112.4 / 95.8 / 118.0. Hilesiz tg128 31.4 / 38.4 / 42.4. tg32 95.0 / 87.4 / 99.7. **Yaşadı**: port varsayılanı fiziksel çekirdek − 2 (=4). Çıktı thread sayısından bağımsız (3/3 aynı). |
+
+## Tur 14 — R8 çekirdeğinin darboğazı: bellek bandı (kirli ortam)
+
+Araç: `echo-core-zig/src/llama/r8_mikro.zig` (tek thread, n=8, k=1024; kurulum payı 3R − R farkıyla atıldı). FP0 doluluğu = zorunlu tamsayı çarpma / döngü.
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| — | Gerçek koşuda çekirdek FP0 doluluğu | — | perf grup örnekleme, batch 8, t=4 | %53; FP yazmaç dosyası dolu durması çekirdek döngülerinin %19'u |
+| — | Mikro: tek thread | — | m=128 (L2) / 4096 (L3) / 32768 (DRAM) | %78.5 / %80.9 / %73.6 |
+| — | Mikro: 4 fiziksel çekirdekte eşzamanlı 4 kopya | — | DRAM / L2 boyu, 2 tekrar | DRAM %52–65, L2 %75–81 → **batch 8 kirli ortamda bellek bandı sınırlı**. Tur başı ağırlık 518M × 36/32 = 583 MB |
+| H-PF | Yazılımsal önden getirme (2–128 blok, L1/L2) gecikmeyi saklar | Bellek gecikmesi | mikro DRAM + gerçek koşu | Mikroda fark gürültü içinde (±%10), gerçek koşuda çekirdek döngüsü ~%7 az ama tok/s ayrışmadı. **Öldü**, kod alınmadı |
+| H-COL | Derleyici 8 w + 8 \|w\| canlı tutup yığına döküyor (asm'de spill); sütun dışta + volatile yükleme | Spill kalkınca hızlanır | 5 çift + perf | Çekirdek döngüsü %3–5 az, tok/s ortanca 209.5 → 196.4. **Öldü** |
+| H24 | P3 bedelini değiştirmeden bayt azalt: R8 ölçekleri f32 yerine f16 (kaynakta zaten f16, değer aynı); bloklar çiftli ([16B ölçek][16B ölçek][256B][256B]) → ymm'ler 32 hizalı. 288 → 272 bayt/blok (−%5.5) | Bant sınırlıyken bayt = süre | 12 istem bayt (gramerli 6 + gramersiz 6, base / H24 / H24 `--ngram 0`); 5 art arda çift | 12/12 bayt aynı. Batch 8 ortanca 199.4 → 210.9 (+%5.8), varsayılan tg128 145.4 → 155.2 (+%6.7); 4/5 çift H24 lehine (iki ölçüde de). **Yaşadı** |
+
+### Tur 14 sonucu
+- (a) Kanıtlanan: kirli ortamda batch 8 bellek bandı sınırlı; bayt azaltmak doğrudan hız. H24 kayıpsız, +%6.
+- (b) Çürütülen: H-PF, H-COL.
+- (c) Sıradaki tek adım: tur başına okunan baytı token başına düşürmek — taslaksız (tek token) adımlar bant açısından neredeyse tam tur bedeli ödüyor.
