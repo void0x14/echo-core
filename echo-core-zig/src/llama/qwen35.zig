@@ -297,6 +297,8 @@ pub const Context = struct {
     wdata: []align(64) u8,
     /// H62: down girdisi (gate/up GEMM'i wdata'yı okurken yazılır)
     wdata2: []align(64) u8,
+    /// H63: conv parça sonunda q/k başlığı başına biten kanal sayısı
+    l2_cnt: [64]std.atomic.Value(u32) = @splat(.init(0)),
     fdata: []align(64) f32,
     theta_scale: f32,
 
@@ -744,7 +746,9 @@ pub const Context = struct {
         // H22: qkv, alpha, beta, z aynı girdiden tek geçişte; ardından bağımsız eleman işlemleri tek fazda.
         const in4 = [_]ops.Mat{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate };
         const out4 = [_][*]f32{ self.b_qkv.ptr, self.b_gate.ptr, self.b_beta.ptr, self.b_z.ptr };
-        if (m.d_conv == 4 and ops.r8Ok(&in4)) {
+        // convPost: başlık parça sınırına hizalı ve sayaçlar yeterli olmalı
+        const fast_in = m.d_conv == 4 and ops.r8Ok(&in4) and s % ops.GemmRows == 0 and 2 * m.n_group <= self.l2_cnt.len;
+        if (fast_in) {
             // H61: conv + gate + sigmoid + silu GEMM parça sonunda (satır yerel); ayrı faz ve bariyeri yok
             const Epi = struct {
                 c: *Context,
@@ -757,7 +761,10 @@ pub const Context = struct {
                     const c = e.c;
                     const nt = c.n_t;
                     switch (mi) {
-                        0 => ops.convRows(e.conv_dim, nt, c.rs_conv[e.il].ptr, c.b_qkv.ptr, e.l.ssm_conv1d, c.b_conv_out.ptr, e.tr, r0, r1),
+                        0 => {
+                            ops.convRows(e.conv_dim, nt, c.rs_conv[e.il].ptr, c.b_qkv.ptr, e.l.ssm_conv1d, c.b_conv_out.ptr, e.tr, r0, r1);
+                            c.convPost(r0, r1);
+                        },
                         1 => for (0..nt) |t| for (r0..r1) |h| {
                             c.b_gate[t * e.h_n + h] = ops.softplusF(c.b_gate[t * e.h_n + h] + e.l.ssm_dt[h]) * e.l.ssm_a[h];
                         },
@@ -792,17 +799,20 @@ pub const Context = struct {
         }
         // build_gdn_l2_norm(q), (k)
         // H55: q/k başlık-öncelikli [başlık][token][s]: GDN kalemi ardışık okur (8 KB adım CCX'ler arası gecikmeye takılıyordu)
-        ops.rmsNorm(p, self.b_conv_out.ptr, s, conv_dim, self.b_q.ptr, n_t * s, s, s, m.n_group, n_t, eps_l2, null, l2);
-        ops.rmsNorm(p, self.b_conv_out.ptr + key_dim, s, conv_dim, self.b_k.ptr, n_t * s, s, s, m.n_group, n_t, eps_l2, null, l2);
-        // v da başlık-öncelikli (b_qkv conv'dan sonra boş)
-        const vh = self.b_qkv.ptr;
-        var vi: usize = p.ith;
-        while (vi < n_t * h_n) : (vi += p.nth) {
-            const t = vi / h_n;
-            const hh = vi % h_n;
-            @memcpy((vh + (hh * n_t + t) * s)[0..s], (self.b_conv_out.ptr + t * conv_dim + 2 * key_dim + hh * s)[0..s]);
+        // H63: hızlı yolda conv parça sonunda (convPost) yapıldı; v b_conv_in'de başlık-öncelikli
+        const vh = if (fast_in) self.b_conv_in.ptr else self.b_qkv.ptr;
+        if (!fast_in) {
+            ops.rmsNorm(p, self.b_conv_out.ptr, s, conv_dim, self.b_q.ptr, n_t * s, s, s, m.n_group, n_t, eps_l2, null, l2);
+            ops.rmsNorm(p, self.b_conv_out.ptr + key_dim, s, conv_dim, self.b_k.ptr, n_t * s, s, s, m.n_group, n_t, eps_l2, null, l2);
+            // v da başlık-öncelikli (b_qkv conv'dan sonra boş)
+            var vi: usize = p.ith;
+            while (vi < n_t * h_n) : (vi += p.nth) {
+                const t = vi / h_n;
+                const hh = vi % h_n;
+                @memcpy((vh + (hh * n_t + t) * s)[0..s], (self.b_conv_out.ptr + t * conv_dim + 2 * key_dim + hh * s)[0..s]);
+            }
+            p.barrier();
         }
-        p.barrier();
         // GATED_DELTA_NET (+ CPY new_state: yerinde)
         ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, vh, s, n_t * s, self.b_gate.ptr, self.b_beta.ptr, if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
         p.barrier();
@@ -859,6 +869,33 @@ pub const Context = struct {
         if (qw) ops.r8Pre(p, &.{l.wo});
         p.barrier();
         ops.mulMatMultiQ(p, &.{l.wo}, self.b_q.ptr, n_t, &.{self.b_attn.ptr});
+    }
+
+    /// H63: conv parça sonu [r0, r1): v kanalları b_conv_in'e başlık-öncelikli kopyalanır; q/k başlığının
+    /// son parçasını bitiren thread o başlığın l2 normunu tüm tokenlar için yazar (sayaç başlık başına).
+    fn convPost(self: *Context, r0: usize, r1: usize) void {
+        const m = self.model;
+        const n_t = self.n_t;
+        const s = m.d_state;
+        const kd = m.n_group * s;
+        const cd = m.d_inner + 2 * kd;
+        const src = self.b_conv_out.ptr;
+        if (r0 >= 2 * kd) {
+            const cv = r0 - 2 * kd;
+            const hh = cv / s;
+            const o = cv % s;
+            for (0..n_t) |t| @memcpy((self.b_conv_in.ptr + (hh * n_t + t) * s + o)[0 .. r1 - r0], (src + t * cd + r0)[0 .. r1 - r0]);
+            return;
+        }
+        const which = r0 / kd;
+        const h = (r0 % kd) / s;
+        const cnt = &self.l2_cnt[which * m.n_group + h];
+        if (cnt.fetchAdd(@intCast(r1 - r0), .acq_rel) + (r1 - r0) != s) return;
+        cnt.store(0, .monotonic);
+        const l2 = 1.0 / @sqrt(@as(f32, @floatFromInt(s)));
+        const eps_l2 = m.eps / @as(f32, @floatFromInt(s));
+        const dst = if (which == 0) self.b_q.ptr else self.b_k.ptr;
+        ops.normRows(src + which * kd + h * s, cd, dst + h * n_t * s, s, s, n_t, eps_l2, l2);
     }
 
     fn inOk(l: *const Layer) bool {

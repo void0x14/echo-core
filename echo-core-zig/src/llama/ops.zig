@@ -256,7 +256,7 @@ pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usiz
     r8Run(p, mats, n, ys, {}, p.wdata, 0);
 }
 
-const GemmRows = sgemm.GemmR8.GB * 8;
+pub const GemmRows = sgemm.GemmR8.GB * 8;
 
 /// H58: girdi üretici fazda satır satır nicemlenebilir mi (hepsi R8, aynı k).
 pub fn r8Ok(mats: []const Mat) bool {
@@ -394,6 +394,11 @@ inline fn rmsRow(x: [*]const f32, y: [*]f32, nc: usize, eps: f32, w: ?[*]const f
         while (i + 8 <= nc) : (i += 8) avx.storeF(y + i, avx.loadF(x + i) * vs * vp);
         while (i < nc) : (i += 1) y[i] = x[i] * scale * post;
     }
+}
+
+/// H63: n satırın rmsNorm'u (ağırlıksız, post çarpanlı); conv parça sonundan başlık başına çağrılır.
+pub fn normRows(x: [*]const f32, x_row: usize, y: [*]f32, y_row: usize, nc: usize, n: usize, eps: f32, post: f32) void {
+    for (0..n) |r| rmsRow(x + r * x_row, y + r * y_row, nc, eps, null, post);
 }
 
 /// H57: z = x + y ve out = rmsNorm(z) * w aynı satır geçişinde (aradaki bariyer kalkar).
