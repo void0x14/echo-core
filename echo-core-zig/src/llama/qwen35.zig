@@ -313,6 +313,8 @@ pub const Context = struct {
     trace_conv: [][]f32 = &.{},
     trace_recr: [][]f32 = &.{},
     verify_len: usize = 0,
+    /// H14: doğrulamada LM head'i tüm pozisyonlar için tek geçişte yapar (enableTrace kurar).
+    lmb: ?*ivf.Batch = null,
     /// true: decodeVerify iz yazmaz (geri alma yapılmayacaksa; H11/P6).
     no_trace: bool = false,
 
@@ -437,6 +439,9 @@ pub const Context = struct {
         self.trace_recr = tr;
         self.trace_k = k;
         self.verify_tokens = try a.alloc(u32, k);
+        if (self.lm) |s| {
+            if (k <= ivf.Batch.MAXR) self.lmb = try ivf.Batch.init(s.ix, s.nprobe, self.n_threads, a);
+        }
     }
 
     fn freeTrace(self: *Context) void {
@@ -447,6 +452,8 @@ pub const Context = struct {
         a.free(self.trace_conv);
         a.free(self.trace_recr);
         a.free(self.verify_tokens);
+        if (self.lmb) |b| b.deinit(a);
+        self.lmb = null;
         self.trace_conv = &.{};
         self.trace_recr = &.{};
         self.verify_tokens = &.{};
@@ -607,7 +614,36 @@ pub const Context = struct {
             p.barrier();
         }
 
-        if (self.want_all and self.trace_k > 0) {
+        if (self.want_all and self.trace_k > 0 and self.lmb != null) {
+            const b = self.lmb.?;
+            ops.rmsNorm(p, self.b_inp.ptr, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, n_t, 1, m.eps, m.output_norm, 1.0);
+            p.barrier();
+            const xq: [*]q.BlockQ80 = @ptrCast(@alignCast(p.wdata));
+            const rb = m.n_embd / 32;
+            const rr = p.range(n_t);
+            for (rr[0]..rr[1]) |t| q.quantizeRowQ80(self.b_norm.ptr + t * m.n_embd, xq + t * rb, m.n_embd);
+            p.barrier();
+            b.scoreRange(xq, n_t, p.ith, p.nth);
+            p.barrier();
+            if (p.ith == 0) {
+                b.plan(n_t);
+                p.pool.chunkSet(@intCast(p.nth));
+            }
+            p.barrier();
+            var best: [ivf.Batch.MAXR]ivf.Best = @splat(.{});
+            var cur: i64 = p.ith;
+            while (cur < b.n_pieces) {
+                b.scan(xq, @intCast(cur), best[0..n_t]);
+                cur = p.pool.chunkAdd(1);
+            }
+            @memcpy(b.best[p.ith * ivf.Batch.MAXR ..][0..n_t], best[0..n_t]);
+            p.barrier();
+            if (p.ith == 0) {
+                b.reduce();
+                @memcpy(self.verify_tokens[0..n_t], b.tokens[0..n_t]);
+            }
+            p.barrier();
+        } else if (self.want_all and self.trace_k > 0) {
             var vt: usize = 0;
             while (vt < n_t) : (vt += 1) {
                 const row = self.b_inp.ptr + vt * m.n_embd;

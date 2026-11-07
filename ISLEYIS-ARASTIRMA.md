@@ -185,3 +185,28 @@ Veri: Crossref başlık kelimesi eşliyor; "TL" Türk lirası değil "Teacher Li
 - Kalan tur maliyeti: tur ≈ 42 ms, saf batch 8 = 37.5 ms. Fark (~4.5 ms) LM head'in 8 pozisyonu sırayla 8 ayrı aramayla yapması (P2'ye aykırı: 8 ayrı tur).
 - 300 tok/s için: 8 token/tur ile tur ≤ 26.7 ms olmalı. Saf batch 8 bugün 37.5 ms; Q8×Q8 4×2 çekirdeği hesaplamada ~1.4x hızlanmalı.
 - (c) Sıradaki tek adım: H14 — LM head'i 8 pozisyon için tek geçişte yapmak (P2: tek araba).
+
+## Tur 7 (ölçümlü)
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| H14 | P2: doğrulamada LM head 8 pozisyon için 8 ayrı IVF araması (8 tur, ~270 MB, 40 bariyer) → tek geçiş: kümelerin birleşimi bir kez okunur, her satır yalnız kendi kümelerinde skorlanır | ~4.5 ms/tur kazanç | 4 istemde bayt karşılaştırma; tg ölç | 4/4 bayt aynı. tg128 164 → 167.4/167.6 (+%2), tg32 değişmedi. **Yaşadı, küçük.** |
+| — | Profil: saf batch 8 (`perf`) | — | — | Zamanın %77.5'i `TinyBlasQ0.gemm4xN` (Q8×Q8 4×2 asm). Çift×blok başına 6 vektör komutu; 2'si (`vpmaddubsw`, `vpmaddwd`) Zen 2'de tek tamsayı çarpma borusunda. Alt sınır ~17 ms, ölçülen ~29 ms. |
+| H15 | SMT ile boru boşluklarını doldur (t=12) | batch 8 hesaplama sınırlı → SMT yardım eder | t=6 vs t=12 | batch 8: 229 → 135; tg128: 174 → 63. **Öldü.** |
+| H16 | `vpmaddwd ones` yerine bit-bit aynı kaydırma+toplama (çarpma borusunu boşalt) | FP0 darboğazı azalır | iki ikili, batch 8 ×2 | eski 220.4/234.5, H16 212.0/210.4. **Öldü**, kod geri alındı. |
+
+### Güncel tablo (CPU, t=6, tok/s)
+
+| Satır | tg32 | tg128 | Kat (tg128) |
+|---|---:|---:|---:|
+| Hilesiz (`--ngram 0`) | 52.38 | 53.64 | 1.00x |
+| H01 (iz ile geri alma) | 93.8 | 136.2 | 2.54x |
+| H01 + H13 | 119.3 | 164.3 | 3.06x |
+| H01 + H13 + H14 | 119.2 | 167.5 | 3.12x |
+| Saf batch 8 tavanı | — | 213–234 | ~4.2x |
+
+### Tur 7 sonucu
+- (a) Kanıtlanan: H14 kayıpsız, +%2. Batch 8'in %77.5'i Q8×Q8 çekirdeği.
+- (b) Çürütülen: H15 (SMT), H16 (pmaddwd yerine kaydırma).
+- 300 için: tur (8 token) ≤ 26.7 ms. Bugün saf batch 8 ≈ 35–37 ms; çekirdek ~1.4x hızlanmalı. Ayrıca tg128'in ~%20'si taslak hazır olmadan tek tek üretilen tokenlar.
+- (c) Sıradaki tek adım: H17 — taslak yokken tek token üretmek yerine (P2: arabayı boş götürme) kalan pozisyonları da doldurup batch'le git.

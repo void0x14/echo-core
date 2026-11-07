@@ -209,6 +209,144 @@ pub fn open(model_path: []const u8, w: ops.Mat, l: usize, nth: usize, a: Alloc, 
 }
 
 pub const Best = extern struct { value: f32 = -std.math.inf(f32), token: u32 = 0, pad: [14]u32 = @splat(0) };
+
+/// En yüksek skorlu `nprobe` kümenin kimlikleri, artan sırada (quickselect + sort).
+fn topSel(sc: []const f32, ord: []u32, nprobe: usize) []u32 {
+    for (ord, 0..) |*o, i| o.* = @intCast(i);
+    var lo: usize = 0;
+    var hi: usize = ord.len - 1;
+    const want = nprobe - 1;
+    while (lo < hi) {
+        const pv = sc[ord[(lo + hi) / 2]];
+        var i = lo;
+        var j = hi;
+        while (i <= j) {
+            while (sc[ord[i]] > pv) i += 1;
+            while (sc[ord[j]] < pv) j -= 1;
+            if (i <= j) {
+                std.mem.swap(u32, &ord[i], &ord[j]);
+                i += 1;
+                if (j == 0) break;
+                j -= 1;
+            }
+        }
+        if (want <= j) {
+            hi = j;
+        } else if (want >= i) {
+            lo = i;
+        } else break;
+    }
+    const sel = ord[0..nprobe];
+    std.sort.pdq(u32, sel, {}, std.sort.asc(u32));
+    return sel;
+}
+
+/// H14: n satırın IVF araması tek geçişte. Her satır yalnız kendi seçtiği kümelerde skorlanır
+/// (Search ile aynı sonuç); satırlar kümelerin birleşimi üzerinden bir kez okunur.
+pub const Batch = struct {
+    pub const MAXR = 16;
+    const PieceC = struct { first: u32, last: u32, cl: u32 };
+    ix: *const Runtime,
+    nprobe: usize,
+    nth: usize,
+    n: usize = 0,
+    scores: []f32,
+    ord: []u32,
+    mask: []u16,
+    pieces: []PieceC,
+    n_pieces: usize = 0,
+    best: []Best,
+    tokens: [MAXR]u32 = @splat(0),
+
+    pub fn init(ix: *const Runtime, nprobe: usize, nth: usize, a: Alloc) !*Batch {
+        const s = try a.create(Batch);
+        s.* = .{
+            .ix = ix,
+            .nprobe = @min(nprobe, ix.l),
+            .nth = nth,
+            .scores = try a.alloc(f32, MAXR * ix.l),
+            .ord = try a.alloc(u32, ix.l),
+            .mask = try a.alloc(u16, ix.l),
+            .pieces = try a.alloc(PieceC, ix.order.len / PIECE_ROWS + ix.l + 1),
+            .best = try a.alloc(Best, nth * MAXR),
+        };
+        return s;
+    }
+    pub fn deinit(s: *Batch, a: Alloc) void {
+        a.free(s.scores);
+        a.free(s.ord);
+        a.free(s.mask);
+        a.free(s.pieces);
+        a.free(s.best);
+        a.destroy(s);
+    }
+
+    /// x: n satır Q8_0, satır adımı ix.k/32 blok.
+    pub fn scoreRange(s: *Batch, x: [*]const q.BlockQ80, n: usize, ith: usize, nth: usize) void {
+        const ix = s.ix;
+        const dr = (ix.l + nth - 1) / nth;
+        const c0 = @min(dr * ith, ix.l);
+        const c1 = @min(c0 + dr, ix.l);
+        const rb = ix.k / 32;
+        for (c0..c1) |c| {
+            const cr: [*]const q.BlockQ80 = @ptrCast(@alignCast(ix.cq.ptr + c * ix.nb1));
+            for (0..n) |r| s.scores[r * ix.l + c] = q.dotQ80Q80(ix.k, cr, x + r * rb);
+        }
+    }
+
+    pub fn plan(s: *Batch, n: usize) void {
+        const l = s.ix.l;
+        s.n = n;
+        @memset(s.mask, 0);
+        for (0..n) |r| {
+            for (topSel(s.scores[r * l ..][0..l], s.ord, s.nprobe)) |c| s.mask[c] |= @as(u16, 1) << @intCast(r);
+        }
+        var np: usize = 0;
+        for (s.mask, 0..) |mk, c| {
+            if (mk == 0) continue;
+            var a = s.ix.start[c];
+            const e = s.ix.start[c + 1];
+            while (a < e) {
+                const b = @min(a + PIECE_ROWS, e);
+                s.pieces[np] = .{ .first = a, .last = b, .cl = @intCast(c) };
+                np += 1;
+                a = b;
+            }
+        }
+        s.n_pieces = np;
+    }
+
+    pub fn scan(s: *const Batch, x: [*]const q.BlockQ80, piece: usize, b: []Best) void {
+        const ix = s.ix;
+        const p = s.pieces[piece];
+        const mk = s.mask[p.cl];
+        const rb = ix.k / 32;
+        for (p.first..p.last) |row| {
+            const w: [*]const q.BlockQ80 = @ptrCast(@alignCast(ix.rows.ptr + row * ix.nb1));
+            const t = ix.order[row];
+            var bits = mk;
+            while (bits != 0) : (bits &= bits - 1) {
+                const r: usize = @ctz(bits);
+                const v = q.dotQ80Q80(ix.k, w, x + r * rb);
+                if (v > b[r].value or (v == b[r].value and t < b[r].token)) {
+                    b[r].value = v;
+                    b[r].token = t;
+                }
+            }
+        }
+    }
+
+    pub fn reduce(s: *Batch) void {
+        for (0..s.n) |r| {
+            var b = s.best[r];
+            for (1..s.nth) |th| {
+                const o = s.best[th * MAXR + r];
+                if (o.value > b.value or (o.value == b.value and o.token < b.token)) b = o;
+            }
+            s.tokens[r] = b.token;
+        }
+    }
+};
 const Piece = struct { first: u32, last: u32 };
 const PIECE_ROWS = 256;
 
@@ -254,33 +392,7 @@ pub const Search = struct {
 
     /// En yüksek skorlu nprobe kümeyi seçer (quickselect), bellek sırasına dizer, parçalara böler.
     pub fn plan(s: *Search) void {
-        const sc = s.scores;
-        for (s.ord, 0..) |*o, i| o.* = @intCast(i);
-        var lo: usize = 0;
-        var hi: usize = s.ord.len - 1;
-        const want = s.nprobe - 1;
-        while (lo < hi) {
-            const pv = sc[s.ord[(lo + hi) / 2]];
-            var i = lo;
-            var j = hi;
-            while (i <= j) {
-                while (sc[s.ord[i]] > pv) i += 1;
-                while (sc[s.ord[j]] < pv) j -= 1;
-                if (i <= j) {
-                    std.mem.swap(u32, &s.ord[i], &s.ord[j]);
-                    i += 1;
-                    if (j == 0) break;
-                    j -= 1;
-                }
-            }
-            if (want <= j) {
-                hi = j;
-            } else if (want >= i) {
-                lo = i;
-            } else break;
-        }
-        const sel = s.ord[0..s.nprobe];
-        std.sort.pdq(u32, sel, {}, std.sort.asc(u32));
+        const sel = topSel(s.scores, s.ord, s.nprobe);
         var n: usize = 0;
         for (sel) |c| {
             var a = s.ix.start[c];
