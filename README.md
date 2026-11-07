@@ -11,3 +11,24 @@ Optimizing the execution engine to break memory bandwidth bottlenecks on local h
 
 ## Goal
 Achieving 50-100 t/s on local CPU/RAM configurations (i5-13500H / Ryzen 3600).
+
+## Aşılcak barajlar;
+
+### Prefill
+- [ ] 750 barajını aşmak
+- [ ] 1000 barajını aşmak
+- [ ] 1500 barajını aşmak
+- [ ] 2000 barajını aşmak
+- [ ] 5000 barajını aşmak
+- [ ] 7500 barajını aşmak
+- [ ] 10000 barajını aşmak
+
+### TG
+- [ ] 70 barajını aşmak
+- [ ] 100 barajını aşmak
+- [ ] 150 barajını aşmak
+- [ ] 200 barajını aşmak
+- [ ] 300 barajını aşmak
+- [ ] 500 barajını aşmak
+- [ ] 750 barajını aşmak
+- [ ] 1000 barajını aşmak
