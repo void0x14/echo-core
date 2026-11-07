@@ -253,7 +253,7 @@ pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usiz
     }
     r8Pre(p, mats);
     p.barrier();
-    r8Run(p, mats, n, ys, {});
+    r8Run(p, mats, n, ys, {}, p.wdata, 0);
 }
 
 const GemmRows = sgemm.GemmR8.GB * 8;
@@ -280,21 +280,53 @@ pub fn r8Pre(p: *const Params, mats: []const Mat) void {
 /// Girdi wdata'da hazırsa (r8Row + r8Pre + bariyer) yalnız GEMM; değilse mulMatMulti.
 pub fn mulMatMultiQ(p: *const Params, mats: []const Mat, x: [*]const f32, n: usize, ys: []const [*]f32) void {
     if (!r8Ok(mats)) return mulMatMulti(p, mats, x, n, ys);
-    r8Run(p, mats, n, ys, {});
+    r8Run(p, mats, n, ys, {}, p.wdata, 0);
+}
+
+/// H62: FFN hızlı yol koşulu: gate/up/down R8, gate.m == up.m == down.k, 32 kanallık parça = 1 Q8 bloğu.
+pub fn ffnOk(gate: Mat, up: Mat, down: Mat) bool {
+    return r8Ok(&.{ gate, up }) and r8Ok(&.{down}) and gate.m == up.m and down.k == gate.m and gate.m % GemmRows == 0;
+}
+/// Üretici bariyerinden önce (ffnGateUp iş birimleri: gate.m / 32).
+pub fn ffnPre(p: *const Params, gate: Mat) void {
+    p.pool.rangeInit(p.ith, sgemm.GemmR8.chunks(gate.m));
+}
+/// H62: aynı 32 kanalın gate ve up parçası tek iş biriminde; ardından swiglu + down girdisi nicemleme
+/// (32 kanal = bir Q8 bloğu) wd2'ye. Ayrı swiglu fazı ve bariyeri yok. Sonunda down aralıkları küme 1'de kurulur.
+pub fn ffnGateUp(p: *const Params, gate: Mat, up: Mat, down: Mat, n: usize, yg: [*]f32, yu: [*]f32, wd2: [*]u8, yd: [*]f32) void {
+    const k = gate.k;
+    const rs = dotRowSize(.q8_0, k);
+    const nff = gate.m;
+    const drs = dotRowSize(.q8_0, nff);
+    const b: [*]const q.BlockQ80 = @ptrCast(@alignCast(p.wdata));
+    const gg = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = gate.rep.?, .b = b, .ldb = rs / 34, .c = yg, .ldc = nff, .ith = p.ith, .r16 = gate.r16 };
+    const gu = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = up.rep.?, .b = b, .ldb = rs / 34, .c = yu, .ldc = nff, .ith = p.ith, .r16 = up.r16 };
+    while (p.pool.rangeNext(p.ith)) |c| {
+        gg.chunk(c, nff, n);
+        gu.chunk(c, nff, n);
+        const r0 = c * GemmRows;
+        for (0..n) |t| {
+            var sw: [GemmRows]f32 align(32) = undefined;
+            vec.swiglu(GemmRows, &sw, yg + t * nff + r0, yu + t * nff + r0);
+            sgemm.quantR8(&sw, @ptrCast(@alignCast(wd2 + t * drs + c * 34)), GemmRows);
+        }
+    }
+    p.pool.rangeInitS(1, p.ith, sgemm.GemmR8.chunks(down.m));
+    p.barrier();
+    r8Run(p, &.{down}, n, &.{yd}, {}, wd2, 1);
 }
 
 /// H61: girdi hazır (r8Ok olmalı); her GEMM parçasından sonra ctx.epi(matris, satır0, satır1) o satırların
 /// tüm tokenları için çalışır (satır yerel son işlemler ayrı faz/bariyer istemez).
 pub fn mulMatMultiQE(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx: anytype) void {
     std.debug.assert(r8Ok(mats));
-    r8Run(p, mats, n, ys, ctx);
+    r8Run(p, mats, n, ys, ctx, p.wdata, 0);
 }
 
-fn r8Run(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx: anytype) void {
+fn r8Run(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx: anytype, wdata: [*]u8, set: u1) void {
     const k = mats[0].k;
     const row_size = dotRowSize(.q8_0, k);
-    const wdata = p.wdata;
-    while (p.pool.rangeNext(p.ith)) |cur| {
+    while (p.pool.rangeNextS(set, p.ith)) |cur| {
         var c: usize = cur;
         for (mats, ys, 0..) |a, y, mi| {
             const nc = sgemm.GemmR8.chunks(a.m);

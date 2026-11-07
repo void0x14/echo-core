@@ -295,6 +295,8 @@ pub const Context = struct {
     lm: ?*ivf.Search = null,
 
     wdata: []align(64) u8,
+    /// H62: down girdisi (gate/up GEMM'i wdata'yı okurken yazılır)
+    wdata2: []align(64) u8,
     fdata: []align(64) f32,
     theta_scale: f32,
 
@@ -388,6 +390,7 @@ pub const Context = struct {
             .rs_state = rs_state,
             .logits = try allocator.alloc(f32, m.n_vocab),
             .wdata = try allocator.alignedAlloc(u8, .@"64", n_ub * max_k * 2), // en büyük satır: F16
+            .wdata2 = try allocator.alignedAlloc(u8, .@"64", n_ub * (max_k / 32 * 34 + 64)),
             .fdata = try buf(allocator, ops.flashScratchFloats(m.head_dim, m.n_head, n_threads) + n_threads * (m.d_state + 64)),
             .theta_scale = avx.powf(m.freq_base, -2.0 / @as(f32, @floatFromInt(m.n_rot))),
             .b_inp = try buf(allocator, n_ub * m.n_embd),
@@ -429,6 +432,7 @@ pub const Context = struct {
         self.freeTrace();
         a.free(self.logits);
         a.free(self.wdata);
+        a.free(self.wdata2);
         a.free(self.fdata);
         inline for (.{ "b_inp", "b_norm", "b_resid", "b_attn", "b_qkv", "b_conv_in", "b_conv_out", "b_q", "b_k", "b_gate", "b_beta", "b_gdn", "b_z", "b_ffn_g", "b_ffn_u", "b_qfull", "b_kk", "b_vv" }) |f| {
             a.free(@field(self, f));
@@ -629,17 +633,23 @@ pub const Context = struct {
             }
             // attn_residual + attn_post_norm (H57: tek geçiş)
             const ffn_in = [_]ops.Mat{ l.ffn_gate, l.ffn_up };
+            const fast = ops.ffnOk(l.ffn_gate, l.ffn_up, l.ffn_down);
             const qf = ops.r8Ok(&ffn_in);
             ops.addRmsNorm(p, m.n_embd, n_t, self.b_resid.ptr, self.b_attn.ptr, self.b_inp.ptr, self.b_norm.ptr, m.eps, l.post_norm, qf);
-            if (qf) ops.r8Pre(p, &ffn_in);
+            if (fast) ops.ffnPre(p, l.ffn_gate) else if (qf) ops.r8Pre(p, &ffn_in);
             p.barrier();
             // build_ffn(LLM_FFN_SILU, LLM_FFN_PAR)
-            ops.mulMatMultiQ(p, &ffn_in, self.b_norm.ptr, n_t, &.{ self.b_ffn_g.ptr, self.b_ffn_u.ptr });
-            const qd = ops.r8Ok(&.{l.ffn_down});
-            ops.swigluQ(p, m.n_ff, n_t, self.b_ffn_g.ptr, self.b_ffn_g.ptr, self.b_ffn_u.ptr, qd);
-            if (qd) ops.r8Pre(p, &.{l.ffn_down});
-            p.barrier();
-            ops.mulMatMultiQ(p, &.{l.ffn_down}, self.b_ffn_g.ptr, n_t, &.{self.b_attn.ptr});
+            if (fast) {
+                // H62: gate+up parça başına, swiglu + down nicemleme parça sonunda
+                ops.ffnGateUp(p, l.ffn_gate, l.ffn_up, l.ffn_down, n_t, self.b_ffn_g.ptr, self.b_ffn_u.ptr, self.wdata2.ptr, self.b_attn.ptr);
+            } else {
+                ops.mulMatMultiQ(p, &ffn_in, self.b_norm.ptr, n_t, &.{ self.b_ffn_g.ptr, self.b_ffn_u.ptr });
+                const qd = ops.r8Ok(&.{l.ffn_down});
+                ops.swigluQ(p, m.n_ff, n_t, self.b_ffn_g.ptr, self.b_ffn_g.ptr, self.b_ffn_u.ptr, qd);
+                if (qd) ops.r8Pre(p, &.{l.ffn_down});
+                p.barrier();
+                ops.mulMatMultiQ(p, &.{l.ffn_down}, self.b_ffn_g.ptr, n_t, &.{self.b_attn.ptr});
+            }
             // l_out (+ sonraki katmanın attn_norm'u)
             if (il + 1 < m.layers.len) {
                 const nl = &m.layers[il + 1];

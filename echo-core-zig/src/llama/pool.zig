@@ -23,7 +23,8 @@ pub const Pool = struct {
     n_barrier_passed: Atomic(u32) align(64) = .init(0),
     current_chunk: Atomic(i32) align(64) = .init(0),
     /// H47: thread başına bitişik iş aralığı (lo | hi << 32); sahibi baştan, hırsız sondan alır.
-    slots: [MAX_T]Slot = @splat(.{}),
+    /// H62: iki küme; bir fazın sonunda sonraki fazın aralıkları diğer kümede kurulabilir (ABA yok).
+    slots: [2][MAX_T]Slot = @splat(@splat(.{})),
 
     pub fn init(allocator: std.mem.Allocator, n_threads: u32) !*Pool {
         const self = try allocator.create(Pool);
@@ -111,22 +112,28 @@ pub const Pool = struct {
 
     /// Her thread kendi aralığını kurar; kullanımdan önce bir bariyer gerekir.
     pub fn rangeInit(self: *Pool, ith: usize, total: usize) void {
+        self.rangeInitS(0, ith, total);
+    }
+    pub fn rangeInitS(self: *Pool, set: u1, ith: usize, total: usize) void {
         const n = self.n_threads;
         const lo: u64 = ith * total / n;
         const hi: u64 = (ith + 1) * total / n;
-        self.slots[ith].v.store(lo | hi << 32, .release);
+        self.slots[set][ith].v.store(lo | hi << 32, .release);
     }
 
     /// Sıradaki iş birimi: önce kendi aralığının başı (bitişik akış), bitince diğerlerinin sonu.
     pub fn rangeNext(self: *Pool, ith: usize) ?usize {
+        return self.rangeNextS(0, ith);
+    }
+    pub fn rangeNextS(self: *Pool, set: u1, ith: usize) ?usize {
         const n = self.n_threads;
-        const own = &self.slots[ith].v;
+        const own = &self.slots[set][ith].v;
         var v = own.load(.acquire);
         while (@as(u32, @truncate(v)) < v >> 32) {
             v = own.cmpxchgWeak(v, v + 1, .acq_rel, .acquire) orelse return @as(u32, @truncate(v));
         }
         for (1..n) |d| {
-            const t = &self.slots[(ith + d) % n].v;
+            const t = &self.slots[set][(ith + d) % n].v;
             var w = t.load(.acquire);
             while (@as(u32, @truncate(w)) < w >> 32) {
                 w = t.cmpxchgWeak(w, w - (1 << 32), .acq_rel, .acquire) orelse return (w >> 32) - 1;
