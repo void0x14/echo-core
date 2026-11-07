@@ -796,6 +796,61 @@ pub fn rope(p: *const Params, x: [*]f32, ne0: usize, ne1: usize, n_t: usize, bas
     }
 }
 
+inline fn ropeCache(cache: *[128]f32, pos: usize, n_dims: usize, theta_scale: f32) void {
+    var theta: f32 = @floatFromInt(pos);
+    var d: usize = 0;
+    while (d < n_dims) : (d += 2) {
+        cache[d] = avx.cosf(theta);
+        cache[d + 1] = avx.sinf(theta);
+        theta *= theta_scale;
+    }
+}
+
+inline fn ropeRow(row: [*]f32, cache: *const [128]f32, n_dims: usize) void {
+    const n_offset = n_dims / 2;
+    var d: usize = 0;
+    while (d < n_dims) : (d += 2) {
+        const ic = d / 2;
+        const x0 = row[ic];
+        const x1 = row[ic + n_offset];
+        row[ic] = @mulAdd(f32, x0, cache[d], -(x1 * cache[d + 1]));
+        row[ic + n_offset] = @mulAdd(f32, x0, cache[d + 1], x1 * cache[d]);
+    }
+}
+
+/// H64: attention girdi hazırlığı tek fazda (satır yerel): q norm+rope (qfull -> q), k norm+rope (yerinde) + f16 önbelleğe,
+/// v f16 önbelleğe. Eski yol: 6 ayrı faz ve bariyer. Kalem sırası: token başına [q başlıkları | k başlıkları | v].
+pub fn attnPrep(p: *const Params, n_t: usize, dh: usize, h_q: usize, h_kv: usize, qfull: [*]const f32, qd: [*]f32, kk: [*]f32, vv: [*]const f32, kc: [*]u16, vc: [*]u16, eps: f32, qw: [*]const f32, kw: [*]const f32, base_pos: usize, n_dims: usize, theta_scale: f32) void {
+    const kv_row = dh * h_kv;
+    const per = h_q + h_kv + 1;
+    var cache: [128]f32 = undefined;
+    var last_t: usize = std.math.maxInt(usize);
+    // bitişik aralık: thread başına rope tablosu token sayısı kadar hesaplanır
+    const rg = p.range(n_t * per);
+    for (rg[0]..rg[1]) |it| {
+        const t = it / per;
+        const j = it % per;
+        if (j == h_q + h_kv) {
+            vec.fp32to16Row(vv + t * kv_row, vc + t * kv_row, kv_row);
+            continue;
+        }
+        if (last_t != t) {
+            ropeCache(&cache, base_pos + t, n_dims, theta_scale);
+            last_t = t;
+        }
+        if (j < h_q) {
+            const y = qd + (t * h_q + j) * dh;
+            rmsRow(qfull + t * dh * h_q * 2 + j * dh * 2, y, dh, eps, qw, 1.0);
+            ropeRow(y, &cache, n_dims);
+        } else {
+            const o = t * kv_row + (j - h_q) * dh;
+            rmsRow(kk + o, kk + o, dh, eps, kw, 1.0);
+            ropeRow(kk + o, &cache, n_dims);
+            vec.fp32to16Row(kk + o, kc + o, dh);
+        }
+    }
+}
+
 /// SET_ROWS: f32 -> f16 KV cache
 pub fn setRowsF16(p: *const Params, nc: usize, n_t: usize, src: [*]const f32, dst: [*]u16) void {
     const r = p.range(n_t);

@@ -833,6 +833,18 @@ pub const Context = struct {
         const kv_row = dh * m.n_head_kv;
 
         ops.mulMatMultiQ(p, &.{ l.wq, l.wv, l.wk }, self.b_norm.ptr, n_t, &.{ self.b_qfull.ptr, self.b_vv.ptr, self.b_kk.ptr });
+        if (m.n_rot <= 128 and std.c.getenv("ECHO_OLD_ATTN") == null) {
+            ops.attnPrep(p, n_t, dh, m.n_head, m.n_head_kv, self.b_qfull.ptr, self.b_gdn.ptr, self.b_kk.ptr, self.b_vv.ptr, self.kv_k[il].ptr + self.head * kv_row, self.kv_v[il].ptr + self.head * kv_row, m.eps, l.q_norm, l.k_norm, self.head, m.n_rot, self.theta_scale);
+            p.barrier();
+        } else self.attnPrepOld(p, l, il);
+        self.attnTail(p, l, il);
+    }
+
+    fn attnPrepOld(self: *Context, p: *const Params, l: *const Layer, il: usize) void {
+        const m = self.model;
+        const n_t = self.n_t;
+        const dh = m.head_dim;
+        const kv_row = dh * m.n_head_kv;
         // Qcur = view(Qcur_full) -> build_norm -> rope. q tamponu: b_gdn (head_dim*n_head*n_t)
         ops.rmsNorm(p, self.b_qfull.ptr, dh * 2, dh * m.n_head * 2, self.b_gdn.ptr, dh, dh * m.n_head, dh, m.n_head, n_t, m.eps, l.q_norm, 1.0);
         p.barrier();
@@ -847,6 +859,12 @@ pub const Context = struct {
         p.barrier();
         ops.setRowsF16(p, kv_row, n_t, self.b_vv.ptr, self.kv_v[il].ptr + self.head * kv_row);
         p.barrier();
+    }
+
+    fn attnTail(self: *Context, p: *const Params, l: *const Layer, il: usize) void {
+        const m = self.model;
+        const n_t = self.n_t;
+        const dh = m.head_dim;
         // FLASH_ATTN_EXT
         const args = ops.FlashArgs{
             .q = self.b_gdn.ptr,
