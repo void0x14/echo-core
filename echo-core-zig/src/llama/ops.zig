@@ -253,8 +253,10 @@ pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usiz
     }
     r8Pre(p, mats);
     p.barrier();
-    r8Run(p, mats, n, ys);
+    r8Run(p, mats, n, ys, {});
 }
+
+const GemmRows = sgemm.GemmR8.GB * 8;
 
 /// H58: girdi üretici fazda satır satır nicemlenebilir mi (hepsi R8, aynı k).
 pub fn r8Ok(mats: []const Mat) bool {
@@ -278,20 +280,28 @@ pub fn r8Pre(p: *const Params, mats: []const Mat) void {
 /// Girdi wdata'da hazırsa (r8Row + r8Pre + bariyer) yalnız GEMM; değilse mulMatMulti.
 pub fn mulMatMultiQ(p: *const Params, mats: []const Mat, x: [*]const f32, n: usize, ys: []const [*]f32) void {
     if (!r8Ok(mats)) return mulMatMulti(p, mats, x, n, ys);
-    r8Run(p, mats, n, ys);
+    r8Run(p, mats, n, ys, {});
 }
 
-fn r8Run(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32) void {
+/// H61: girdi hazır (r8Ok olmalı); her GEMM parçasından sonra ctx.epi(matris, satır0, satır1) o satırların
+/// tüm tokenları için çalışır (satır yerel son işlemler ayrı faz/bariyer istemez).
+pub fn mulMatMultiQE(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx: anytype) void {
+    std.debug.assert(r8Ok(mats));
+    r8Run(p, mats, n, ys, ctx);
+}
+
+fn r8Run(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx: anytype) void {
     const k = mats[0].k;
     const row_size = dotRowSize(.q8_0, k);
     const wdata = p.wdata;
     while (p.pool.rangeNext(p.ith)) |cur| {
         var c: usize = cur;
-        for (mats, ys) |a, y| {
+        for (mats, ys, 0..) |a, y, mi| {
             const nc = sgemm.GemmR8.chunks(a.m);
             if (c < nc) {
                 const g = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith, .r16 = a.r16 };
                 g.chunk(c, a.m, n);
+                if (@TypeOf(ctx) != void) ctx.epi(mi, c * GemmRows, @min(c * GemmRows + GemmRows, a.m));
                 break;
             }
             c -= nc;
@@ -407,7 +417,7 @@ pub fn swiglu(p: *const Params, nc: usize, nr: usize, y: [*]f32, x: [*]const f32
 pub inline fn sigmoidF(x: f32) f32 {
     return 1.0 / (1.0 + avx.expf(-x));
 }
-inline fn softplusF(x: f32) f32 {
+pub inline fn softplusF(x: f32) f32 {
     return if (x > 20.0) x else avx.logf(1.0 + avx.expf(x));
 }
 
@@ -471,10 +481,15 @@ pub fn convConcat(p: *const Params, rows: usize, kc: usize, n_t: usize, state: [
 /// H35: CONCAT + SSM_CONV + SILU tek fazda (satırlar bağımsız), 8 satır vektörel. d_conv = 4 (kc = 3).
 /// state[row][kc] güncellenir; trace varsa [t][row][kc] = t'den sonraki pencere.
 pub fn convFused(p: *const Params, rows: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, cw: [*]const f32, dst: [*]f32, trace: ?[*]f32) void {
-    const kc = 3;
     const r = p.range(rows);
-    var row = r[0];
-    while (row + 8 <= r[1]) : (row += 8) {
+    convRows(rows, n_t, state, qkv, cw, dst, trace, r[0], r[1]);
+}
+
+/// convFused'un kanal aralığı [r0, r1) gövdesi (H61: GEMM parça sonundan da çağrılır).
+pub fn convRows(rows: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, cw: [*]const f32, dst: [*]f32, trace: ?[*]f32, r0: usize, r1: usize) void {
+    const kc = 3;
+    var row = r0;
+    while (row + 8 <= r1) : (row += 8) {
         var w: [4]avx.F8 = undefined;
         var win: [kc]avx.F8 = undefined;
         inline for (0..4) |j| {
@@ -498,7 +513,7 @@ pub fn convFused(p: *const Params, rows: usize, n_t: usize, state: [*]f32, qkv: 
             inline for (0..8) |i| state[(row + i) * kc + j] = win[j][i];
         }
     }
-    while (row < r[1]) : (row += 1) {
+    while (row < r1) : (row += 1) {
         var wn: [kc]f32 = .{ state[row * kc], state[row * kc + 1], state[row * kc + 2] };
         const c = cw + row * 4;
         for (0..n_t) |t| {

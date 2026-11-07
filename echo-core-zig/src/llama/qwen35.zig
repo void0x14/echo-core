@@ -732,16 +732,48 @@ pub const Context = struct {
         const tr_recr: ?[*]f32 = if (tracing) self.trace_recr[il].ptr else null;
 
         // H22: qkv, alpha, beta, z aynı girdiden tek geçişte; ardından bağımsız eleman işlemleri tek fazda.
-        ops.mulMatMultiQ(p, &.{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate }, self.b_norm.ptr, n_t, &.{ self.b_qkv.ptr, self.b_gate.ptr, self.b_beta.ptr, self.b_z.ptr });
-        // CONCAT + CPY(conv_state_last)
-        if (m.d_conv == 4) {
-            // H35: concat + conv + silu tek fazda
-            ops.convFused(p, conv_dim, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, l.ssm_conv1d, self.b_conv_out.ptr, tr_conv);
-        } else ops.convConcat(p, conv_dim, kc, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, self.b_conv_in.ptr, tr_conv);
-        ops.gateFromAlpha(p, h_n, n_t, self.b_gate.ptr, self.b_gate.ptr, l.ssm_dt, l.ssm_a);
-        ops.sigmoidInPlace(p, h_n, n_t, self.b_beta.ptr);
-        ops.silu(p, s, h_n * n_t, self.b_z.ptr, self.b_z.ptr);
-        p.barrier();
+        const in4 = [_]ops.Mat{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate };
+        const out4 = [_][*]f32{ self.b_qkv.ptr, self.b_gate.ptr, self.b_beta.ptr, self.b_z.ptr };
+        if (m.d_conv == 4 and ops.r8Ok(&in4)) {
+            // H61: conv + gate + sigmoid + silu GEMM parça sonunda (satır yerel); ayrı faz ve bariyeri yok
+            const Epi = struct {
+                c: *Context,
+                l: *const Layer,
+                il: usize,
+                conv_dim: usize,
+                h_n: usize,
+                tr: ?[*]f32,
+                pub fn epi(e: @This(), mi: usize, r0: usize, r1: usize) void {
+                    const c = e.c;
+                    const nt = c.n_t;
+                    switch (mi) {
+                        0 => ops.convRows(e.conv_dim, nt, c.rs_conv[e.il].ptr, c.b_qkv.ptr, e.l.ssm_conv1d, c.b_conv_out.ptr, e.tr, r0, r1),
+                        1 => for (0..nt) |t| for (r0..r1) |h| {
+                            c.b_gate[t * e.h_n + h] = ops.softplusF(c.b_gate[t * e.h_n + h] + e.l.ssm_dt[h]) * e.l.ssm_a[h];
+                        },
+                        2 => for (0..nt) |t| for (r0..r1) |h| {
+                            c.b_beta[t * e.h_n + h] = ops.sigmoidF(c.b_beta[t * e.h_n + h]);
+                        },
+                        else => {
+                            const d = c.model.d_inner;
+                            for (0..nt) |t| vec.silu(r1 - r0, c.b_z.ptr + t * d + r0, c.b_z.ptr + t * d + r0);
+                        },
+                    }
+                }
+            };
+            ops.mulMatMultiQE(p, &in4, n_t, &out4, Epi{ .c = self, .l = l, .il = il, .conv_dim = conv_dim, .h_n = h_n, .tr = tr_conv });
+        } else {
+            ops.mulMatMultiQ(p, &in4, self.b_norm.ptr, n_t, &out4);
+            // CONCAT + CPY(conv_state_last)
+            if (m.d_conv == 4) {
+                // H35: concat + conv + silu tek fazda
+                ops.convFused(p, conv_dim, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, l.ssm_conv1d, self.b_conv_out.ptr, tr_conv);
+            } else ops.convConcat(p, conv_dim, kc, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, self.b_conv_in.ptr, tr_conv);
+            ops.gateFromAlpha(p, h_n, n_t, self.b_gate.ptr, self.b_gate.ptr, l.ssm_dt, l.ssm_a);
+            ops.sigmoidInPlace(p, h_n, n_t, self.b_beta.ptr);
+            ops.silu(p, s, h_n * n_t, self.b_z.ptr, self.b_z.ptr);
+            p.barrier();
+        }
         if (m.d_conv != 4) {
             ops.ssmConv(p, conv_dim, m.d_conv, kc + n_t, n_t, self.b_conv_in.ptr, l.ssm_conv1d, self.b_conv_out.ptr);
             p.barrier();
