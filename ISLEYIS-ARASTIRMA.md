@@ -352,3 +352,13 @@ Bench üretimi 5 tokenlik döngüye giriyor; taslaklar %100 kabul (360/360). Sü
 - (a) Kanıtlanan: README TG 300 geçildi (kirli ortam, varsayılan tg128 ~357).
 - (b) Çürütülen: —
 - (c) Sıradaki tek adım: 500 barajı. Tur başı tek-token adımı kalmadı; süre artık neredeyse tamamen T32 turları (hesap-sınırlı çekirdek + graph).
+
+## Tur 18 — 500'e doğru: çekirdek
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| — | k=64 (MAXR 64) | Tur sabit maliyeti amortize olur | 3 tur | tg128 362/364/349 vs k=32 367/368/371. **Öldü**: T64 ≈ 2·T32, maliyet tamamen token başı hesap (~2.8 ms; çekirdek %62, graph %28) |
+| — | SAT8 boru dağılımı | FP0 darboğaz | perf fpu_pipe | `vpaddsw` FP0/FP3'e gidiyor; `+%` ile borular dengelendi ama döngü aynı (272M) → boru değil |
+| — | Tile genişliği NC=2/3/4/6/8 | — | mikro | 283/284/272/289/275M döngü → fark yok; darboğaz çift başına komut zinciri (~2 döngü/çift) |
+| H30a | Aktivasyonu u8'e kaydır (a+128): `vpsignb`/`vpabsb` kalkar, çift başına broadcast + `maddubs` + `vpaddw`; 128·Σw düzeltmesi repack'te (blok 304 B), i16 sarmalı | Komut azalır | mikro + bench + metin | Mikro ×1.26; bench +%5 ama kabul 30.1, metin bozuk ("100000…"): `maddubs` doyması sık. **Öldü** |
+| H30 | Aynı + aktivasyon 7 bit (|a| ≤ 63, a+64 ∈ [1,127]) → çift ≤ 32258, `maddubs` hiç doymaz; düzeltme 64·Σw | Doyma kalkar, hız kalır | 3 tur, metin | Metin tutarlı (hikâye), kabul 32/32. tg128 355/378/407 vs 330/375/366, tg32 268/277/251 vs 242/286/285. **Yaşadı** |

@@ -227,6 +227,11 @@ pub inline fn dotQ6KQ8K(n: usize, x: [*]const BlockQ6K, y: [*]const BlockQ8K) f3
 
 /// quantize_row_q8_0 (AVX2)
 pub fn quantizeRowQ80(x_in: [*]const f32, y: [*]BlockQ80, k: usize) void {
+    quantizeRowQ(127.0, x_in, y, k);
+}
+
+/// qmax=63: H30 R8 yolu için 7 bit aktivasyon (a+64 u8'e sığar, maddubs doymaz).
+pub fn quantizeRowQ(comptime qmax: f32, x_in: [*]const f32, y: [*]BlockQ80, k: usize) void {
     var x = x_in;
     const nb = k / 32;
     for (0..nb) |i| {
@@ -240,9 +245,9 @@ pub fn quantizeRowQ80(x_in: [*]const f32, y: [*]BlockQ80, k: usize) void {
         m4 = avx.maxps128(m4, @shuffle(f32, m4, undefined, [4]i32{ 2, 3, 2, 3 }));
         m4 = avx.maxps128(m4, @shuffle(f32, m4, undefined, [4]i32{ 1, 1, 3, 3 }));
         const max_scalar = m4[0];
-        const d = max_scalar / 127.0;
+        const d = max_scalar / qmax;
         y[i].d = avx.fp32to16(d);
-        const mul = avx.splat(if (max_scalar != 0.0) 127.0 / max_scalar else 0.0);
+        const mul = avx.splat(if (max_scalar != 0.0) qmax / max_scalar else 0.0);
         v0 *= mul;
         v1 *= mul;
         v2 *= mul;

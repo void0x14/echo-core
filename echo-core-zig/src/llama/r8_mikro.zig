@@ -26,6 +26,7 @@ test "r8 mikro" {
         b.d = @bitCast(@as(f16, 0.02));
         for (&b.qs) |*x| x.* = r.intRangeAtMost(i8, -127, 127);
     }
+    for (act) |*b| for (&b.qs) |*x| { x.* = @divTrunc(x.*, 2) +% 64; };
     const c = try a.alloc(f32, n * m);
     const g = sgemm.GemmR8{ .pool = undefined, .nb = nb, .a = rep.ptr, .b = act.ptr, .ldb = nb, .c = c.ptr, .ldc = m, .ith = 0 };
     for (0..reps) |_| {

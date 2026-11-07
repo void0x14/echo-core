@@ -169,7 +169,7 @@ pub fn mulMat(p: *const Params, a: Mat, x: [*]const f32, n: usize, y: [*]f32) vo
             const cnt = (end - start) * bs;
             switch (a.type) {
                 .f16 => vec.fp32to16Row(src, @ptrCast(@alignCast(dst + start * 2)), cnt),
-                .q8_0 => q.quantizeRowQ80(src, @ptrCast(@alignCast(dst + start * 34)), cnt),
+.q8_0 => if (a.rep != null) sgemm.quantR8(src, @ptrCast(@alignCast(dst + start * 34)), cnt) else q.quantizeRowQ80(src, @ptrCast(@alignCast(dst + start * 34)), cnt),
                 else => q.quantizeRowQ8K(src, @ptrCast(@alignCast(dst + start * 292)), cnt),
             }
         }
@@ -243,7 +243,10 @@ pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usiz
     const start = (p.ith * k / 32) / p.nth;
     const end = ((p.ith + 1) * k / 32) / p.nth;
     if (end > start) {
-        for (0..n) |row| q.quantizeRowQ80(x + row * k + start * 32, @ptrCast(@alignCast(wdata + row * row_size + start * 34)), (end - start) * 32);
+        for (0..n) |row| {
+            const dst = wdata + row * row_size + start * 34;
+            sgemm.quantR8(x + row * k + start * 32, @ptrCast(@alignCast(dst)), (end - start) * 32);
+        }
     }
     if (p.ith == 0) p.pool.chunkSet(@intCast(p.nth));
     p.barrier();
