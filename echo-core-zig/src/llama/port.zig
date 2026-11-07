@@ -41,9 +41,9 @@ pub const Port = struct {
         var reader = try gguf.Reader.openWithAllocator(model_path, allocator);
         defer reader.deinit();
         const cpus = std.Thread.getCpuCount() catch 2;
-        // H23: fiziksel çekirdek − 2. Kullanıcı PC'yi kullanırken (kirli ortam) t=4, t=6 ile aynı ortanca TG,
-        // daha iyi en kötü koşu ve tek token yolunda +%35 verdi; iki çekirdek kullanıcıya kalır.
-        const n_threads: u32 = @intCast(@max(cpus / 2, 3) - 2);
+        // H27: tüm fiziksel çekirdekler. H25 ile turlar hesap-sınırlı oldu; kirli ortamda tg128 ortanca
+        // t=4/5/6: 183/185/195 (H23'teki t=4 kararı bant-sınırlı k=8 rejimine aitti).
+        const n_threads: u32 = @intCast(@max(cpus / 2, 1));
         const model = try qwen35.Model.load(model_path, allocator);
         errdefer model.deinit();
         // Varsayılan LM head IVF; yalnız Q8_0 çıktıda desteklenir, aksi halde tam yol.
