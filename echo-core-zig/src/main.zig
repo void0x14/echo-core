@@ -226,7 +226,7 @@ pub fn main(init: std.process.Init) !void {
     var prompt: ?[]const u8 = null;
     var max_tokens: u32 = 100;
     var bench = false;
-    var ngram_k: usize = 64; // H01 + H25 + H48 varsayılan; --ngram 0 kapatır
+    var ngram_k: usize = 128; // H01 + H25 + H48/H49 varsayılan; --ngram 0 kapatır
     var grammar = true; // H06 varsayılan; --no-grammar kapatır
     var snap = true; // H13 varsayılan; --no-snap kapatır
     var json = false;

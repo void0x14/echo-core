@@ -20,7 +20,7 @@ pub const Port = struct {
     /// Varsayılan LM head: IVF (yaklaşık, yalnız top-1). null: tam yol.
     lm_ix: ?*ivf.Runtime = null,
     /// >0: H01 n-gram taslağı + tek zincir doğrulama.
-    ngram_k: usize = 64,
+    ngram_k: usize = 128,
     /// H06 grammar fast-forward (JSON iskeleti); varsayılan açık, `--no-grammar` kapatır.
     grammar: bool = true,
     /// H13: doğrulamada iz yerine tur başı snapshot; tutmazsa geri dön + yeniden işle (kayıpsız).
@@ -127,7 +127,7 @@ pub const Port = struct {
         var d = try ngram.TokenDrafter.init(self.allocator, 3);
         defer d.deinit();
         for (prompt) |t| try d.add(t);
-        var buf: [64]u32 = undefined;
+        var buf: [128]u32 = undefined;
         var produced: u32 = 0;
         var pending: u32 = 0;
         var have = false;
@@ -212,7 +212,7 @@ pub const Port = struct {
         try d.restart();
         for (prompt) |t| try d.add(t);
         var pending: u32 = if (ctx.lm) |s| s.token else greedy(ctx.logits);
-        var buf: [64]u32 = undefined;
+        var buf: [128]u32 = undefined;
         var generated: u32 = 0;
         var lim: usize = @min(self.ngram_k, buf.len); // H25: tam kabulde ×2, rette ½ (en az 8)
         while (generated < max_tokens) {

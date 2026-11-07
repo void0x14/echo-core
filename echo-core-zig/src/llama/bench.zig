@@ -56,7 +56,7 @@ pub const Options = struct {
     /// >1: TG'yi batch'li ölç (pipeline/batch tavanı); gerçek üretim değil.
     gen_batch: usize = 1,
     /// >0: H01 n-gram taslağı + doğrulama, k = taslak uzunluğu.
-    ngram_k: usize = 64,
+    ngram_k: usize = 128,
     /// true: H06 grammar fast-forward (JSON iskeleti zorunlu blok).
     grammar: bool = true,
     /// H11 (P6): taslak zinciri tek forward'da ödenir, model farklı derse fark sayılır, geri alma yok.
@@ -111,7 +111,7 @@ fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: us
     defer local.deinit();
     const d = mem orelse &local;
     try d.restart();
-    var buf: [64]u32 = undefined;
+    var buf: [128]u32 = undefined;
     var pending: u32 = @intCast(rng.uintLessThan(usize, n_vocab));
     try ctx.decode(&.{pending});
     try d.add(pending);
@@ -276,7 +276,7 @@ fn runGen(ctx: *qwen35.Context, opt: Options, rng: std.Random, n_vocab: usize, n
 fn testGenGrammarSpec(ctx: *qwen35.Context, tk: *const tokenizer.SimpleTokenizer, n_gen: usize, st: *Stats, a: std.mem.Allocator, ngram_k: usize, p6: bool) !usize {
     var d = try ngram.TokenDrafter.init(a, 3);
     defer d.deinit();
-    var buf: [64]u32 = undefined;
+    var buf: [128]u32 = undefined;
     var produced: usize = 0;
     var pending: u32 = 0;
     var have = false;

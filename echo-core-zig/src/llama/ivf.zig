@@ -294,7 +294,8 @@ fn topSel(sc: []const f32, ord: []u32, nprobe: usize) []u32 {
 /// H14: n satırın IVF araması tek geçişte. Her satır yalnız kendi seçtiği kümelerde skorlanır
 /// (Search ile aynı sonuç); satırlar kümelerin birleşimi üzerinden bir kez okunur.
 pub const Batch = struct {
-    pub const MAXR = 64;
+    pub const MAXR = 128;
+    const MW = MAXR / 64; // küme başına maske kelimesi
     const PieceC = struct { first: u32, last: u32, cl: u32 };
     ix: *const Runtime,
     nprobe: usize,
@@ -316,7 +317,7 @@ pub const Batch = struct {
             .nth = nth,
             .scores = try a.alloc(f32, MAXR * ix.l),
             .ord = try a.alloc(u32, nth * ix.l),
-            .mask = try a.alloc(u64, ix.l),
+            .mask = try a.alloc(u64, ix.l * MW),
             .pieces = try a.alloc(PieceC, ix.g8[ix.l] / PIECE_G + ix.l + 1),
             .best = try a.alloc(Best4, nth * MAXR),
         };
@@ -356,15 +357,17 @@ pub const Batch = struct {
         const ord = s.ord[ith * l ..][0..l];
         var r = ith;
         while (r < s.n) : (r += nth) {
-            for (topSel(s.scores[r * l ..][0..l], ord, s.nprobe)) |c| _ = @atomicRmw(u64, &s.mask[c], .Or, @as(u64, 1) << @intCast(r), .monotonic);
+            for (topSel(s.scores[r * l ..][0..l], ord, s.nprobe)) |c| _ = @atomicRmw(u64, &s.mask[c * MW + r / 64], .Or, @as(u64, 1) << @intCast(r % 64), .monotonic);
         }
     }
 
     /// Tek thread, select'ten sonra: seçilen kümeleri parçalara böler.
     pub fn plan(s: *Batch) void {
         var np: usize = 0;
-        for (s.mask, 0..) |mk, c| {
-            if (mk == 0) continue;
+        for (0..s.ix.l) |c| {
+            var any: u64 = 0;
+            for (s.mask[c * MW ..][0..MW]) |w| any |= w;
+            if (any == 0) continue;
             var a = s.ix.g8[c];
             const e = s.ix.g8[c + 1];
             while (a < e) {
@@ -384,10 +387,12 @@ pub const Batch = struct {
         const rb = ix.k / 32;
         var cols: [MAXR + 3]u32 = undefined;
         var nc: usize = 0;
-        var bits = s.mask[p.cl];
-        while (bits != 0) : (bits &= bits - 1) {
-            cols[nc] = @ctz(bits);
-            nc += 1;
+        for (s.mask[p.cl * MW ..][0..MW], 0..) |w, wi| {
+            var bits = w;
+            while (bits != 0) : (bits &= bits - 1) {
+                cols[nc] = @intCast(wi * 64 + @ctz(bits));
+                nc += 1;
+            }
         }
         const n4 = (nc + 3) / 4 * 4;
         for (nc..n4) |i| cols[i] = cols[nc - 1];
