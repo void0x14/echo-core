@@ -11,7 +11,7 @@ test "r8 mikro" {
     const a = std.heap.page_allocator;
     const m: usize = if (std.c.getenv("R8_M")) |s| try std.fmt.parseInt(usize, std.mem.span(s), 10) else 128;
     const reps: usize = if (std.c.getenv("R8_REP")) |s| try std.fmt.parseInt(usize, std.mem.span(s), 10) else 1000;
-    const nb = 32;
+    const nb: usize = if (std.c.getenv("R8_NB")) |s| try std.fmt.parseInt(usize, std.mem.span(s), 10) else 32;
     const n: usize = if (std.c.getenv("R8_N")) |s| try std.fmt.parseInt(usize, std.mem.span(s), 10) else 8;
     var rng = std.Random.DefaultPrng.init(1);
     const r = rng.random();

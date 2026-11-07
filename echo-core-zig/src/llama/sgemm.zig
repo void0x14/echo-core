@@ -497,9 +497,9 @@ const r8_bn = [4][]const u8{ "%[b0]", "%[b1]", "%[b2]", "%[b3]" };
 const r8_SA = [4]u8{ 12, 13, 14, 15 };
 const r8_SB = [4]u8{ 2, 3, 4, 7 };
 
-fn r8Inner(comptime set: [4]u8, comptime h: usize, comptime k: usize) []const u8 {
+fn r8Inner(comptime nc: usize, comptime set: [4]u8, comptime h: usize, comptime k: usize) []const u8 {
     var t: []const u8 = std.fmt.comptimePrint("vmovdqa {d}(%[w]), %%ymm0\n", .{96 + h * 256 + 32 * k});
-    for (0..4) |c| {
+    for (0..nc) |c| {
         t = t ++ std.fmt.comptimePrint("vpbroadcastd {d}({s}), %%ymm1\n", .{ h * 34 + 2 + 4 * k, r8_bn[c] });
         t = t ++ if (k == 0)
             std.fmt.comptimePrint("vpmaddubsw %%ymm0, %%ymm1, %%ymm{d}\n", .{set[c]})
@@ -510,7 +510,8 @@ fn r8Inner(comptime set: [4]u8, comptime h: usize, comptime k: usize) []const u8
 }
 
 /// Blok sonu, parça p: -1 satır ölçeği, 0..3 sütun c'nin i16→f32 kısmı, 4..7 sütun c'nin ölçek+fma kısmı.
-fn r8End(comptime set: [4]u8, comptime h: i32, comptime p: i32, comptime wo: i32, comptime bo: i32) []const u8 {
+fn r8End(comptime nc: usize, comptime set: [4]u8, comptime h: i32, comptime p: i32, comptime wo: i32, comptime bo: i32) []const u8 {
+    if (p >= 0 and @mod(p, 4) >= nc) return "";
     if (p < 0) return std.fmt.comptimePrint("vcvtph2ps {d}(%[w]), %%ymm5\n", .{wo + h * 16});
     if (p < 4) {
         const r = set[@intCast(p)];
@@ -520,49 +521,44 @@ fn r8End(comptime set: [4]u8, comptime h: i32, comptime p: i32, comptime wo: i32
     return std.fmt.comptimePrint("movzwl {1d}({2s}), %%eax\nvbroadcastss (%[tab],%%rax,4), %%ymm6\nvmulps %%ymm5, %%ymm6, %%ymm6\nvfmadd231ps %%ymm6, %%ymm{0d}, %%ymm{3d}\n", .{ set[c], bo + h * 34, r8_bn[c], 8 + c });
 }
 
-fn r8Block(comptime si: [4]u8, comptime hi: usize, comptime se: [4]u8, comptime he: i32, comptime wo: i32, comptime bo: i32) []const u8 {
-    var t: []const u8 = r8End(se, he, -1, wo, bo);
-    for (0..8) |k| t = t ++ r8Inner(si, hi, k) ++ r8End(se, he, @intCast(k), wo, bo);
+fn r8Block(comptime nc: usize, comptime si: [4]u8, comptime hi: usize, comptime se: [4]u8, comptime he: i32, comptime wo: i32, comptime bo: i32) []const u8 {
+    var t: []const u8 = r8End(nc, se, he, -1, wo, bo);
+    for (0..8) |k| t = t ++ r8Inner(nc, si, hi, k) ++ r8End(nc, se, he, @intCast(k), wo, bo);
     return t;
 }
 
-const r8x4_asm = blk: {
+/// H50: sütun sayısı nc (1..4) için aynı çekirdek; kuyruk sütunları derleyici yoluna düşmez.
+fn r8Asm(comptime nc: usize) []const u8 {
     @setEvalBranchQuota(400000);
-    var t: []const u8 =
-        \\ vxorps %%ymm8, %%ymm8, %%ymm8
-        \\ vxorps %%ymm9, %%ymm9, %%ymm9
-        \\ vxorps %%ymm10, %%ymm10, %%ymm10
-        \\ vxorps %%ymm11, %%ymm11, %%ymm11
-        \\
-    ;
-    for (0..8) |k| t = t ++ r8Inner(r8_SA, 0, k);
+    var t: []const u8 = "";
+    for (0..nc) |c| t = t ++ std.fmt.comptimePrint("vxorps %%ymm{0d}, %%ymm{0d}, %%ymm{0d}\n", .{8 + c});
+    for (0..8) |k| t = t ++ r8Inner(nc, r8_SA, 0, k);
     t = t ++ "dec %[cnt]\njz 2f\n.p2align 4\n1:\n";
-    t = t ++ r8Block(r8_SB, 1, r8_SA, 0, 0, 0);
+    t = t ++ r8Block(nc, r8_SB, 1, r8_SA, 0, 0, 0);
     t = t ++ "add $68, %[b0]\nadd $68, %[b1]\nadd $68, %[b2]\nadd $68, %[b3]\nadd $608, %[w]\n";
-    t = t ++ r8Block(r8_SA, 0, r8_SB, 1, -608, -68);
+    t = t ++ r8Block(nc, r8_SA, 0, r8_SB, 1, -608, -68);
     t = t ++ "dec %[cnt]\njnz 1b\n2:\n";
-    t = t ++ r8Block(r8_SB, 1, r8_SA, 0, 0, 0);
-    t = t ++ r8End(r8_SB, 1, -1, 0, 0);
-    for (0..8) |p| t = t ++ r8End(r8_SB, 1, p, 0, 0);
-    t = t ++
-        \\ vmovups %%ymm8, 0x00(%[cv])
-        \\ vmovups %%ymm9, 0x20(%[cv])
-        \\ vmovups %%ymm10, 0x40(%[cv])
-        \\ vmovups %%ymm11, 0x60(%[cv])
-        \\
-    ;
-    break :blk t;
-};
+    t = t ++ r8Block(nc, r8_SB, 1, r8_SA, 0, 0, 0);
+    t = t ++ r8End(nc, r8_SB, 1, -1, 0, 0);
+    for (0..8) |p| t = t ++ r8End(nc, r8_SB, 1, p, 0, 0);
+    for (0..nc) |c| t = t ++ std.fmt.comptimePrint("vmovups %%ymm{d}, {d}(%[cv])\n", .{ 8 + c, 32 * c });
+    return t;
+}
 
 /// 8 satırlık R8 grubu (w) × 4 keyfi sütun (quantR8 aktivasyonu) → cv[c][r]. nb çift olmalı.
 pub fn r8x4(w0: [*]const u8, b: [4][*]const q.BlockQ80, nb: usize, cv: *align(32) [4]F8) void {
+    r8xN(4, w0, b, nb, cv);
+}
+
+/// İlk nc sütun hesaplanır (b[nc..] kullanılmaz), cv[0..nc] yazılır.
+pub fn r8xN(comptime nc: usize, w0: [*]const u8, b: [4][*]const q.BlockQ80, nb: usize, cv: *align(32) [4]F8) void {
     var w = w0;
     var b0 = b[0];
     var b1 = b[1];
     var b2 = b[2];
     var b3 = b[3];
     var cnt = nb / 2;
-    asm volatile (r8x4_asm
+    asm volatile (r8Asm(nc)
         : [w] "+r" (w),
           [b0] "+r" (b0),
           [b1] "+r" (b1),
@@ -616,16 +612,29 @@ pub const GemmR8 = struct {
                     self.tileAsm(g, j);
                 }
             }
-            while (j + R8_NC <= n) : (j += R8_NC) self.tile(R8_NC, g, j);
-            while (j < n) : (j += 1) self.tile(1, g, j);
+            if (R8_ASM) switch (n - j) {
+                1 => self.tileAsmN(1, g, j),
+                2 => self.tileAsmN(2, g, j),
+                3 => self.tileAsmN(3, g, j),
+                else => {},
+            } else {
+                while (j + R8_NC <= n) : (j += R8_NC) self.tile(R8_NC, g, j);
+                while (j < n) : (j += 1) self.tile(1, g, j);
+            }
         }
     }
 
     fn tileAsm(self: *const GemmR8, g: usize, j0: usize) void {
+        self.tileAsmN(4, g, j0);
+    }
+
+    inline fn tileAsmN(self: *const GemmR8, comptime nc: usize, g: usize, j0: usize) void {
         var cv: [4]F8 align(32) = undefined;
         const b0 = self.b + self.ldb * j0;
-        r8x4(self.a + g * self.nb * R8_BLOCK, .{ b0, b0 + self.ldb, b0 + 2 * self.ldb, b0 + 3 * self.ldb }, self.nb, &cv);
-        inline for (0..4) |c| avx.storeF(self.c + self.ldc * (j0 + c) + g * 8, cv[c]);
+        var bs: [4][*]const q.BlockQ80 = @splat(b0);
+        inline for (1..nc) |c| bs[c] = b0 + c * self.ldb;
+        r8xN(nc, self.a + g * self.nb * R8_BLOCK, bs, self.nb, &cv);
+        inline for (0..nc) |c| avx.storeF(self.c + self.ldc * (j0 + c) + g * 8, cv[c]);
     }
 
     inline fn tile(self: *const GemmR8, comptime NC: usize, g: usize, j0: usize) void {
