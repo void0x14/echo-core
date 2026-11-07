@@ -241,3 +241,22 @@ Gemm'e giren ağırlık: 518.1M parametre, hepsi Q8_0 (token_embd 254.3M ayrı, 
 - (b) Çürütülen: H19.
 - Fizik hesabı: FP0 %90'a çıkarılsa bile çekirdek ~1.25x hızlanır → tur 35 ms → ~29 ms → ~275 tok/s (taslak kusursuz, alpha=1). Bu CPU'da, Q8_0'ın tam bedeli ödenirken (P3) 300 tok/s FP0 borusunun sınırının üstünde.
 - (c) Sıradaki tek adım: kullanıcının kararı gereken nokta — P3 ("fiyatı her zaman ödersin") korunursa bu CPU'da 300'ün önünde fiziksel duvar var. Tek kalan kaldıraç ödenen fiyatı değiştirmek (ör. çarpma başına FP0 işini azaltan farklı sayı biçimi), bu da P3'e dokunuyor.
+
+## Tur 10 — çekirdek dışı payın dökümü (saf batch 8, perf, eski=güncel kod)
+
+| Kalem | Pay |
+|---|---:|
+| `gemm4xN` (Q8 çekirdek) | %78.1 |
+| Bariyer/spin (`atomic.zig:356`, `pool.zig:90`, `atomic.zig:21`) | %4.7 |
+| `lmSearch` (son token) | %2.4 |
+| Diğer vektör işlemleri (GDN, norm, conv; dağınık, her satır <%1) | ~%10 |
+| `flashOneChunk` + `quantizeRowQ80` + `rmsNorm` | %2.2 |
+
+Hesap (tur 35 ms, çekirdek ~27 ms, kalan ~8 ms):
+- Çekirdek FP0 %90 (1.25x) + spin sıfır + LM head sıfır → 21.6 + 8 × (1 − 0.32) ≈ 27.0 ms → **~296 tok/s**, alpha=1 ve taslaksız adım sıfır varsayımıyla.
+- Gerçek akışta taslaksız adımlar (H18 ile tekrar başına ~4) ve %2 kaçırma var → altında kalır.
+
+### Tur 10 sonucu
+- (a) Kanıtlanan: çekirdek dışı payda tek büyük kalem yok; en büyüğü spin (%4.7). Tam Q8_0 bedeliyle (P3) bu CPU'da en iyimser tavan ~296 tok/s.
+- (b) Çürütülen: "kalan 8 ms yarıya iner" varsayımı (dağınık, tek hedef yok).
+- (c) Sıradaki tek adım: P3 kararına bağlı. P3 korunursa 300 bu CPU'nun tamsayı çarpma borusunun üstünde kalıyor; korunmazsa ödenen fiyatı (sayı biçimi) değiştirmek gerekir.
