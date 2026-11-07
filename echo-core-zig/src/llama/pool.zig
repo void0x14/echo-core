@@ -25,6 +25,8 @@ pub const Pool = struct {
     /// H47: thread başına bitişik iş aralığı (lo | hi << 32); sahibi baştan, hırsız sondan alır.
     /// H62: iki küme; bir fazın sonunda sonraki fazın aralıkları diğer kümede kurulabilir (ABA yok).
     slots: [2][MAX_T]Slot = @splat(@splat(.{})),
+    /// H66: parçanın biten token yarısı sayısı (son yarıyı bitiren parça sonu işlemini yapar)
+    part_cnt: [1024]std.atomic.Value(u32) = @splat(.init(0)),
 
     pub fn init(allocator: std.mem.Allocator, n_threads: u32) !*Pool {
         const self = try allocator.create(Pool);

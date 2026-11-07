@@ -743,15 +743,20 @@ pub const GemmR8 = struct {
     }
 
     pub fn chunk(self: *const GemmR8, cb: usize, m: usize, n: usize) void {
-        if (self.r16) return self.chunk16(cb, m, n);
+        self.chunkCols(cb, m, 0, n);
+    }
+
+    /// H66: parçanın yalnız [j0, j1) sütunları (token aralığı); j0 4'ün katı.
+    pub fn chunkCols(self: *const GemmR8, cb: usize, m: usize, j0: usize, n: usize) void {
+        if (self.r16) return self.chunk16(cb, m, j0, n);
         const groups = m / 8;
         const g0 = cb * GB;
         const g1 = @min(g0 + GB, groups);
         // H45: ağırlıklar DRAM'de (tur başı ~580 MB); g+1'in satırları g'nin karolarına yayılarak L2'ye çekilir.
         const glen = self.nb * R8_BLOCK;
-        const per = (glen / 64 + n / 4) / @max(n / 4, 1) + 1;
+        const per = (glen / 64 + (n - j0) / 4) / @max((n - j0) / 4, 1) + 1;
         for (g0..g1) |g| {
-            var j: usize = 0;
+            var j: usize = j0;
             var pf: usize = 0;
             const nxt = self.a + (g + 1) * glen;
             if (R8_ASM) {
@@ -776,14 +781,14 @@ pub const GemmR8 = struct {
     }
 
     /// R16: 16 satırlık grup, iş birimi 2 grup (R8 ile aynı 32 satır).
-    fn chunk16(self: *const GemmR8, cb: usize, m: usize, n: usize) void {
+    fn chunk16(self: *const GemmR8, cb: usize, m: usize, j0: usize, n: usize) void {
         const groups = m / 16;
         const g0 = cb * (GB / 2);
         const g1 = @min(g0 + GB / 2, groups);
         const glen = self.nb * R16_BLOCK;
-        const per = (glen / 64 + n / 4) / @max(n / 4, 1) + 1;
+        const per = (glen / 64 + (n - j0) / 4) / @max((n - j0) / 4, 1) + 1;
         for (g0..g1) |g| {
-            var j: usize = 0;
+            var j: usize = j0;
             var pf: usize = 0;
             const nxt = self.a + (g + 1) * glen;
             while (j + 4 <= n) : (j += 4) {

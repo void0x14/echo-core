@@ -258,6 +258,13 @@ pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usiz
 
 pub const GemmRows = sgemm.GemmR8.GB * 8;
 
+/// H66: r8Run/FFN iş birimi = (32 satırlık parça, token yarısı): faz sonu kuyruğu yarıya iner,
+/// down'da yarının aktivasyonları L2'ye sığar.
+pub const SPLIT = 2;
+inline fn partCols(n: usize, part: usize) [2]usize {
+    return .{ @min(n, (part * n / SPLIT + 3) / 4 * 4), @min(n, ((part + 1) * n / SPLIT + 3) / 4 * 4) };
+}
+
 /// H58: girdi üretici fazda satır satır nicemlenebilir mi (hepsi R8, aynı k).
 pub fn r8Ok(mats: []const Mat) bool {
     const k = mats[0].k;
@@ -274,7 +281,7 @@ pub inline fn r8Row(p: *const Params, x: [*]const f32, t: usize, k: usize) void 
 pub fn r8Pre(p: *const Params, mats: []const Mat) void {
     var total: usize = 0;
     for (mats) |a| total += sgemm.GemmR8.chunks(a.m);
-    p.pool.rangeInit(p.ith, total);
+    p.pool.rangeInit(p.ith, total * SPLIT);
 }
 
 /// Girdi wdata'da hazırsa (r8Row + r8Pre + bariyer) yalnız GEMM; değilse mulMatMulti.
@@ -289,7 +296,7 @@ pub fn ffnOk(gate: Mat, up: Mat, down: Mat) bool {
 }
 /// Üretici bariyerinden önce (ffnGateUp iş birimleri: gate.m / 32).
 pub fn ffnPre(p: *const Params, gate: Mat) void {
-    p.pool.rangeInit(p.ith, sgemm.GemmR8.chunks(gate.m));
+    p.pool.rangeInit(p.ith, sgemm.GemmR8.chunks(gate.m) * SPLIT);
 }
 /// H62: aynı 32 kanalın gate ve up parçası tek iş biriminde; ardından swiglu + down girdisi nicemleme
 /// (32 kanal = bir Q8 bloğu) wd2'ye. Ayrı swiglu fazı ve bariyeri yok. Sonunda down aralıkları küme 1'de kurulur.
@@ -301,17 +308,19 @@ pub fn ffnGateUp(p: *const Params, gate: Mat, up: Mat, down: Mat, n: usize, yg: 
     const b: [*]const q.BlockQ80 = @ptrCast(@alignCast(p.wdata));
     const gg = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = gate.rep.?, .b = b, .ldb = rs / 34, .c = yg, .ldc = nff, .ith = p.ith, .r16 = gate.r16 };
     const gu = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = up.rep.?, .b = b, .ldb = rs / 34, .c = yu, .ldc = nff, .ith = p.ith, .r16 = up.r16 };
-    while (p.pool.rangeNext(p.ith)) |c| {
-        gg.chunk(c, nff, n);
-        gu.chunk(c, nff, n);
+    while (p.pool.rangeNext(p.ith)) |u| {
+        const c = u / SPLIT;
+        const cols = partCols(n, u % SPLIT);
+        gg.chunkCols(c, nff, cols[0], cols[1]);
+        gu.chunkCols(c, nff, cols[0], cols[1]);
         const r0 = c * GemmRows;
-        for (0..n) |t| {
+        for (cols[0]..cols[1]) |t| {
             var sw: [GemmRows]f32 align(32) = undefined;
             vec.swiglu(GemmRows, &sw, yg + t * nff + r0, yu + t * nff + r0);
             sgemm.quantR8(&sw, @ptrCast(@alignCast(wd2 + t * drs + c * 34)), GemmRows);
         }
     }
-    p.pool.rangeInitS(1, p.ith, sgemm.GemmR8.chunks(down.m));
+    p.pool.rangeInitS(1, p.ith, sgemm.GemmR8.chunks(down.m) * SPLIT);
     p.barrier();
     r8Run(p, &.{down}, n, &.{yd}, {}, wd2, 1);
 }
@@ -320,20 +329,31 @@ pub fn ffnGateUp(p: *const Params, gate: Mat, up: Mat, down: Mat, n: usize, yg: 
 /// tüm tokenları için çalışır (satır yerel son işlemler ayrı faz/bariyer istemez).
 pub fn mulMatMultiQE(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx: anytype) void {
     std.debug.assert(r8Ok(mats));
+    var tot: usize = 0;
+    for (mats) |a| tot += sgemm.GemmR8.chunks(a.m);
+    if (tot > p.pool.part_cnt.len) @panic("part_cnt küçük");
     r8Run(p, mats, n, ys, ctx, p.wdata, 0);
 }
 
 fn r8Run(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx: anytype, wdata: [*]u8, set: u1) void {
     const k = mats[0].k;
     const row_size = dotRowSize(.q8_0, k);
-    while (p.pool.rangeNextS(set, p.ith)) |cur| {
-        var c: usize = cur;
+    while (p.pool.rangeNextS(set, p.ith)) |u| {
+        var c: usize = u / SPLIT;
+        const cols = partCols(n, u % SPLIT);
         for (mats, ys, 0..) |a, y, mi| {
             const nc = sgemm.GemmR8.chunks(a.m);
             if (c < nc) {
                 const g = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith, .r16 = a.r16 };
-                g.chunk(c, a.m, n);
-                if (@TypeOf(ctx) != void) ctx.epi(mi, c * GemmRows, @min(c * GemmRows + GemmRows, a.m));
+                g.chunkCols(c, a.m, cols[0], cols[1]);
+                if (@TypeOf(ctx) != void) {
+                    // parça sonu işlemi tüm tokenları ister: son yarıyı bitiren yapar
+                    const pc = &p.pool.part_cnt[u / SPLIT];
+                    if (pc.fetchAdd(1, .acq_rel) + 1 == SPLIT) {
+                        pc.store(0, .monotonic);
+                        ctx.epi(mi, c * GemmRows, @min(c * GemmRows + GemmRows, a.m));
+                    }
+                }
                 break;
             }
             c -= nc;
