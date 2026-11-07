@@ -387,3 +387,8 @@ Bench üretimi 5 tokenlik döngüye giriyor; taslaklar %100 kabul (360/360). Sü
 | H46 | Bariyerde 2048 spin'de bir `sched_yield` | Önalınan thread'imiz çabuk döner | 6 çift | Ortanca 509.5 vs 500.5 (gürültü içinde). **Yaşadı (nötr-pozitif)** |
 | — | Gerçek koşuda çekirdek döngü/çift, thread sayısına göre (−r 2 ile −r 1 farkı) | Kayıp çok thread çekişmesinden | 2 koşu | t=1: 1.37 (mikro kadar), t=3: 1.73, t=6: 1.78. GB 8/16: çekirdek 14.7/14.0G vs GB4 15.4G ama GB16 kuyrukta 389. Bitişik akış önemli |
 | H47 | İş çalma: her thread kendi bitişik R8 aralığını baştan işler (paketli lo\|hi atomik, CAS), bitince diğerlerinin aralığının sonundan çalar | Donanım önden getiricisi bitişik akışla çalışır, dengesizlik çalmayla kapanır | 3 tur + çekirdek döngüsü + bayt | 6/6 bayt aynı. tg128 517.6/514.0/513.5 vs 479.0/484.7/416.5; çekirdek 13.7–14.0G vs 14.8–16.3G (−%7). GB1 benzer ama bir aykırı (330). **Yaşadı** |
+
+### Tur 19 sonucu
+- (a) Kanıtlanan: README TG 500 geçildi (kirli ortam, Chrome açık; varsayılan tg128 8 koşu ortanca 506.7, aralık 475–541; tg32 409–432).
+- (b) Çürütülen: H37, H42 (i16 şeridi 16 çarpımdan fazlasını taşıyamıyor), nprobe düşürme, GB 1/2, SMT (t 8/12), önden getirme mesafesi 2.
+- (c) Sıradaki tek adım: 750. Çekirdek gerçek koşuda hâlâ ~1.6–1.7 döngü/çift (tek thread 1.37); kalan fark çok çekirdek bellek çekişmesi + kirli ortamda SMT kardeş paylaşımı.
