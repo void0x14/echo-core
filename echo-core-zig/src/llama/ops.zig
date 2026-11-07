@@ -251,10 +251,40 @@ pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usiz
             sgemm.quantR8(x + row * k + start * 32, @ptrCast(@alignCast(dst)), (end - start) * 32);
         }
     }
+    r8Pre(p, mats);
+    p.barrier();
+    r8Run(p, mats, n, ys);
+}
+
+/// H58: girdi üretici fazda satır satır nicemlenebilir mi (hepsi R8, aynı k).
+pub fn r8Ok(mats: []const Mat) bool {
+    const k = mats[0].k;
+    for (mats) |a| if (a.rep == null or a.k != k or a.type != .q8_0) return false;
+    return true;
+}
+
+/// Üretici: x satırını (k eleman) p.wdata'nın t. satırına quantR8 ile yazar.
+pub inline fn r8Row(p: *const Params, x: [*]const f32, t: usize, k: usize) void {
+    sgemm.quantR8(x, @ptrCast(@alignCast(p.wdata + t * dotRowSize(.q8_0, k))), k);
+}
+
+/// Üretici bariyerinden önce: iş aralıkları.
+pub fn r8Pre(p: *const Params, mats: []const Mat) void {
     var total: usize = 0;
     for (mats) |a| total += sgemm.GemmR8.chunks(a.m);
     p.pool.rangeInit(p.ith, total);
-    p.barrier();
+}
+
+/// Girdi wdata'da hazırsa (r8Row + r8Pre + bariyer) yalnız GEMM; değilse mulMatMulti.
+pub fn mulMatMultiQ(p: *const Params, mats: []const Mat, x: [*]const f32, n: usize, ys: []const [*]f32) void {
+    if (!r8Ok(mats)) return mulMatMulti(p, mats, x, n, ys);
+    r8Run(p, mats, n, ys);
+}
+
+fn r8Run(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32) void {
+    const k = mats[0].k;
+    const row_size = dotRowSize(.q8_0, k);
+    const wdata = p.wdata;
     while (p.pool.rangeNext(p.ith)) |cur| {
         var c: usize = cur;
         for (mats, ys) |a, y| {
@@ -325,11 +355,34 @@ inline fn rmsRow(x: [*]const f32, y: [*]f32, nc: usize, eps: f32, w: ?[*]const f
 }
 
 /// H57: z = x + y ve out = rmsNorm(z) * w aynı satır geçişinde (aradaki bariyer kalkar).
-pub fn addRmsNorm(p: *const Params, nc: usize, nr: usize, z: [*]f32, x: [*]const f32, y: [*]const f32, out: [*]f32, eps: f32, w: [*]const f32) void {
+/// H58: q ise out satırı ayrıca p.wdata'ya R8 nicemlenir. x null ise toplama yok (z = girdi).
+pub fn addRmsNorm(p: *const Params, nc: usize, nr: usize, z: [*]f32, x: ?[*]const f32, y: [*]const f32, out: [*]f32, eps: f32, w: [*]const f32, rq: bool) void {
     const r = p.range(nr);
     for (r[0]..r[1]) |i| {
-        vec.addF32(nc, z + i * nc, x + i * nc, y + i * nc);
+        if (x) |xp| vec.addF32(nc, z + i * nc, xp + i * nc, y + i * nc);
         rmsRow(z + i * nc, out + i * nc, nc, eps, w, 1.0);
+        if (rq) r8Row(p, out + i * nc, i, nc);
+    }
+}
+
+/// H58: swiglu + R8 nicemleme (down girdisi).
+pub fn swigluQ(p: *const Params, nc: usize, nr: usize, y: [*]f32, x: [*]const f32, g: [*]const f32, rq: bool) void {
+    const r = p.range(nr);
+    for (r[0]..r[1]) |i| {
+        vec.swiglu(nc, y + i * nc, x + i * nc, g + i * nc);
+        if (rq) r8Row(p, y + i * nc, i, nc);
+    }
+}
+
+/// H58: build_norm_gated (başlık başına rmsNorm*w) + mul z + R8 nicemleme, token satırı başına tek geçiş.
+pub fn gatedNormQ(p: *const Params, s: usize, h_n: usize, n_t: usize, x: [*]f32, z: [*]const f32, eps: f32, w: [*]const f32, rq: bool) void {
+    const d = s * h_n;
+    const r = p.range(n_t);
+    for (r[0]..r[1]) |t| {
+        const row = x + t * d;
+        for (0..h_n) |h| rmsRow(row + h * s, row + h * s, s, eps, w, 1.0);
+        for (0..h_n) |h| vec.mulF32(s, row + h * s, row + h * s, z + t * d + h * s);
+        if (rq) r8Row(p, row, t, d);
     }
 }
 
@@ -372,7 +425,8 @@ pub fn sigmoidInPlace(p: *const Params, nc: usize, nr: usize, x: [*]f32) void {
     }
 }
 /// attn_gated = attn * sigmoid(gate); gate Qcur_full'un 2*head_dim adımlı ikinci yarısı.
-pub fn gateAttn(p: *const Params, n_t: usize, heads: usize, dim: usize, attn: [*]f32, qfull: [*]const f32) void {
+/// H58: q ise satır wo girdisi olarak R8 nicemlenir.
+pub fn gateAttn(p: *const Params, n_t: usize, heads: usize, dim: usize, attn: [*]f32, qfull: [*]const f32, rq: bool) void {
     const r = p.range(n_t);
     for (r[0]..r[1]) |t| {
         for (0..heads) |h| {
@@ -380,6 +434,7 @@ pub fn gateAttn(p: *const Params, n_t: usize, heads: usize, dim: usize, attn: [*
             const g = qfull + t * heads * dim * 2 + h * dim * 2 + dim;
             for (0..dim) |d| a[d] *= sigmoidF(g[d]);
         }
+        if (rq) r8Row(p, attn + t * heads * dim, t, heads * dim);
     }
 }
 

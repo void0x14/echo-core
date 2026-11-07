@@ -615,7 +615,10 @@ pub const Context = struct {
         const r = p.range(n_t);
         for (r[0]..r[1]) |t| embedRow(m, self.tokens[t], self.b_inp.ptr + t * m.n_embd);
         p.barrier();
-        ops.rmsNorm(p, self.b_inp.ptr, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, n_t, 1, m.eps, m.layers[0].attn_norm, 1.0);
+        // H58: matmul girdileri üretici fazda R8 nicemlenir (nicemleme fazı ve bariyeri yok)
+        const q0 = inOk(&m.layers[0]);
+        ops.addRmsNorm(p, m.n_embd, n_t, self.b_inp.ptr, null, self.b_inp.ptr, self.b_norm.ptr, m.eps, m.layers[0].attn_norm, q0);
+        if (q0) inPre(p, &m.layers[0]);
         p.barrier();
 
         for (m.layers, 0..) |*l, il| {
@@ -625,19 +628,25 @@ pub const Context = struct {
                 self.layerAttn(p, l, il);
             }
             // attn_residual + attn_post_norm (H57: tek geçiş)
-            ops.addRmsNorm(p, m.n_embd, n_t, self.b_resid.ptr, self.b_attn.ptr, self.b_inp.ptr, self.b_norm.ptr, m.eps, l.post_norm);
+            const ffn_in = [_]ops.Mat{ l.ffn_gate, l.ffn_up };
+            const qf = ops.r8Ok(&ffn_in);
+            ops.addRmsNorm(p, m.n_embd, n_t, self.b_resid.ptr, self.b_attn.ptr, self.b_inp.ptr, self.b_norm.ptr, m.eps, l.post_norm, qf);
+            if (qf) ops.r8Pre(p, &ffn_in);
             p.barrier();
             // build_ffn(LLM_FFN_SILU, LLM_FFN_PAR)
-            ops.mulMatMulti(p, &.{ l.ffn_gate, l.ffn_up }, self.b_norm.ptr, n_t, &.{ self.b_ffn_g.ptr, self.b_ffn_u.ptr });
-            ops.swiglu(p, m.n_ff, n_t, self.b_ffn_g.ptr, self.b_ffn_g.ptr, self.b_ffn_u.ptr);
+            ops.mulMatMultiQ(p, &ffn_in, self.b_norm.ptr, n_t, &.{ self.b_ffn_g.ptr, self.b_ffn_u.ptr });
+            const qd = ops.r8Ok(&.{l.ffn_down});
+            ops.swigluQ(p, m.n_ff, n_t, self.b_ffn_g.ptr, self.b_ffn_g.ptr, self.b_ffn_u.ptr, qd);
+            if (qd) ops.r8Pre(p, &.{l.ffn_down});
             p.barrier();
-            ops.mulMat(p, l.ffn_down, self.b_ffn_g.ptr, n_t, self.b_attn.ptr);
-            p.barrier();
+            ops.mulMatMultiQ(p, &.{l.ffn_down}, self.b_ffn_g.ptr, n_t, &.{self.b_attn.ptr});
             // l_out (+ sonraki katmanın attn_norm'u)
-            if (il + 1 < m.layers.len)
-                ops.addRmsNorm(p, m.n_embd, n_t, self.b_inp.ptr, self.b_attn.ptr, self.b_resid.ptr, self.b_norm.ptr, m.eps, m.layers[il + 1].attn_norm)
-            else
-                ops.add(p, m.n_embd, n_t, self.b_inp.ptr, self.b_attn.ptr, self.b_resid.ptr);
+            if (il + 1 < m.layers.len) {
+                const nl = &m.layers[il + 1];
+                const qn = inOk(nl);
+                ops.addRmsNorm(p, m.n_embd, n_t, self.b_inp.ptr, self.b_attn.ptr, self.b_resid.ptr, self.b_norm.ptr, m.eps, nl.attn_norm, qn);
+                if (qn) inPre(p, nl);
+            } else ops.add(p, m.n_embd, n_t, self.b_inp.ptr, self.b_attn.ptr, self.b_resid.ptr);
             p.barrier();
         }
 
@@ -723,7 +732,7 @@ pub const Context = struct {
         const tr_recr: ?[*]f32 = if (tracing) self.trace_recr[il].ptr else null;
 
         // H22: qkv, alpha, beta, z aynı girdiden tek geçişte; ardından bağımsız eleman işlemleri tek fazda.
-        ops.mulMatMulti(p, &.{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate }, self.b_norm.ptr, n_t, &.{ self.b_qkv.ptr, self.b_gate.ptr, self.b_beta.ptr, self.b_z.ptr });
+        ops.mulMatMultiQ(p, &.{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate }, self.b_norm.ptr, n_t, &.{ self.b_qkv.ptr, self.b_gate.ptr, self.b_beta.ptr, self.b_z.ptr });
         // CONCAT + CPY(conv_state_last)
         if (m.d_conv == 4) {
             // H35: concat + conv + silu tek fazda
@@ -756,12 +765,12 @@ pub const Context = struct {
         ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, vh, s, n_t * s, self.b_gate.ptr, self.b_beta.ptr, if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
         p.barrier();
         // build_norm_gated
-        ops.rmsNorm(p, self.b_gdn.ptr, s, m.d_inner, self.b_gdn.ptr, s, m.d_inner, s, h_n, n_t, m.eps, l.ssm_norm, 1.0);
+        // + mul z + ssm_out girdisi nicemleme (H58: tek faz)
+        const qo = ops.r8Ok(&.{l.ssm_out});
+        ops.gatedNormQ(p, s, h_n, n_t, self.b_gdn.ptr, self.b_z.ptr, m.eps, l.ssm_norm, qo);
+        if (qo) ops.r8Pre(p, &.{l.ssm_out});
         p.barrier();
-        ops.mul(p, s, h_n * n_t, self.b_gdn.ptr, self.b_gdn.ptr, self.b_z.ptr);
-        p.barrier();
-        ops.mulMat(p, l.ssm_out, self.b_gdn.ptr, n_t, self.b_attn.ptr);
-        p.barrier();
+        ops.mulMatMultiQ(p, &.{l.ssm_out}, self.b_gdn.ptr, n_t, &.{self.b_attn.ptr});
     }
 
     /// llama_model_qwen35::graph::build_layer_attn + build_attn_mha (flash attention)
@@ -771,7 +780,7 @@ pub const Context = struct {
         const dh = m.head_dim;
         const kv_row = dh * m.n_head_kv;
 
-        ops.mulMatMulti(p, &.{ l.wq, l.wv, l.wk }, self.b_norm.ptr, n_t, &.{ self.b_qfull.ptr, self.b_vv.ptr, self.b_kk.ptr });
+        ops.mulMatMultiQ(p, &.{ l.wq, l.wv, l.wk }, self.b_norm.ptr, n_t, &.{ self.b_qfull.ptr, self.b_vv.ptr, self.b_kk.ptr });
         // Qcur = view(Qcur_full) -> build_norm -> rope. q tamponu: b_gdn (head_dim*n_head*n_t)
         ops.rmsNorm(p, self.b_qfull.ptr, dh * 2, dh * m.n_head * 2, self.b_gdn.ptr, dh, dh * m.n_head, dh, m.n_head, n_t, m.eps, l.q_norm, 1.0);
         p.barrier();
@@ -803,9 +812,17 @@ pub const Context = struct {
         ops.flashAttn(p, &args);
         p.barrier();
         // CONT(gate) + SIGMOID + MUL
-        ops.gateAttn(p, n_t, m.n_head, dh, self.b_q.ptr, self.b_qfull.ptr);
+        const qw = ops.r8Ok(&.{l.wo});
+        ops.gateAttn(p, n_t, m.n_head, dh, self.b_q.ptr, self.b_qfull.ptr, qw);
+        if (qw) ops.r8Pre(p, &.{l.wo});
         p.barrier();
-        ops.mulMat(p, l.wo, self.b_q.ptr, n_t, self.b_attn.ptr);
-        p.barrier();
+        ops.mulMatMultiQ(p, &.{l.wo}, self.b_q.ptr, n_t, &.{self.b_attn.ptr});
+    }
+
+    fn inOk(l: *const Layer) bool {
+        return if (l.recr) ops.r8Ok(&.{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate }) else ops.r8Ok(&.{ l.wq, l.wv, l.wk });
+    }
+    fn inPre(p: *const Params, l: *const Layer) void {
+        if (l.recr) ops.r8Pre(p, &.{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate }) else ops.r8Pre(p, &.{ l.wq, l.wv, l.wk });
     }
 };
