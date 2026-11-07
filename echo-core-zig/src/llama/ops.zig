@@ -504,18 +504,18 @@ inline fn gdnRows4(s_v: usize, j0: usize, j1: usize, sr: [*]const f32, st: [*]f3
 
 /// H44: kalem = (başlık, 32 satır), tüm tokenlar; satırlar L1'de. Tembel bozunma: saklanan satır = gerçek / c,
 /// güncelleme row += (δ/c')·k tek FMA; çıktı dot'u ve sonraki tokenın k-dot'u aynı geçişte. Sonda c ile çarpılır.
-fn gdnItem(s_v: usize, j0: usize, n_t: usize, h_n: usize, iv1: usize, q_in: [*]const f32, k_in: [*]const f32, v_in: [*]const f32, v_stride: usize, g: [*]const f32, beta: [*]const f32, src0: [*]const f32, st: [*]f32, out: [*]f32, scale: f32) void {
+fn gdnItem(s_v: usize, j0: usize, n_t: usize, h_n: usize, iv1: usize, q_in: [*]const f32, k_in: [*]const f32, v_in: [*]const f32, v_stride: usize, v_hs: usize, g: [*]const f32, beta: [*]const f32, src0: [*]const f32, st: [*]f32, out: [*]f32, scale: f32) void {
     const R = 32;
     var d: [R]f32 = undefined;
-    const k0 = k_in + iv1 * s_v;
+    const k0 = k_in + iv1 * n_t * s_v;
     for (0..R) |r| d[r] = vec.dotF32(s_v, src0 + (j0 + r) * s_v, k0);
     var c: f32 = 1;
     var src: [*]const f32 = src0;
     for (0..n_t) |t| {
-        const q_d = q_in + t * h_n * s_v + iv1 * s_v;
-        const k_d = k_in + t * h_n * s_v + iv1 * s_v;
-        const kn = if (t + 1 < n_t) k_in + (t + 1) * h_n * s_v + iv1 * s_v else k_d;
-        const v_d = v_in + t * v_stride + iv1 * s_v + j0;
+        const q_d = q_in + (iv1 * n_t + t) * s_v;
+        const k_d = k_in + (iv1 * n_t + t) * s_v;
+        const kn = if (t + 1 < n_t) k_d + s_v else k_d;
+        const v_d = v_in + t * v_stride + iv1 * v_hs + j0;
         const bt = beta[t * h_n + iv1];
         var cp = c * avx.expf(g[t * h_n + iv1]);
         var dl: [R]f32 = undefined;
@@ -567,6 +567,7 @@ fn gdnItem(s_v: usize, j0: usize, n_t: usize, h_n: usize, iv1: usize, q_in: [*]c
 
 /// ggml_compute_forward_gated_delta_net_f32 (K=1, GDA, n_seqs=1).
 /// Durum yerinde güncellenir: ggml'deki GET_ROWS + memcpy + CPY üçlüsü aynı sonucu verir.
+/// q_in, k_in başlık-öncelikli: [h_n][n_t][s_v] (H55).
 pub fn gatedDeltaNet(
     p: *const Params,
     s_v: usize,
@@ -576,6 +577,7 @@ pub fn gatedDeltaNet(
     k_in: [*]const f32,
     v_in: [*]const f32,
     v_stride: usize,
+    v_hs: usize,
     g: [*]const f32,
     beta: [*]const f32,
     state_in: [*]const f32,
@@ -603,14 +605,14 @@ pub fn gatedDeltaNet(
             const s_out = state + iv1 * s_v * s_v;
             const s_in0 = state_in + iv1 * s_v * s_v;
             if (rpb == 32) {
-                gdnItem(s_v, j0, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, g, beta, s_in0, s_out, out, scale);
+                gdnItem(s_v, j0, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, s_in0, s_out, out, scale);
                 continue;
             }
             var attn_data = out + iv1 * s_v;
             for (0..n_t) |t| {
-                const q_d = q_in + t * h_n * s_v + iv1 * s_v;
-                const k_d = k_in + t * h_n * s_v + iv1 * s_v;
-                const v_d = v_in + t * v_stride + iv1 * s_v;
+                const q_d = q_in + (iv1 * n_t + t) * s_v;
+                const k_d = k_in + (iv1 * n_t + t) * s_v;
+                const v_d = v_in + t * v_stride + iv1 * v_hs;
                 const beta_val = beta[t * h_n + iv1];
                 // satır başına tek geçiş: satır L1'de kalır, 64 KB durum üç kez dolaşılmaz
                 const s_src = if (t == 0) s_in0 else s_out;

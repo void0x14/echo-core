@@ -738,11 +738,20 @@ pub const Context = struct {
             p.barrier();
         }
         // build_gdn_l2_norm(q), (k)
-        ops.rmsNorm(p, self.b_conv_out.ptr, s, conv_dim, self.b_q.ptr, s, m.d_inner, s, m.n_group, n_t, eps_l2, null, l2);
-        ops.rmsNorm(p, self.b_conv_out.ptr + key_dim, s, conv_dim, self.b_k.ptr, s, m.d_inner, s, m.n_group, n_t, eps_l2, null, l2);
+        // H55: q/k başlık-öncelikli [başlık][token][s]: GDN kalemi ardışık okur (8 KB adım CCX'ler arası gecikmeye takılıyordu)
+        ops.rmsNorm(p, self.b_conv_out.ptr, s, conv_dim, self.b_q.ptr, n_t * s, s, s, m.n_group, n_t, eps_l2, null, l2);
+        ops.rmsNorm(p, self.b_conv_out.ptr + key_dim, s, conv_dim, self.b_k.ptr, n_t * s, s, s, m.n_group, n_t, eps_l2, null, l2);
+        // v da başlık-öncelikli (b_qkv conv'dan sonra boş)
+        const vh = self.b_qkv.ptr;
+        var vi: usize = p.ith;
+        while (vi < n_t * h_n) : (vi += p.nth) {
+            const t = vi / h_n;
+            const hh = vi % h_n;
+            @memcpy((vh + (hh * n_t + t) * s)[0..s], (self.b_conv_out.ptr + t * conv_dim + 2 * key_dim + hh * s)[0..s]);
+        }
         p.barrier();
         // GATED_DELTA_NET (+ CPY new_state: yerinde)
-        ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, self.b_conv_out.ptr + 2 * key_dim, conv_dim, self.b_gate.ptr, self.b_beta.ptr, if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
+        ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, vh, s, n_t * s, self.b_gate.ptr, self.b_beta.ptr, if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
         p.barrier();
         // build_norm_gated
         ops.rmsNorm(p, self.b_gdn.ptr, s, m.d_inner, self.b_gdn.ptr, s, m.d_inner, s, h_n, n_t, m.eps, l.ssm_norm, 1.0);
