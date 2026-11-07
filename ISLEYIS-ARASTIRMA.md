@@ -340,3 +340,15 @@ Bench üretimi 5 tokenlik döngüye giriyor; taslaklar %100 kabul (360/360). Sü
 - (a) Kanıtlanan: kirli ortamda (sakin anında) varsayılan tg128 286 tok/s; README TG 200 geçildi.
 - (b) Çürütülen: H26 (büyük kalite kaybı hızı da düşürüyor).
 - (c) Sıradaki tek adım: 300 için kalan pay ~%5; tur başı tek-token adımları (7 × T1) ve graph/spin payı.
+
+## Tur 17 — H29: hafıza + dizi başı ayracı (P6)
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| — | `--memory 1` (H18) k=32 ile | — | 3 tur | tg128 ortanca 285.8 (vs 282.9), tg32 +%45; ama kabul 26.6/32. İz: ret yalnız koşu başında (`R4/32!`, `R6/32!`): geçmiş koşular arası birleşik kaldığı için dizi başı bağlamı yanlış |
+| H29 | P6: harita kalır, her dizide geçmiş n−1 ayraçla (maxInt) yeniden başlar → dizi başı da öğrenilir. Bench ve port'ta hafıza varsayılan | Ret kalkar, tek-token adımlar yalnız ilk dizide | 3 tur; 6 istem bayt (SAT8'e karşı) | Kabul 32/32; tek-token 28 → 7 (yalnız ısınma). tg128 mem 0/1: 272.8/369.0, 249.5/334.7, 258.7/348.3; tg32 166/277. Varsayılan (r=5) tg128 359.2 / 357.9 / 356.8, tg32 279.8 / 287.2 / 286.0. 6/6 bayt aynı. **Yaşadı** |
+
+### Tur 17 sonucu
+- (a) Kanıtlanan: README TG 300 geçildi (kirli ortam, varsayılan tg128 ~357).
+- (b) Çürütülen: —
+- (c) Sıradaki tek adım: 500 barajı. Tur başı tek-token adımı kalmadı; süre artık neredeyse tamamen T32 turları (hesap-sınırlı çekirdek + graph).

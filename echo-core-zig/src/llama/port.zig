@@ -25,6 +25,8 @@ pub const Port = struct {
     grammar: bool = true,
     /// H13: doğrulamada iz yerine tur başı snapshot; tutmazsa geri dön + yeniden işle (kayıpsız).
     snap: bool = true,
+    /// H18 + H29: n-gram hafızası çağrılar arası kalır (P6); her istemde geçmiş ayraçla yeniden başlar.
+    mem: ?ngram.TokenDrafter = null,
 
     pub const BenchResult = struct {
         text: []u8,
@@ -66,6 +68,7 @@ pub const Port = struct {
             c.deinit();
         }
         if (self.lm_ix) |ix| ix.deinit(self.allocator);
+        if (self.mem) |*m| m.deinit();
         self.model.deinit();
         self.tokenizer_.deinit();
     }
@@ -204,8 +207,9 @@ pub const Port = struct {
     }
 
     fn runNgram(self: *Port, ctx: *qwen35.Context, prompt: []const u32, max_tokens: u32, all_ids: *ArrayList(u32)) !u32 {
-        var d = try ngram.TokenDrafter.init(self.allocator, 3);
-        defer d.deinit();
+        if (self.mem == null) self.mem = try ngram.TokenDrafter.init(self.allocator, 3);
+        const d = &self.mem.?;
+        try d.restart();
         for (prompt) |t| try d.add(t);
         var pending: u32 = if (ctx.lm) |s| s.token else greedy(ctx.logits);
         var buf: [32]u32 = undefined;

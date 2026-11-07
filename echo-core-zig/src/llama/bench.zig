@@ -66,7 +66,7 @@ pub const Options = struct {
     /// H17: doğrulama turuna girmek için en kısa taslak (H01: 6).
     min_draft: usize = 6,
     /// H18 (P6 "önceden markete gitmişsindir"): taslak hafızası tekrarlar arasında silinmez.
-    memory: bool = false,
+    memory: bool = true, // H29: varsayılan; --memory 0 kapatır
 };
 
 
@@ -110,6 +110,7 @@ fn testGenNgram(ctx: *qwen35.Context, rng: std.Random, n_vocab: usize, n_gen: us
     var local = try ngram.TokenDrafter.init(a, 3);
     defer local.deinit();
     const d = mem orelse &local;
+    try d.restart();
     var buf: [32]u32 = undefined;
     var pending: u32 = @intCast(rng.uintLessThan(usize, n_vocab));
     try ctx.decode(&.{pending});

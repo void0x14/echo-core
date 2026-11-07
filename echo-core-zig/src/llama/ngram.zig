@@ -132,6 +132,11 @@ pub const TokenDrafter = struct {
         for (self.hist.items[start..][0..self.n]) |t| h = mix(h, t);
         return h;
     }
+    /// H29: yeni dizi başı. Harita (hafıza) kalır; geçmiş n−1 ayraçla başlar, böylece dizi başı bağlamı da öğrenilir.
+    pub fn restart(self: *TokenDrafter) !void {
+        self.hist.clearRetainingCapacity();
+        for (1..self.n) |_| try self.hist.append(self.allocator, std.math.maxInt(u32));
+    }
     pub fn add(self: *TokenDrafter, tok: u32) !void {
         try self.hist.append(self.allocator, tok);
         const len = self.hist.items.len;
