@@ -225,6 +225,47 @@ pub fn mulMat(p: *const Params, a: Mat, x: [*]const f32, n: usize, y: [*]f32) vo
     }
 }
 
+/// H22: aynı girdiyi kullanan Q8_0_R8 matrisleri tek quantize + tek iş havuzu + tek bariyerle.
+/// Koşul sağlanmazsa sırayla mulMat (her biri sonunda bariyer).
+pub fn mulMatMulti(p: *const Params, mats: []const Mat, x: [*]const f32, n: usize, ys: []const [*]f32) void {
+    const k = mats[0].k;
+    var ok = true;
+    for (mats) |a| ok = ok and a.rep != null and a.k == k and a.type == .q8_0;
+    if (!ok) {
+        for (mats, ys) |a, y| {
+            mulMat(p, a, x, n, y);
+            p.barrier();
+        }
+        return;
+    }
+    const row_size = dotRowSize(.q8_0, k);
+    const wdata = p.wdata;
+    const start = (p.ith * k / 32) / p.nth;
+    const end = ((p.ith + 1) * k / 32) / p.nth;
+    if (end > start) {
+        for (0..n) |row| q.quantizeRowQ80(x + row * k + start * 32, @ptrCast(@alignCast(wdata + row * row_size + start * 34)), (end - start) * 32);
+    }
+    if (p.ith == 0) p.pool.chunkSet(@intCast(p.nth));
+    p.barrier();
+    var total: usize = 0;
+    for (mats) |a| total += sgemm.GemmR8.chunks(a.m);
+    var cur: i64 = @intCast(p.ith);
+    while (cur < total) {
+        var c: usize = @intCast(cur);
+        for (mats, ys) |a, y| {
+            const nc = sgemm.GemmR8.chunks(a.m);
+            if (c < nc) {
+                const g = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith };
+                g.chunk(c, a.m, n);
+                break;
+            }
+            c -= nc;
+        }
+        cur = p.pool.chunkAdd(1);
+    }
+    p.barrier();
+}
+
 /// rms_norm + mul (fused). x satırı `x_stride` adımla, y satırı `y_stride` adımla.
 /// `nrow` satır, satır uzunluğu `nc`. Satırlar round-robin bölünür (ggml: i01 = ith; += nth).
 /// `w` null değilse y = x*scale*w, `post` sonradan çarpan (gdn_l2_norm'daki scale node'u).

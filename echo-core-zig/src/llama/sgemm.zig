@@ -464,24 +464,33 @@ pub const GemmR8 = struct {
     ldc: usize,
     ith: usize,
 
+    pub const GB = 4; // 32 satır / iş parçası
+
+    pub fn chunks(m: usize) usize {
+        return (m / 8 + GB - 1) / GB;
+    }
+
     pub fn matmul(self: *const GemmR8, m: usize, n: usize) void {
-        const groups = m / 8;
-        const gb = 4; // 32 satır / iş parçası
-        const nblk = (groups + gb - 1) / gb;
+        const nblk = chunks(m);
         var cur: i64 = @intCast(self.ith);
         while (cur < nblk) {
-            const g0: usize = @as(usize, @intCast(cur)) * gb;
-            for (g0..@min(g0 + gb, groups)) |g| {
-                var j: usize = 0;
-                while (j + 4 <= n) : (j += 4) self.tile(4, g, j);
-                switch (n - j) {
-                    1 => self.tile(1, g, j),
-                    2 => self.tile(2, g, j),
-                    3 => self.tile(3, g, j),
-                    else => {},
-                }
-            }
+            self.chunk(@intCast(cur), m, n);
             cur = self.pool.chunkAdd(1);
+        }
+    }
+
+    pub fn chunk(self: *const GemmR8, cb: usize, m: usize, n: usize) void {
+        const groups = m / 8;
+        const g0 = cb * GB;
+        for (g0..@min(g0 + GB, groups)) |g| {
+            var j: usize = 0;
+            while (j + 4 <= n) : (j += 4) self.tile(4, g, j);
+            switch (n - j) {
+                1 => self.tile(1, g, j),
+                2 => self.tile(2, g, j),
+                3 => self.tile(3, g, j),
+                else => {},
+            }
         }
     }
 

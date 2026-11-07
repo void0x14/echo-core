@@ -614,10 +614,7 @@ pub const Context = struct {
             ops.rmsNorm(p, self.b_resid.ptr, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, n_t, 1, m.eps, l.post_norm, 1.0);
             p.barrier();
             // build_ffn(LLM_FFN_SILU, LLM_FFN_PAR)
-            ops.mulMat(p, l.ffn_gate, self.b_norm.ptr, n_t, self.b_ffn_g.ptr);
-            p.barrier();
-            ops.mulMat(p, l.ffn_up, self.b_norm.ptr, n_t, self.b_ffn_u.ptr);
-            p.barrier();
+            ops.mulMatMulti(p, &.{ l.ffn_gate, l.ffn_up }, self.b_norm.ptr, n_t, &.{ self.b_ffn_g.ptr, self.b_ffn_u.ptr });
             ops.swiglu(p, m.n_ff, n_t, self.b_ffn_g.ptr, self.b_ffn_g.ptr, self.b_ffn_u.ptr);
             p.barrier();
             ops.mulMat(p, l.ffn_down, self.b_ffn_g.ptr, n_t, self.b_attn.ptr);
@@ -701,10 +698,13 @@ pub const Context = struct {
         const tr_conv: ?[*]f32 = if (tracing) self.trace_conv[il].ptr else null;
         const tr_recr: ?[*]f32 = if (tracing) self.trace_recr[il].ptr else null;
 
-        ops.mulMat(p, l.wqkv, self.b_norm.ptr, n_t, self.b_qkv.ptr);
-        p.barrier();
+        // H22: qkv, alpha, beta, z aynı girdiden tek geçişte; ardından bağımsız eleman işlemleri tek fazda.
+        ops.mulMatMulti(p, &.{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate }, self.b_norm.ptr, n_t, &.{ self.b_qkv.ptr, self.b_gate.ptr, self.b_beta.ptr, self.b_z.ptr });
         // CONCAT + CPY(conv_state_last)
         ops.convConcat(p, conv_dim, kc, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, self.b_conv_in.ptr, tr_conv);
+        ops.gateFromAlpha(p, h_n, n_t, self.b_gate.ptr, self.b_gate.ptr, l.ssm_dt, l.ssm_a);
+        ops.sigmoidInPlace(p, h_n, n_t, self.b_beta.ptr);
+        ops.silu(p, s, h_n * n_t, self.b_z.ptr, self.b_z.ptr);
         p.barrier();
         ops.ssmConv(p, conv_dim, m.d_conv, kc + n_t, n_t, self.b_conv_in.ptr, l.ssm_conv1d, self.b_conv_out.ptr);
         p.barrier();
@@ -712,28 +712,13 @@ pub const Context = struct {
         p.barrier();
         // build_gdn_l2_norm(q), (k)
         ops.rmsNorm(p, self.b_conv_out.ptr, s, conv_dim, self.b_q.ptr, s, m.d_inner, s, m.n_group, n_t, eps_l2, null, l2);
-        p.barrier();
         ops.rmsNorm(p, self.b_conv_out.ptr + key_dim, s, conv_dim, self.b_k.ptr, s, m.d_inner, s, m.n_group, n_t, eps_l2, null, l2);
-        p.barrier();
-        // alpha -> gate
-        ops.mulMat(p, l.ssm_alpha, self.b_norm.ptr, n_t, self.b_gate.ptr);
-        p.barrier();
-        ops.gateFromAlpha(p, h_n, n_t, self.b_gate.ptr, self.b_gate.ptr, l.ssm_dt, l.ssm_a);
-        p.barrier();
-        // beta
-        ops.mulMat(p, l.ssm_beta, self.b_norm.ptr, n_t, self.b_beta.ptr);
-        p.barrier();
-        ops.sigmoidInPlace(p, h_n, n_t, self.b_beta.ptr);
         p.barrier();
         // GATED_DELTA_NET (+ CPY new_state: yerinde)
         ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, self.b_conv_out.ptr + 2 * key_dim, conv_dim, self.b_gate.ptr, self.b_beta.ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
         p.barrier();
         // build_norm_gated
         ops.rmsNorm(p, self.b_gdn.ptr, s, m.d_inner, self.b_gdn.ptr, s, m.d_inner, s, h_n, n_t, m.eps, l.ssm_norm, 1.0);
-        p.barrier();
-        ops.mulMat(p, l.wgate, self.b_norm.ptr, n_t, self.b_z.ptr);
-        p.barrier();
-        ops.silu(p, s, h_n * n_t, self.b_z.ptr, self.b_z.ptr);
         p.barrier();
         ops.mul(p, s, h_n * n_t, self.b_gdn.ptr, self.b_gdn.ptr, self.b_z.ptr);
         p.barrier();
@@ -748,16 +733,11 @@ pub const Context = struct {
         const dh = m.head_dim;
         const kv_row = dh * m.n_head_kv;
 
-        ops.mulMat(p, l.wq, self.b_norm.ptr, n_t, self.b_qfull.ptr);
-        p.barrier();
+        ops.mulMatMulti(p, &.{ l.wq, l.wv, l.wk }, self.b_norm.ptr, n_t, &.{ self.b_qfull.ptr, self.b_vv.ptr, self.b_kk.ptr });
         // Qcur = view(Qcur_full) -> build_norm -> rope. q tamponu: b_gdn (head_dim*n_head*n_t)
         ops.rmsNorm(p, self.b_qfull.ptr, dh * 2, dh * m.n_head * 2, self.b_gdn.ptr, dh, dh * m.n_head, dh, m.n_head, n_t, m.eps, l.q_norm, 1.0);
         p.barrier();
         ops.rope(p, self.b_gdn.ptr, dh, m.n_head, n_t, self.head, m.n_rot, self.theta_scale);
-        p.barrier();
-        ops.mulMat(p, l.wv, self.b_norm.ptr, n_t, self.b_vv.ptr);
-        p.barrier();
-        ops.mulMat(p, l.wk, self.b_norm.ptr, n_t, self.b_kk.ptr);
         p.barrier();
         ops.rmsNorm(p, self.b_kk.ptr, dh, kv_row, self.b_kk.ptr, dh, kv_row, dh, m.n_head_kv, n_t, m.eps, l.k_norm, 1.0);
         p.barrier();

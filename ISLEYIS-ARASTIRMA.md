@@ -291,3 +291,11 @@ Ortam: `/opt/operasyonel-kurtarma/kurtarici-runner` (root, ~%97 CPU, 17 saattir)
 - (a) Kanıtlanan: R8 kayıpsız ve yük altında da pp512, tg128, batch 8'de önde. gb4 en iyi parça boyu.
 - (b) Çürütülen: H21.
 - Blocker: 200 / 300 barajı için mutlak ölçüm bu yükte alınamıyor. Kurtarıcı servis + tarayıcı kapalıyken ölçülmeli.
+
+## Tur 13 — kirli ortam hedefi + H22
+
+Kullanıcı kuralı (2026-11-07): barajlar en kirli ortamda (PC kullanılırken, yük + ısı altında) geçilecek; temiz makine / performans modu yok. Ölçüm: art arda A/B çiftleri, ortanca.
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| H22 | P2 "tek seferde": aynı girdiyi kullanan matrisler (doğrusal: qkv+alpha+beta+z; dikkat: q+v+k; FFN: gate+up) tek quantize + tek iş havuzu + tek bariyer; bağımsız eleman işlemleri (convConcat, gate, sigmoid, silu(z); q/k L2 norm) aynı fazda | Bariyer azalınca yük altında bekleme azalır | 6 istem bayt; 10 art arda çift (kirli ortam) | 6/6 bayt aynı (aritmetik değişmedi). Varsayılan tg128 ortanca: 137.3→162.9 (4 çift), 140.0→157.7 (6 çift); 6/10 çift H22 lehine. Hilesiz tg128 5/10 (nötr). Doğrusal katman bariyeri 18 → 11. **Yaşadı.** |
