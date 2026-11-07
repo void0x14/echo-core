@@ -470,7 +470,7 @@ pub fn ssmConv(p: *const Params, nr: usize, nc: usize, ncs: usize, n_t: usize, s
 
 /// H38: 4 satır birlikte, satır başına 2 geçiş: s = e·(row·k); row = e·row + k·(v−s)β; o = row·q.
 /// (ölçek dot'a katlanır; sonuç yuvarlama sırası kadar farklı)
-inline fn gdnRows4(s_v: usize, st: [*]f32, k_d: [*]const f32, q_d: [*]const f32, v_d: [*]const f32, e: f32, beta: f32, scale: f32, out: [*]f32) void {
+inline fn gdnRows4(s_v: usize, sr: [*]const f32, st: [*]f32, k_d: [*]const f32, q_d: [*]const f32, v_d: [*]const f32, e: f32, beta: f32, scale: f32, out: [*]f32) void {
     const ve = avx.splat(e);
     var j: usize = 0;
     while (j < s_v) : (j += 4) {
@@ -480,7 +480,7 @@ inline fn gdnRows4(s_v: usize, st: [*]f32, k_d: [*]const f32, q_d: [*]const f32,
             const k0 = avx.loadF(k_d + i);
             const k1 = avx.loadF(k_d + i + 8);
             inline for (0..4) |r| {
-                const row = st + (j + r) * s_v + i;
+                const row = sr + (j + r) * s_v + i;
                 a[2 * r] = @mulAdd(avx.F8, avx.loadF(row), k0, a[2 * r]);
                 a[2 * r + 1] = @mulAdd(avx.F8, avx.loadF(row + 8), k1, a[2 * r + 1]);
             }
@@ -493,9 +493,9 @@ inline fn gdnRows4(s_v: usize, st: [*]f32, k_d: [*]const f32, q_d: [*]const f32,
             const kv = avx.loadF(k_d + i);
             const qv = avx.loadF(q_d + i);
             inline for (0..4) |r| {
-                const row = st + (j + r) * s_v + i;
-                const n = @mulAdd(avx.F8, avx.loadF(row), ve, kv * dl[r]);
-                avx.storeF(row, n);
+                const off = (j + r) * s_v + i;
+                const n = @mulAdd(avx.F8, avx.loadF(sr + off), ve, kv * dl[r]);
+                avx.storeF(st + off, n);
                 o[r] = @mulAdd(avx.F8, n, qv, o[r]);
             }
         }
@@ -516,6 +516,7 @@ pub fn gatedDeltaNet(
     v_stride: usize,
     g: [*]const f32,
     beta: [*]const f32,
+    state_in: [*]const f32,
     state: [*]f32,
     out: [*]f32,
     trace: ?[*]f32,
@@ -537,6 +538,7 @@ pub fn gatedDeltaNet(
         var iv1 = ir0;
         while (iv1 < ir1) : (iv1 += 1) {
             const s_out = state + iv1 * s_v * s_v;
+            const s_in0 = state_in + iv1 * s_v * s_v;
             var attn_data = out + iv1 * s_v;
             for (0..n_t) |t| {
                 const q_d = q_in + t * h_n * s_v + iv1 * s_v;
@@ -544,16 +546,18 @@ pub fn gatedDeltaNet(
                 const v_d = v_in + t * v_stride + iv1 * s_v;
                 const beta_val = beta[t * h_n + iv1];
                 // satır başına tek geçiş: satır L1'de kalır, 64 KB durum üç kez dolaşılmaz
+                const s_src = if (t == 0) s_in0 else s_out;
                 if (trace) |tr| {
                     const dst = tr + (t * h_n + iv1) * s_v * s_v;
-                    @memcpy(dst[0 .. s_v * s_v], s_out[0 .. s_v * s_v]);
+                    @memcpy(dst[0 .. s_v * s_v], s_src[0 .. s_v * s_v]);
                 }
                 const e = avx.expf(g[t * h_n + iv1]);
                 if (s_v % 16 == 0) {
-                    gdnRows4(s_v, s_out, k_d, q_d, v_d, e, beta_val, scale, attn_data);
+                    gdnRows4(s_v, s_src, s_out, k_d, q_d, v_d, e, beta_val, scale, attn_data);
                     attn_data += s_v * h_n;
                     continue;
                 }
+                if (s_src != s_out) @memcpy(s_out[0 .. s_v * s_v], s_src[0 .. s_v * s_v]);
                 for (0..s_v) |j| {
                     const row = s_out + j * s_v;
                     vec.scaleF32(s_v, row, e);

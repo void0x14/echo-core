@@ -284,6 +284,9 @@ pub const Context = struct {
     kv_v: [][]u16,
     rs_conv: [][]f32,
     rs_state: [][]f32,
+    /// H39: snapshot tamponu; snapshot() rs_state ile takas eder (kopya yok), GDN t=0'da buradan okur.
+    rs_alt: [][]f32 = &.{},
+    gdn_alt: bool = false,
 
     logits: []f32,
     /// null: tam LM head (varsayılan)
@@ -415,6 +418,8 @@ pub const Context = struct {
         for (self.kv_v) |b| if (b.len > 0) a.free(b);
         for (self.rs_conv) |b| if (b.len > 0) a.free(b);
         for (self.rs_state) |b| if (b.len > 0) a.free(b);
+        for (self.rs_alt) |b| if (b.len > 0) a.free(b);
+        if (self.rs_alt.len > 0) a.free(self.rs_alt);
         a.free(self.kv_k);
         a.free(self.kv_v);
         a.free(self.rs_conv);
@@ -498,11 +503,18 @@ pub const Context = struct {
     }
     /// H13: tur başı durumunu iz yuvası 0'a kopyalar (no_trace ile birlikte kullanılır).
     pub fn snapshot(self: *Context) void {
+        if (self.rs_alt.len == 0) {
+            const a = self.allocator;
+            const alt = a.alloc([]f32, self.rs_state.len) catch @panic("OOM");
+            for (alt, self.rs_state) |*d, b| d.* = if (b.len > 0) a.alloc(f32, b.len) catch @panic("OOM") else &.{};
+            self.rs_alt = alt;
+        }
         for (self.model.layers, 0..) |*l, il| {
             if (!l.recr) continue;
             @memcpy(self.trace_conv[il][0..self.rs_conv[il].len], self.rs_conv[il]);
-            @memcpy(self.trace_recr[il][0..self.rs_state[il].len], self.rs_state[il]);
+            std.mem.swap([]f32, &self.rs_state[il], &self.rs_alt[il]);
         }
+        self.gdn_alt = true;
     }
 
     /// H13: snapshot() anına döner; çağıran kabul edilen tokenları yeniden decode eder.
@@ -510,8 +522,9 @@ pub const Context = struct {
         for (self.model.layers, 0..) |*l, il| {
             if (!l.recr) continue;
             @memcpy(self.rs_conv[il], self.trace_conv[il][0..self.rs_conv[il].len]);
-            @memcpy(self.rs_state[il], self.trace_recr[il][0..self.rs_state[il].len]);
+            std.mem.swap([]f32, &self.rs_state[il], &self.rs_alt[il]);
         }
+        self.gdn_alt = false;
         self.head = batch_start;
     }
 
@@ -520,6 +533,7 @@ pub const Context = struct {
         self.head = 0;
         for (self.rs_conv) |b| @memset(b, 0);
         for (self.rs_state) |b| @memset(b, 0);
+        self.gdn_alt = false;
     }
 
     /// llama_decode: yalnız son token için logit üretir (llama_batch_get_one).
@@ -535,6 +549,7 @@ pub const Context = struct {
             // llama_kv_cache::get_n_kv
             self.n_kv = @min(self.n_ctx, @max(@as(usize, 256), pad(self.head + n, 256)));
             self.pool.run(self, job);
+            self.gdn_alt = false;
             self.head += n;
             off += n;
         }
@@ -720,7 +735,7 @@ pub const Context = struct {
         ops.rmsNorm(p, self.b_conv_out.ptr + key_dim, s, conv_dim, self.b_k.ptr, s, m.d_inner, s, m.n_group, n_t, eps_l2, null, l2);
         p.barrier();
         // GATED_DELTA_NET (+ CPY new_state: yerinde)
-        ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, self.b_conv_out.ptr + 2 * key_dim, conv_dim, self.b_gate.ptr, self.b_beta.ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
+        ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, self.b_conv_out.ptr + 2 * key_dim, conv_dim, self.b_gate.ptr, self.b_beta.ptr, if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
         p.barrier();
         // build_norm_gated
         ops.rmsNorm(p, self.b_gdn.ptr, s, m.d_inner, self.b_gdn.ptr, s, m.d_inner, s, h_n, n_t, m.eps, l.ssm_norm, 1.0);
