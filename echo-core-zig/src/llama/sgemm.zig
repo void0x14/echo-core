@@ -433,3 +433,80 @@ pub const TinyBlasQ0 = struct {
         }
     }
 };
+
+/// H20: Q8_0_R8 — 8 satır iç içe. Grup g, blok l: [8 × f32 satır ölçeği][8 ymm quant];
+/// ymm k'nın r. 32-bit şeridi = satır r'nin 4k..4k+3 baytları. Aktivasyon standart Q8_0.
+/// Zorunlu tamsayı çarpma aynı; dönüştürme + FMA 8 satıra bir kez.
+pub const R8_BLOCK = 288;
+
+pub fn repackQ80x8(src: [*]const q.BlockQ80, dst: [*]u8, m: usize, nb: usize) void {
+    for (0..m / 8) |g| {
+        for (0..nb) |l| {
+            const base = dst + (g * nb + l) * R8_BLOCK;
+            const sc: [*]f32 = @ptrCast(@alignCast(base));
+            for (0..8) |r| {
+                const blk = &src[(g * 8 + r) * nb + l];
+                sc[r] = @floatCast(@as(f16, @bitCast(blk.d)));
+                const qs = std.mem.asBytes(&blk.qs);
+                for (0..8) |k| @memcpy(base[32 + 32 * k + 4 * r ..][0..4], qs[4 * k ..][0..4]);
+            }
+        }
+    }
+}
+
+pub const GemmR8 = struct {
+    pool: *Pool,
+    nb: usize,
+    a: [*]const u8,
+    b: [*]const q.BlockQ80,
+    ldb: usize,
+    c: [*]f32,
+    ldc: usize,
+    ith: usize,
+
+    pub fn matmul(self: *const GemmR8, m: usize, n: usize) void {
+        const groups = m / 8;
+        const gb = 4; // 32 satır / iş parçası
+        const nblk = (groups + gb - 1) / gb;
+        var cur: i64 = @intCast(self.ith);
+        while (cur < nblk) {
+            const g0: usize = @as(usize, @intCast(cur)) * gb;
+            for (g0..@min(g0 + gb, groups)) |g| {
+                var j: usize = 0;
+                while (j + 4 <= n) : (j += 4) self.tile(4, g, j);
+                switch (n - j) {
+                    1 => self.tile(1, g, j),
+                    2 => self.tile(2, g, j),
+                    3 => self.tile(3, g, j),
+                    else => {},
+                }
+            }
+            cur = self.pool.chunkAdd(1);
+        }
+    }
+
+    inline fn tile(self: *const GemmR8, comptime NC: usize, g: usize, j0: usize) void {
+        var acc: [NC]F8 = @splat(@splat(0));
+        const ones: avx.W16 = @splat(1);
+        for (0..self.nb) |l| {
+            const base = self.a + (g * self.nb + l) * R8_BLOCK;
+            const sa = avx.loadF(@ptrCast(@alignCast(base)));
+            var isum: [NC]avx.I8 = @splat(@splat(0));
+            inline for (0..8) |k| {
+                const w = avx.loadB(base + 32 + 32 * k);
+                const aw: avx.B32 = @bitCast(@abs(w));
+                inline for (0..NC) |c| {
+                    const blk = &self.b[self.ldb * (j0 + c) + l];
+                    const a4: i32 = @as(*align(1) const i32, @ptrCast(&blk.qs[4 * k])).*;
+                    const av: avx.B32 = @bitCast(@as(avx.I8, @splat(a4)));
+                    isum[c] += avx.madd(ones, avx.maddubs(aw, avx.sign8(av, w)));
+                }
+            }
+            inline for (0..NC) |c| {
+                const db: F8 = @splat(avx.fp16_table[self.b[self.ldb * (j0 + c) + l].d]);
+                acc[c] = @mulAdd(F8, @floatFromInt(isum[c]), sa * db, acc[c]);
+            }
+        }
+        inline for (0..NC) |c| avx.storeF(self.c + self.ldc * (j0 + c) + g * 8, acc[c]);
+    }
+};

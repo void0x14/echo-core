@@ -26,7 +26,7 @@ Achieving 50-100 t/s on local CPU/RAM configurations (i5-13500H / Ryzen 3600).
 ### TG
 - [x] 70 barajını aşmak
 - [x] 100 barajını aşmak
-- [ ] 150 barajını aşmak
+- [x] 150 barajını aşmak
 - [ ] 200 barajını aşmak
 - [ ] 300 barajını aşmak
 - [ ] 500 barajını aşmak

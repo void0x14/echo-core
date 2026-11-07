@@ -260,3 +260,19 @@ Hesap (tur 35 ms, çekirdek ~27 ms, kalan ~8 ms):
 - (a) Kanıtlanan: çekirdek dışı payda tek büyük kalem yok; en büyüğü spin (%4.7). Tam Q8_0 bedeliyle (P3) bu CPU'da en iyimser tavan ~296 tok/s.
 - (b) Çürütülen: "kalan 8 ms yarıya iner" varsayımı (dağınık, tek hedef yok).
 - (c) Sıradaki tek adım: P3 kararına bağlı. P3 korunursa 300 bu CPU'nun tamsayı çarpma borusunun üstünde kalıyor; korunmazsa ödenen fiyatı (sayı biçimi) değiştirmek gerekir.
+
+## Tur 11 — H20: Q8_0_R8 (8 satır iç içe) çekirdek
+
+Kaynak (veri): ik_llama.cpp. AVX2 (Ryzen 5975WX) Llama-3.1-8B Q8_0 pp512: llama.cpp 147.9, ik_llama.cpp (satır-iç içe repack) 268.2 → 1.81x (discussion #164). Q8_K_R8 PR #141: AVX2'de işaret hilesi (sign) yine gerekli. PR #534: Q8_0 → Q8_0_R8 repack.
+Tur 10'daki "tavan ~296" hesabı bugünkü komut düzenine aitti, fizik sınırı değildi → yanlış çıktı.
+
+| # | AKIŞ | VARSAYIM | ÇÜRÜTME | SONUÇ |
+|---|---|---|---|---|
+| H20 | P2+P4: 8 satırı tek ymm'de (şerit başına satır) taşı. Zorunlu tamsayı çarpma aynı, dönüştürme + FMA 8 satıra bir kez. FP0'daki 31G zorunlu olmayan iş kalkar | FP0 rahatlar, batch hızlanır | batch 8 / pp512 + bayt testi | Boş makinede: batch 8 230.6/238.5 → 310.8/299.2; pp512 300.2 → 361.2. Kurtarıcı servis yükü altında (t=5, ortanca, 3 çift): pp512 164.8 → 233.4, varsayılan tg128 109.2 → 156.4, batch 8 172.6 → 213.9. **Yaşadı.** |
+| H20 kayıpsızlık | Yalnız batch R8 olunca doğrulama ve tek token yolu farklı aritmetik | — | 6 istem `--ngram 0` vs varsayılan | Önce 2/6 farklı. Tek token yolu da R8'e alındı (her sütun aynı komutlarla bağımsız) → **6/6 bayt aynı.** |
+| H20 sayısal | R8 toplama sırası eski çekirdekten farklı; hangisi gerçeğe yakın | — | gerçek Q8_0 ağırlıkları, float64 referans, 4 tensör × 1024 satır × 8 sütun | Ortalama hata R8'de 4/4 tensörde daha düşük (%13–21); en büyük hata iki yolda da ~1e-6. Eşdeğer, ortalamada biraz daha iyi. llama.cpp bit paritesi `ECHO_NO_R8=1` ile korunuyor (`--logit-check` 9/9). |
+
+### Tur 11 sonucu
+- (a) Kanıtlanan: H20 kayıpsız; saf batch 8 boş makinede 300'ü geçti (310.8). README TG 150 işaretlendi (H13'ten beri tg128 ≥ 164).
+- (b) Çürütülen: "Tam Q8_0 bedeliyle bu CPU'da tavan ~296" (tur 10) → öldü.
+- (c) Sıradaki tek adım: makine boşken varsayılan + `--memory` tg128'i ölçmek (200 ve 300 barajı için).

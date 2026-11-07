@@ -1,4 +1,5 @@
 //! Tam yolun logit'leri referansla bit bit aynı mı: echo-core-zig --logit-check [--save] [-t N]
+//! H20 (Q8_0_R8) toplama sırasını değiştirir: parite için ECHO_NO_R8=1 ile çalıştır.
 //! Referans llama.cpp ile sıfır farklı doğrulanmış kod yolundan alındı.
 const std = @import("std");
 const qwen35 = @import("qwen35.zig");

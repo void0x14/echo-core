@@ -8,6 +8,7 @@ const vec = @import("vec.zig");
 const q = @import("quants.zig");
 const ops = @import("ops.zig");
 const repack = @import("repack.zig");
+const sgemm = @import("sgemm.zig");
 const ivf = @import("ivf.zig");
 const pool_mod = @import("pool.zig");
 const Pool = pool_mod.Pool;
@@ -48,6 +49,7 @@ pub const Model = struct {
     allocator: Alloc,
     map: []align(std.heap.page_size_min) const u8,
     repacked: std.ArrayList([]repack.BlockQ4Kx8) = .empty,
+    repacked8: std.ArrayList([]align(64) u8) = .empty,
     layers: []Layer,
     tok_embd: Mat,
     output: Mat,
@@ -191,6 +193,15 @@ pub const Model = struct {
     }
 
     fn repackMat(self: *Model, w: *Mat) !void {
+        if (w.type == .q8_0 and w.m % 8 == 0 and w.k % 32 == 0 and std.c.getenv("ECHO_NO_R8") == null) {
+            const nb = w.k / 32;
+            const dst = try self.allocator.alignedAlloc(u8, .@"64", w.m / 8 * nb * sgemm.R8_BLOCK);
+            errdefer self.allocator.free(dst);
+            sgemm.repackQ80x8(@ptrCast(@alignCast(w.data)), dst.ptr, w.m, nb);
+            try self.repacked8.append(self.allocator, dst);
+            w.rep = dst.ptr;
+            return;
+        }
         if (w.type != .q4_k or w.m % 8 != 0 or w.k % 8 != 0) return;
         const nblocks = w.k / 256;
         const dst = try self.allocator.alloc(repack.BlockQ4Kx8, w.m / 8 * nblocks);
@@ -206,6 +217,8 @@ pub const Model = struct {
         allocator.free(self.layers);
         for (self.repacked.items) |b| allocator.free(b);
         self.repacked.deinit(allocator);
+        for (self.repacked8.items) |b| allocator.free(b);
+        self.repacked8.deinit(allocator);
         std.posix.munmap(self.map);
         allocator.destroy(self);
     }

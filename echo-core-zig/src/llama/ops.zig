@@ -28,6 +28,8 @@ pub const Mat = struct {
     m: usize,
     /// nb[1]: satır adımı (bayt)
     nb1: usize,
+    /// H20: Q8_0_R8 kopya (batch yolu); tek token yolu `data` kullanır.
+    rep: ?[*]const u8 = null,
 };
 
 pub fn rowSize(t: Type, k: usize) usize {
@@ -193,6 +195,11 @@ pub fn mulMat(p: *const Params, a: Mat, x: [*]const f32, n: usize, y: [*]f32) vo
             mulMatChunks(.f16, p, a, wdata, row_size, n, y);
         },
         .q8_0 => {
+            if (a.rep != null) {
+                const g = sgemm.GemmR8{ .pool = p.pool, .nb = a.k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith };
+                g.matmul(a.m, n);
+                return;
+            }
             if (n >= 2) {
                 const tb = sgemm.TinyBlasQ0{
                     .pool = p.pool,
