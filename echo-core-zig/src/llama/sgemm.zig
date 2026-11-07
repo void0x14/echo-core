@@ -604,9 +604,22 @@ pub const GemmR8 = struct {
         const groups = m / 8;
         const g0 = cb * GB;
         const g1 = @min(g0 + GB, groups);
+        // H45: ağırlıklar DRAM'de (tur başı ~580 MB); g+1'in satırları g'nin karolarına yayılarak L2'ye çekilir.
+        const glen = self.nb * R8_BLOCK;
+        const per = (glen / 64 + n / 4) / @max(n / 4, 1) + 1;
         for (g0..g1) |g| {
             var j: usize = 0;
-            if (R8_ASM) while (j + 4 <= n) : (j += 4) self.tileAsm(g, j);
+            var pf: usize = 0;
+            const nxt = self.a + (g + 1) * glen;
+            if (R8_ASM) {
+                while (j + 4 <= n) : (j += 4) {
+                    if (g + 1 < groups) {
+                        const e = @min(pf + per, glen / 64);
+                        while (pf < e) : (pf += 1) @prefetch(nxt + pf * 64, .{ .locality = 1 });
+                    }
+                    self.tileAsm(g, j);
+                }
+            }
             while (j + R8_NC <= n) : (j += R8_NC) self.tile(R8_NC, g, j);
             while (j < n) : (j += 1) self.tile(1, g, j);
         }
