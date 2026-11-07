@@ -50,6 +50,7 @@ Not: H01 ve H01+H06 satırları `-r 5` ile ikişer sıralı koşunun ortalaması
 3. **Hile 01 + 06:** 111,54 tok/s (2,15 kat); iki sıralı koşuda da H01 tek başına daha hızlı çıktı (127–141 / 106–117), bu yüzden H06 baseline'a katılmadı.
 4. **Pratikte:** Gerçek üretimde (`--prompt ... --bench`) kopya metinde 50,2 → 120,1 tok/s, sohbet isteminde 54,5 → 142,7–147,8, "The capital of France is" 52,7 → 132,5, masal başlangıcı 48,7 → 131,2 tok/s; kod isteminde (`def fibonacci(n):`) kazanç yok (52,0 = 52,0). Dört istemde çıktı `--ngram 0` ile bayt bayt aynı, `--logit-check` 9/9 eşit.
 5. **300 tavanı:** doğrulamasız saf batch decode: batch 1 → 50,3, 2 → 90,5, 4 → 161,4, 8 → 187,4, 16 → 222,3, 32 → 246,4 tok/s (`benchmarks/gen-batch-egri-2026-11-07.txt`). Ek token başına maliyet c ≈ 0,16–0,18 forward; batch büyüdükçe prefill hızına (≈245–290) yaklaşıp düzleşiyor, 300'e ulaşmıyor. Sohbet çıktısı tokenizer yüzünden boş satır döngüsüne giriyor; bu da n-gram'ın en kolay yakaladığı durum.
+6. **Gerçek BPE metninde H01 (simülasyon):** `llama-completion` (greedy) ile 4 istemde 256'şar token üretildi, `llama-tokenize` ile BPE kimliklerine çevrilip H01 kuralları (3-gram, k=8, en az 6 token) ölçülen batch süreleriyle koşuldu. Kabul oranı 0,12–0,70; üç istemde 1,00x, CSV kodu isteminde 1,65x, toplam 1,11x (~56 tok/s, iz ve geri alma yükü hariç). 134 tok/s değeri döngü metni tavanıdır. Ham: `echo-core-zig/benchmarks/h01-bpe-alfa-2026-11-07.txt`.
 
 ## Tek bakışta (GPU)
 

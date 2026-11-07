@@ -1,0 +1,5 @@
+istem 1: 257 token, tur 1, taslak 8, kabul 3, alfa 0.38, tahmini 50.5 tok/s (hilesiz 50.3), 1.00x
+istem 2: 256 token, tur 29, taslak 232, kabul 163, alfa 0.70, tahmini 82.9 tok/s (hilesiz 50.3), 1.65x
+istem 3: 257 token, tur 1, taslak 8, kabul 1, alfa 0.12, tahmini 50.1 tok/s (hilesiz 50.3), 1.00x
+istem 4: 257 token, tur 1, taslak 8, kabul 2, alfa 0.25, tahmini 50.3 tok/s (hilesiz 50.3), 1.00x
+toplam: 55.7 tok/s, 1.11x (iz/geri alma ek yükü hariç; Port'ta ölçülen yük çarpanı ~0,72)
