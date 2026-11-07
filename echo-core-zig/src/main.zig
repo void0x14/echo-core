@@ -219,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
     var max_tokens: u32 = 100;
     var bench = false;
     var ngram_k: usize = 8; // H01 varsayılan; --ngram 0 kapatır
-    var grammar = false; // H06 çıktıyı JSON iskeletine zorlar, bu yüzden yalnız --grammar ile
+    var grammar = true; // H06 varsayılan; --no-grammar kapatır
     var json = false;
     var i: usize = 1;
     while (i < args.items.len) : (i += 1) {
@@ -237,6 +237,8 @@ pub fn main(init: std.process.Init) !void {
             }
         } else if (std.mem.eql(u8, args.items[i], "--grammar")) {
             grammar = true;
+        } else if (std.mem.eql(u8, args.items[i], "--no-grammar")) {
+            grammar = false;
         } else if (std.mem.eql(u8, args.items[i], "--json")) {
             json = true;
         } else if (std.mem.eql(u8, args.items[i], "--max-tokens") or std.mem.eql(u8, args.items[i], "-n")) {

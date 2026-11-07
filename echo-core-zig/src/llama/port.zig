@@ -21,8 +21,8 @@ pub const Port = struct {
     lm_ix: ?*ivf.Runtime = null,
     /// >0: H01 n-gram taslağı + tek zincir doğrulama.
     ngram_k: usize = 8,
-    /// true: H06 grammar fast-forward (JSON iskeleti).
-    grammar: bool = false,
+    /// H06 grammar fast-forward (JSON iskeleti); varsayılan açık, `--no-grammar` kapatır.
+    grammar: bool = true,
 
     pub const BenchResult = struct {
         text: []u8,
@@ -281,18 +281,9 @@ pub const Port = struct {
         return self.tokenizer_.decode(all_ids.items);
     }
 
-    fn parseIds(a: std.mem.Allocator, text: []const u8) !ArrayList(u32) {
-        var list = ArrayList(u32).init(a);
-        errdefer list.deinit();
-        var it = std.mem.tokenizeAny(u8, text, ", []\n");
-        while (it.next()) |t| try list.append(try std.fmt.parseInt(u32, t, 10));
-        return list;
-    }
-
     pub fn benchmark(self: *Port, prompt: []const u8, max_tokens: u32, io: std.Io) !BenchResult {
         self.reset();
-        // "ids:1,2,3": dışarıda (BPE ile) üretilmiş token kimlikleri; yerleşik tokenizer atlanır.
-        var ids = if (std.mem.startsWith(u8, prompt, "ids:")) try parseIds(self.allocator, prompt[4..]) else try self.tokenizer_.encode(prompt);
+        var ids = try self.tokenizer_.encode(prompt);
         defer ids.deinit();
         if (ids.items.len == 0) return error.EmptyInput;
         var all_ids = ArrayList(u32).init(self.allocator);
