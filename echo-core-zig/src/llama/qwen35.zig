@@ -845,10 +845,24 @@ pub const Context = struct {
         const kv_row = dh * m.n_head_kv;
 
         ops.mulMatMultiQ(p, &.{ l.wq, l.wv, l.wk }, self.b_norm.ptr, n_t, &.{ self.b_qfull.ptr, self.b_vv.ptr, self.b_kk.ptr });
+        const qw = ops.r8Ok(&.{l.wo});
+        const fg = qw and ops.flashGateOk(n_t, dh) and m.n_rot <= 128;
         if (m.n_rot <= 128 and std.c.getenv("ECHO_OLD_ATTN") == null) {
             ops.attnPrep(p, n_t, dh, m.n_head, m.n_head_kv, self.b_qfull.ptr, self.b_gdn.ptr, self.b_kk.ptr, self.b_vv.ptr, self.kv_k[il].ptr + self.head * kv_row, self.kv_v[il].ptr + self.head * kv_row, m.eps, l.q_norm, l.k_norm, self.head, m.n_rot, self.theta_scale);
+            if (fg) ops.flashPre(p, n_t, m.n_head);
             p.barrier();
         } else self.attnPrepOld(p, l, il);
+        if (fg) {
+            // H68: flash + gate + wo nicemleme tek fazda
+            var args = self.flashArgs(il);
+            args.gate = self.b_qfull.ptr;
+            args.wq = p.wdata;
+            args.wq_row = ops.dotRowSize(.q8_0, l.wo.k);
+            ops.flashGate(p, &args);
+            ops.r8Pre(p, &.{l.wo});
+            p.barrier();
+            return ops.mulMatMultiQ(p, &.{l.wo}, self.b_q.ptr, n_t, &.{self.b_attn.ptr});
+        }
         self.attnTail(p, l, il);
     }
 
@@ -873,12 +887,11 @@ pub const Context = struct {
         p.barrier();
     }
 
-    fn attnTail(self: *Context, p: *const Params, l: *const Layer, il: usize) void {
+    fn flashArgs(self: *Context, il: usize) ops.FlashArgs {
         const m = self.model;
         const n_t = self.n_t;
         const dh = m.head_dim;
-        // FLASH_ATTN_EXT
-        const args = ops.FlashArgs{
+        return .{
             .q = self.b_gdn.ptr,
             .k = self.kv_k[il].ptr,
             .v = self.kv_v[il].ptr,
@@ -891,6 +904,14 @@ pub const Context = struct {
             .first_cell = self.head,
             .scale = 1.0 / @sqrt(@as(f32, @floatFromInt(dh))),
         };
+    }
+
+    fn attnTail(self: *Context, p: *const Params, l: *const Layer, il: usize) void {
+        const m = self.model;
+        const n_t = self.n_t;
+        const dh = m.head_dim;
+        // FLASH_ATTN_EXT
+        const args = self.flashArgs(il);
         ops.flashAttn(p, &args);
         p.barrier();
         // CONT(gate) + SIGMOID + MUL

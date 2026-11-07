@@ -46,7 +46,7 @@ pub fn rowSize(t: Type, k: usize) usize {
 }
 
 /// type_traits_cpu[t].vec_dot_type satır boyutu
-fn dotRowSize(t: Type, k: usize) usize {
+pub fn dotRowSize(t: Type, k: usize) usize {
     return switch (t) {
         .f32 => k * 4,
         .f16 => k * 2,
@@ -909,6 +909,10 @@ pub const FlashArgs = struct {
     n_kv: usize,
     first_cell: usize,
     scale: f32,
+    /// H68: doluysa satır yazımında attn *= sigmoid(gate) (gate = Qcur_full'un ikinci yarısı) ve wq'ya R8 nicemleme
+    gate: ?[*]const f32 = null,
+    wq: ?[*]u8 = null,
+    wq_row: usize = 0,
 
     inline fn qRow(a: *const FlashArgs, token: usize, head: usize) [*]const f32 {
         return a.q + (token * a.h_q + head) * a.dk;
@@ -1069,10 +1073,40 @@ fn flashTiled(p: *const Params, a: *const FlashArgs, ir0: usize, ir1: usize) voi
         for (0..tile_rows) |tq| {
             const s_inv: f32 = if (s_sum[tq] == 0.0) 0.0 else 1.0 / s_sum[tq];
             vec.scaleF32(dv, vkq32 + tq * dv, s_inv);
-            @memcpy((a.dst + ((iq1 + tq) * a.h_q + iq2) * dv)[0..dv], (vkq32 + tq * dv)[0..dv]);
+            const row = a.dst + ((iq1 + tq) * a.h_q + iq2) * dv;
+            @memcpy(row[0..dv], (vkq32 + tq * dv)[0..dv]);
+            if (a.gate) |gp| {
+                const t = iq1 + tq;
+                const g = gp + t * a.h_q * dv * 2 + iq2 * dv * 2 + dv;
+                for (0..dv) |d| row[d] *= sigmoidF(g[d]);
+                if (a.wq) |w| sgemm.quantR8(row, @ptrCast(@alignCast(w + t * a.wq_row + iq2 * (dv / 32) * @sizeOf(q.BlockQ80))), dv);
+            }
         }
         ir += tile_rows;
     }
+}
+
+fn flashDr(nth: usize, nr: usize) [2]usize {
+    const chunk_size = (nr + nth * 4 - 1) / (nth * 4);
+    var nchunk = (nr + chunk_size - 1) / chunk_size;
+    if (nth == 1 or nchunk < nth) nchunk = nth;
+    return .{ nchunk, (nr + nchunk - 1) / nchunk };
+}
+
+/// H68: flashGate hızlı yolu mümkün mü (karo yolu, başlık Q8 bloklarına bölünür)
+pub fn flashGateOk(n_t: usize, dk: usize) bool {
+    return n_t >= Q_TILE and dk % 32 == 0;
+}
+/// Üretici bariyerinden önce: flash iş aralıkları (flashAttn ile aynı bölme).
+pub fn flashPre(p: *const Params, n_t: usize, h_q: usize) void {
+    p.pool.rangeInitS(1, p.ith, flashDr(p.nth, n_t * h_q)[0]);
+}
+/// H68: flash kendi bariyeri olmadan (aralıklar flashPre ile), gate + nicemleme satır yazımında.
+pub fn flashGate(p: *const Params, a: *const FlashArgs) void {
+    const nr = a.n_t * a.h_q;
+    const dr = flashDr(p.nth, nr)[1];
+    // küme 1: faz içindeki r8Pre(wo) küme 0'ı kurar (ABA yok)
+    while (p.pool.rangeNextS(1, p.ith)) |cur| flashTiled(p, a, dr * cur, @min(dr * cur + dr, nr));
 }
 
 /// ggml_compute_forward_flash_attn_ext_f16
