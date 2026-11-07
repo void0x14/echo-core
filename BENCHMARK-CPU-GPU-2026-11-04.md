@@ -39,16 +39,17 @@ Ham veri: `echo-core-zig/benchmarks/hile-baseline-*-2026-11-07.jsonl`. Baseline 
 | Qwen3.5-0.8B-Q8_0 (794.6 MiB) | llama.cpp (Referans) | 263.39 | 253.33 | 33.28 | 30.01 | 0.58x |
 | Qwen3.5-0.8B-Q8_0 (794.6 MiB) | echo-core Hilesiz (`--ngram 0`) | 243.06 | 242.76 | 53.71 | 51.99 | 1.00x |
 | Qwen3.5-0.8B-Q8_0 (794.6 MiB) | echo-core + Hile 06 (Grammar, `--grammar 1 --ngram 0`) | 273.93 | 215.32 | 58.48 | 60.32 | 1.16x |
-| Qwen3.5-0.8B-Q8_0 (794.6 MiB) | **echo-core Baseline = Hile 01 (n-gram, k=8, varsayılan)** | 233.23 | 222.76 | 87.03 | **115.18** | **2.22x** |
-| Qwen3.5-0.8B-Q8_0 (794.6 MiB) | echo-core + Hile 01 + Hile 06 (`--grammar 1`) | – | – | 53.69 | 84.26 | 1.62x |
+| Qwen3.5-0.8B-Q8_0 (794.6 MiB) | **echo-core Baseline = Hile 01 (n-gram, k=8, varsayılan)** | 233.23 | 222.76 | 87.03 | **134.33** (127,4–141,3) | **2.58x** |
+| Qwen3.5-0.8B-Q8_0 (794.6 MiB) | echo-core + Hile 01 + Hile 06 (`--grammar 1`) | – | – | 53.69 | 111.54 (106,3–116,8) | 2.15x |
 
-Not: H01 tg128 üç koşuda 114,3 / 115,2 / 141,9 çıktı (2,2x–2,7x); makine yükü pp'yi de ±%10 oynatıyor. Bu ölçüm rastgele başlangıç tokenıyla yapılır; model tek döngüye girer ve taslak döngüyü birebir yakalar. Yani tavan sayıdır, genel metin hızı değildir.
+Not: H01 ve H01+H06 satırları `-r 5` ile ikişer sıralı koşunun ortalamasıdır (ham: `benchmarks/h01-h06-karsilastirma-2026-11-07.txt`); ilk koşuda 3 tekrarla 114–142 çıkmıştı; makine yükü pp'yi de ±%10 oynatıyor. Bu ölçüm rastgele başlangıç tokenıyla yapılır; model tek döngüye girer ve taslak döngüyü birebir yakalar. Yani tavan sayıdır, genel metin hızı değildir.
 
 ### Hile Sonuç Özeti
-1. **Hile 01 (n-gram):** tg128 51,99 → 115,18 tok/s (2,22 kat). Modelin tekrarladığı diziyi tek seferde doğrulayıp kabul ediyor; çıktı Hilesiz greedy ile aynı (kayıpsız).
+1. **Hile 01 (n-gram):** tg128 51,99 → 134,33 tok/s (2,58 kat). Modelin tekrarladığı diziyi tek seferde doğrulayıp kabul ediyor; çıktı Hilesiz greedy ile aynı (kayıpsız).
 2. **Hile 06 (Grammar):** tg128 51,99 → 60,32 tok/s (1,16 kat). Yalnız JSON iskeleti gibi sabit şablonda işe yarar ve çıktıyı şablona zorlar, bu yüzden varsayılan yapılmadı.
-3. **Hile 01 + 06:** 84,26 tok/s (1,62 kat); H01 tek başına daha hızlı çıktı, çünkü şablon taslak zincirlerini kısaltıyor.
-4. **Pratikte:** Gerçek üretimde (`--prompt ... --bench`) kopya metinde 50,2 → 120,1 tok/s, sohbet isteminde 54,5 → 142,7–147,8 tok/s. Sohbet çıktısı tokenizer yüzünden boş satır döngüsüne giriyor; bu da n-gram'ın en kolay yakaladığı durum.
+3. **Hile 01 + 06:** 111,54 tok/s (2,15 kat); iki sıralı koşuda da H01 tek başına daha hızlı çıktı (127–141 / 106–117), bu yüzden H06 baseline'a katılmadı.
+4. **Pratikte:** Gerçek üretimde (`--prompt ... --bench`) kopya metinde 50,2 → 120,1 tok/s, sohbet isteminde 54,5 → 142,7–147,8, "The capital of France is" 52,7 → 132,5, masal başlangıcı 48,7 → 131,2 tok/s; kod isteminde (`def fibonacci(n):`) kazanç yok (52,0 = 52,0). Dört istemde çıktı `--ngram 0` ile bayt bayt aynı, `--logit-check` 9/9 eşit.
+5. **300 tavanı:** doğrulamasız saf batch decode: batch 1 → 50,3, 2 → 90,5, 4 → 161,4, 8 → 187,4, 16 → 222,3, 32 → 246,4 tok/s (`benchmarks/gen-batch-egri-2026-11-07.txt`). Ek token başına maliyet c ≈ 0,16–0,18 forward; batch büyüdükçe prefill hızına (≈245–290) yaklaşıp düzleşiyor, 300'e ulaşmıyor. Sohbet çıktısı tokenizer yüzünden boş satır döngüsüne giriyor; bu da n-gram'ın en kolay yakaladığı durum.
 
 ## Tek bakışta (GPU)
 
