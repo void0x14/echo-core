@@ -362,3 +362,8 @@ Bench üretimi 5 tokenlik döngüye giriyor; taslaklar %100 kabul (360/360). Sü
 | — | Tile genişliği NC=2/3/4/6/8 | — | mikro | 283/284/272/289/275M döngü → fark yok; darboğaz çift başına komut zinciri (~2 döngü/çift) |
 | H30a | Aktivasyonu u8'e kaydır (a+128): `vpsignb`/`vpabsb` kalkar, çift başına broadcast + `maddubs` + `vpaddw`; 128·Σw düzeltmesi repack'te (blok 304 B), i16 sarmalı | Komut azalır | mikro + bench + metin | Mikro ×1.26; bench +%5 ama kabul 30.1, metin bozuk ("100000…"): `maddubs` doyması sık. **Öldü** |
 | H30 | Aynı + aktivasyon 7 bit (|a| ≤ 63, a+64 ∈ [1,127]) → çift ≤ 32258, `maddubs` hiç doymaz; düzeltme 64·Σw | Doyma kalkar, hız kalır | 3 tur, metin | Metin tutarlı (hikâye), kabul 32/32. tg128 355/378/407 vs 330/375/366, tg32 268/277/251 vs 242/286/285. **Yaşadı** |
+| — | Saf asm tavanı: `vpbroadcastd` + `vpmaddubsw` + `vpaddw` | — | asm döngüsü | 1 döngü/çift (FP0'da `maddubs` 1/döngü). Çekirdek 1.65'te |
+| H31 | 2 satır grubunda broadcast paylaş | Broadcast darboğaz | mikro NC 2/3/4 | 230/218/220M vs 216M. **Öldü** |
+| H32 | `madd(ones)` yerine FP2 kaydırmaları | FP0 rahatlar | mikro (Zig ve asm) | 226–242M vs 216–223M; asm'de 192M vs 182M. **Öldü** |
+| H33 | Sütun dışta + volatile ağırlık | Spill kalkar | mikro NC 4/8 | 296–451M. **Öldü** |
+| H34 | Derleyici 8 ağırlık + 4 akümülatörü yığına döküyor (asm'de spill). 4 sütunluk R8 çekirdeği elle asm: ymm8–11 akümülatör, ymm12–15 i16 toplam, ağırlık k başına bir kez, blok çifti döngüsü asm içinde | Spill'siz çekirdek | mikro + 3 tur + metin | Mikro 216M → 182M (×1.19, 1.39 döngü/çift), sonuç aynı. tg128 395.6/395.6/397.8 vs 353.5/378.6/373.3, tg32 279/275/283 vs 261/271/248; metin aynı. **Yaşadı** |

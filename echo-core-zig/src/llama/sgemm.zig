@@ -440,6 +440,7 @@ pub const TinyBlasQ0 = struct {
 /// Çift (2p, 2p+1) = [16B ölçek][16B ölçek][32B düz.][32B düz.][256B quant][256B quant] → blok 304 bayt.
 pub const R8_BLOCK = 304;
 const R8_NC = 4;
+const R8_ASM = true;
 
 inline fn r8Scale(gbase: [*]const u8, l: usize) [*]const u8 {
     return gbase + (l / 2) * 2 * R8_BLOCK + (l % 2) * 16;
@@ -488,6 +489,67 @@ pub fn quantR8(x: [*]const f32, b: [*]q.BlockQ80, k: usize) void {
     }
 }
 
+/// H34: R8 4 sütunluk çekirdek, elle asm (derleyici 8 ağırlık + 4 akümülatörü yığına döküyordu).
+/// ymm0 w, ymm1 av/geçici, ymm3 düzeltme, ymm4 satır ölçeği, ymm5 sütun ölçeği, ymm6 bir(i16),
+/// ymm8-11 akümülatör, ymm12-15 i16 toplam. Döngü blok çifti başına (608 bayt).
+const r8x4_asm = blk: {
+    @setEvalBranchQuota(100000);
+    var t: []const u8 =
+        \\ vxorps %%ymm8, %%ymm8, %%ymm8
+        \\ vxorps %%ymm9, %%ymm9, %%ymm9
+        \\ vxorps %%ymm10, %%ymm10, %%ymm10
+        \\ vxorps %%ymm11, %%ymm11, %%ymm11
+        \\ vmovdqu (%[ones]), %%ymm6
+        \\ .p2align 4
+        \\ 1:
+        \\
+    ;
+    const bn = [4][]const u8{ "%[b0]", "%[b1]", "%[b2]", "%[b3]" };
+    for (0..2) |h| {
+        const q0 = 96 + h * 256;
+        const bo = h * 34;
+        for (0..8) |k| {
+            t = t ++ std.fmt.comptimePrint("vmovdqa {d}(%[w]), %%ymm0\n", .{q0 + 32 * k});
+            for (0..4) |c| {
+                t = t ++ std.fmt.comptimePrint("vpbroadcastd {d}({s}), %%ymm1\n", .{ bo + 2 + 4 * k, bn[c] });
+                if (k == 0) {
+                    t = t ++ std.fmt.comptimePrint("vpmaddubsw %%ymm0, %%ymm1, %%ymm{d}\n", .{12 + c});
+                } else {
+                    t = t ++ "vpmaddubsw %%ymm0, %%ymm1, %%ymm1\n" ++ std.fmt.comptimePrint("vpaddw %%ymm1, %%ymm{d}, %%ymm{d}\n", .{ 12 + c, 12 + c });
+                }
+            }
+        }
+        t = t ++ std.fmt.comptimePrint("vmovdqa {d}(%[w]), %%ymm3\nvcvtph2ps {d}(%[w]), %%ymm4\n", .{ 32 + h * 32, h * 16 });
+        for (0..4) |c| {
+            t = t ++ std.fmt.comptimePrint(
+                \\vpsubw %%ymm3, %%ymm{0d}, %%ymm{0d}
+                \\vpmaddwd %%ymm6, %%ymm{0d}, %%ymm{0d}
+                \\vcvtdq2ps %%ymm{0d}, %%ymm{0d}
+                \\movzwl {2d}({3s}), %%eax
+                \\vbroadcastss (%[tab],%%rax,4), %%ymm5
+                \\vmulps %%ymm4, %%ymm5, %%ymm5
+                \\vfmadd231ps %%ymm5, %%ymm{0d}, %%ymm{1d}
+                \\
+            , .{ 12 + c, 8 + c, bo, bn[c] });
+        }
+    }
+    t = t ++
+        \\ add $68, %[b0]
+        \\ add $68, %[b1]
+        \\ add $68, %[b2]
+        \\ add $68, %[b3]
+        \\ add $608, %[w]
+        \\ dec %[cnt]
+        \\ jnz 1b
+        \\ vmovups %%ymm8, 0x00(%[cv])
+        \\ vmovups %%ymm9, 0x20(%[cv])
+        \\ vmovups %%ymm10, 0x40(%[cv])
+        \\ vmovups %%ymm11, 0x60(%[cv])
+        \\
+    ;
+    break :blk t;
+};
+
 pub const GemmR8 = struct {
     pool: *Pool,
     nb: usize,
@@ -516,11 +578,35 @@ pub const GemmR8 = struct {
     pub fn chunk(self: *const GemmR8, cb: usize, m: usize, n: usize) void {
         const groups = m / 8;
         const g0 = cb * GB;
-        for (g0..@min(g0 + GB, groups)) |g| {
+        const g1 = @min(g0 + GB, groups);
+        for (g0..g1) |g| {
             var j: usize = 0;
+            if (R8_ASM) while (j + 4 <= n) : (j += 4) self.tileAsm(g, j);
             while (j + R8_NC <= n) : (j += R8_NC) self.tile(R8_NC, g, j);
             while (j < n) : (j += 1) self.tile(1, g, j);
         }
+    }
+
+    fn tileAsm(self: *const GemmR8, g: usize, j0: usize) void {
+        var cv: [4]F8 align(32) = undefined;
+        var w = self.a + g * self.nb * R8_BLOCK;
+        var b0: [*]const q.BlockQ80 = self.b + self.ldb * j0;
+        var b1 = b0 + self.ldb;
+        var b2 = b1 + self.ldb;
+        var b3 = b2 + self.ldb;
+        var cnt = self.nb / 2;
+        asm volatile (r8x4_asm
+            : [w] "+r" (w),
+              [b0] "+r" (b0),
+              [b1] "+r" (b1),
+              [b2] "+r" (b2),
+              [b3] "+r" (b3),
+              [cnt] "+r" (cnt),
+            : [tab] "r" (&avx.fp16_table),
+              [ones] "r" (&ones16),
+              [cv] "r" (&cv),
+            : .{ .rax = true, .ymm0 = true, .ymm1 = true, .ymm3 = true, .ymm4 = true, .ymm5 = true, .ymm6 = true, .ymm8 = true, .ymm9 = true, .ymm10 = true, .ymm11 = true, .ymm12 = true, .ymm13 = true, .ymm14 = true, .ymm15 = true, .memory = true, .cc = true });
+        inline for (0..4) |c| avx.storeF(self.c + self.ldc * (j0 + c) + g * 8, cv[c]);
     }
 
     inline fn tile(self: *const GemmR8, comptime NC: usize, g: usize, j0: usize) void {
