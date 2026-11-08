@@ -582,7 +582,9 @@ pub const Context = struct {
         self.trace_k = k;
         self.verify_tokens = try a.alloc(u32, k);
         if (self.lm) |s| {
-            if (k <= ivf.Batch.MAXR) self.lmb = try ivf.Batch.init(s.ix, s.nprobe, self.n_threads, a);
+            // ECHO_NPROBE_DOG: doğrulama satırlarında taranan küme (satırlar ayrı kümelere gidince maliyet satır sayısıyla katlanır)
+            const np_dog: usize = if (std.c.getenv("ECHO_NPROBE_DOG")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch s.nprobe else s.nprobe;
+            if (k <= ivf.Batch.MAXR) self.lmb = try ivf.Batch.init(s.ix, np_dog, self.n_threads, a);
         }
     }
 
