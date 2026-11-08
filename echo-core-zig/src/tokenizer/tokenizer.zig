@@ -1,5 +1,6 @@
 const std = @import("std");
 const gguf = @import("../gguf/reader.zig");
+pub const bpe_mod = @import("bpe.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
@@ -23,6 +24,9 @@ pub const SimpleTokenizer = struct {
     bos_id: u32,
     eos_id: u32,
     tokenizer_type: []const u8,
+    /// GPT-2/Qwen byte-level BPE (merge'li); varsa encode/decode buna gider.
+    bpe: ?bpe_mod.Bpe = null,
+    add_bos: bool = true,
 
     pub fn init(allocator: Allocator) SimpleTokenizer {
         return .{
@@ -98,11 +102,21 @@ pub const SimpleTokenizer = struct {
             if (numericAsU32(value)) |id| tokenizer.eos_id = id;
         }
 
+        if (reader.metadata.get("tokenizer.ggml.add_bos_token")) |value| switch (value) {
+            .bool => |b| tokenizer.add_bos = b,
+            else => {},
+        };
+        if (std.mem.eql(u8, tokenizer.tokenizer_type, "bpe") and reader.metadata.get("tokenizer.ggml.merges") != null) {
+            tokenizer.bpe = try bpe_mod.Bpe.initFromReader(reader, allocator);
+            if (reader.metadata.get("tokenizer.ggml.add_bos_token") == null) tokenizer.add_bos = false;
+            return tokenizer;
+        }
         try tokenizer.rebuildSortedTokens();
         return tokenizer;
     }
 
     pub fn deinit(self: *SimpleTokenizer) void {
+        if (self.bpe) |*b| b.deinit();
         self.sorted_tokens.deinit();
         self.token_to_id.deinit();
         for (self.id_to_token.items) |token| self.allocator.free(token.text);
@@ -138,6 +152,11 @@ pub const SimpleTokenizer = struct {
         var result = ArrayList(u32).init(self.allocator);
         errdefer result.deinit();
 
+        if (self.bpe) |*b| {
+            if (self.add_bos) try result.append(self.bos_id);
+            try b.encode(text, &result, true);
+            return result;
+        }
         try result.append(self.bos_id);
         if (text.len == 0) return result;
 
@@ -192,6 +211,10 @@ pub const SimpleTokenizer = struct {
         var result = ArrayList(u8).init(self.allocator);
         errdefer result.deinit();
 
+        if (self.bpe) |*b| {
+            for (ids) |id| try result.appendSlice(b.piece(id));
+            return result.toOwnedSlice();
+        }
         for (ids) |id| {
             if (id == self.bos_id or id == self.eos_id) continue;
             if (id >= self.id_to_token.items.len) continue;

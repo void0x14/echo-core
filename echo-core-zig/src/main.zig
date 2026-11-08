@@ -219,6 +219,9 @@ pub fn main(init: std.process.Init) !void {
         const save = args.items.len > 2 and std.mem.eql(u8, args.items[2], "--save");
         return @import("llama/logit_check.zig").run(save, 6, init.gpa, init.io);
     }
+    if (args.items.len > 4 and std.mem.eql(u8, args.items[1], "--tok-check")) {
+        return @import("tokenizer/check.zig").run(args.items[2], args.items[3], args.items[4], init.gpa, init.io);
+    }
     if (qwen35.supported and args.items.len > 1 and std.mem.eql(u8, args.items[1], "--llama-bench")) {
         return runLlamaBench(init, args.items);
     }

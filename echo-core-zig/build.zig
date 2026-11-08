@@ -37,6 +37,12 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // Birim testleri: zig build test
+    const test_mod = b.createModule(.{ .root_source_file = b.path("src/testler.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    test_mod.addImport("core_config", core_config_mod);
+    const tests = b.addTest(.{ .root_module = test_mod, .use_llvm = true });
+    b.step("test", "birim testleri").dependOn(&b.addRunArtifact(tests).step);
+
     // Dump model tool
     const dump_model_mod = b.createModule(.{
         .root_source_file = b.path("src/tools/dump_model_main.zig"),
