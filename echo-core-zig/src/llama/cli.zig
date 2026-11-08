@@ -280,13 +280,13 @@ return struct {
         var d: ?ngram.TokenDrafter = null;
         defer if (d) |*x| x.deinit();
         if (greedy and s.o.ngram) {
-            d = try ngram.TokenDrafter.init(s.a, envNum("ECHO_NG_N", 3));
+            d = try ngram.TokenDrafter.init(s.a, envNum("ECHO_NG_N", 2));
             for (s.hist.items) |t| try d.?.add(t);
         }
         var pending = s.next();
         var buf: [256]u32 = undefined;
-        const ng_max = @min(envNum("ECHO_NG_MAX", 64), buf.len);
-        const ng_min = envNum("ECHO_NG_MIN", 4);
+        const ng_max = @min(envNum("ECHO_NG_MAX", 128), buf.len);
+        const ng_min = envNum("ECHO_NG_MIN", 3);
         while (r.n_gen < limit) {
             if (kesildi.load(.acquire)) {
                 r.neden = "Ctrl+C";
@@ -437,18 +437,11 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
 fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io: std.Io) !void {
     const o = o_;
     if (o.fast and !o.prefill_fast) {
-        // sohbet seti (~/sohbet-seti/olcum.py) taramasıyla seçildi: 18 katman atlama + FFN 1920
-        _ = setenv("ECHO_SKIP", "20,7,18,11,12,8,5,13,10,9,6,17,16,3,21,1,15,4", 0);
-        _ = setenv("ECHO_FFN_KEEP", "1920", 0);
+        // kullanılabilir sınır (benchmarks/arac_test.py): FFN budama 3072'de bile araç çağrısını bozuyor; 1 katman atlama sayı yazımını bozuyor
+        _ = setenv("ECHO_SKIP", "", 0); // modelin yerleşik 8 katman atlaması da kapalı
         _ = setenv("ECHO_NG_N", "2", 0);
         _ = setenv("ECHO_NG_MIN", "3", 0);
         _ = setenv("ECHO_NG_MAX", "128", 0);
-        var buf: [4096]u8 = undefined;
-        const n = std.process.executableDirPath(io, &buf) catch 0;
-        const tam = std.fmt.allocPrintSentinel(a, "{s}/../../benchmarks/ffn-act-qwen35-0.8b-q8.bin", .{buf[0..n]}, 0) catch null;
-        if (tam) |t| if (std.Io.Dir.cwd().access(io, t, .{})) |_| {
-            _ = setenv("ECHO_FFN_ACT", t, 0);
-        } else |_| std.debug.print("uyarı: {s} yok\n", .{t});
     }
     if (o.prefill_fast) {
         // README "Prefill 2000 ayarı"; aktivasyon dosyası yoksa ağırlık normuyla budanır
@@ -466,7 +459,7 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         model.skip = 0;
     };
     const cpus = std.Thread.getCpuCount() catch 2;
-    const n_threads: u32 = o.threads orelse @intCast(@max(cpus / 2, 1));
+    const n_threads: u32 = o.threads orelse if (envNum("ECHO_THREADS", 0) > 0) @intCast(envNum("ECHO_THREADS", 0)) else @intCast(@max(cpus / 2, 1));
     const lm_ix: ?*ivf.Runtime = if (E != qwen35) null else if (o.fast) ivf.open(path, model.output, ivf.default_l, n_threads, a, io) catch null else null;
     defer if (lm_ix) |ix| ix.deinit(a);
 
@@ -482,7 +475,7 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         o.ngram = true;
     }
     if (o.ngram and (o.fast or o.sp.temp <= 0)) {
-        try ctx.enableTrace(@intCast(@min(envNum("ECHO_NG_MAX", 64), 256)));
+        try ctx.enableTrace(@intCast(@min(envNum("ECHO_NG_MAX", 128), 256)));
         ctx.no_trace = true; // geri alma snapshot ile (H13)
     }
 
