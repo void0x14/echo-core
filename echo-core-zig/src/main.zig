@@ -202,6 +202,13 @@ fn runLlamaBench(init: std.process.Init, args: []const []const u8) !void {
     try llama_bench.run(path, opt, init.gpa, init.io, &w.interface);
 }
 
+fn hasLegacyFlag(args: []const []const u8) bool {
+    for (args[1..]) |a| for ([_][]const u8{ "--bench", "--grammar", "--no-grammar", "--json", "--ngram", "--no-snap" }) |f| {
+        if (std.mem.eql(u8, a, f)) return true;
+    };
+    return false;
+}
+
 pub fn main(init: std.process.Init) !void {
     var args_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args_it.deinit();
@@ -225,6 +232,8 @@ pub fn main(init: std.process.Init) !void {
     if (qwen35.supported and args.items.len > 1 and std.mem.eql(u8, args.items[1], "--llama-bench")) {
         return runLlamaBench(init, args.items);
     }
+    // Eski deney yolu (--bench / --grammar / --json / --ngram) dışındaki her çağrı yeni sohbet arayüzüne gider.
+    if (!hasLegacyFlag(args.items)) return @import("llama/cli.zig").run(args.items, init.gpa, init.io);
 
     var prompt: ?[]const u8 = null;
     var max_tokens: u32 = 100;
