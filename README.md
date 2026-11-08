@@ -31,4 +31,4 @@ Achieving 50-100 t/s on local CPU/RAM configurations (i5-13500H / Ryzen 3600).
 - [x] 300 barajını aşmak
 - [x] 500 barajını aşmak
 - [x] 750 barajını aşmak
-- [x] 1000 barajını aşmak (kayıplı: ECHO_SKIP 8 katman + --lm-ivf 4096,128; ayrıntı ISLEYIS-ARASTIRMA.md)
+- [x] 1000 barajını aşmak (varsayılan: 8 katman atlama + nprobe 128, tg128 ~1270; tam model için ECHO_SKIP= boş; ayrıntı TAVAN-VE-VARSAYIMLAR.md)

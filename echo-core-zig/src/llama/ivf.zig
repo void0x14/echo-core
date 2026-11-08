@@ -7,9 +7,9 @@ const ops = @import("ops.zig");
 const sgemm = @import("sgemm.zig");
 const F8 = @Vector(8, f32);
 const Alloc = std.mem.Allocator;
-/// Varsayılan LM head yolu: IVF (yaklaşık, yalnız top-1). 4096 küme, nprobe 512.
+/// Varsayılan LM head yolu: IVF (yaklaşık, yalnız top-1). 4096 küme, nprobe 128 (TG 1000 ayarı; eski 512).
 pub const default_l: usize = 4096;
-pub const default_nprobe: usize = 512;
+pub const default_nprobe: usize = 128;
 
 fn parallel(nth: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), usize) void) !void {
     var th: [64]std.Thread = undefined;

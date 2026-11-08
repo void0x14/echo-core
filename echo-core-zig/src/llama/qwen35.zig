@@ -189,6 +189,11 @@ pub const Model = struct {
             try self.repackLayer(l);
         }
         if (ffn_keep) |kk| self.n_ff = kk;
+        // Varsayılan (TG 1000 ayarı, yalnız Qwen3.5-0.8B: 24 katman × 1024): 8 katman atlanır.
+        // Tam model için ECHO_SKIP= (boş) verilir.
+        if (std.c.getenv("ECHO_SKIP") == null and n_layer == 24 and n_embd == 1024) {
+            for ([_]u6{ 20, 7, 18, 11, 12, 8, 5, 13 }) |il| self.skip |= @as(u64, 1) << il;
+        }
         if (std.c.getenv("ECHO_SKIP")) |x| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(x), ',');
             while (it.next()) |t| {
