@@ -35,17 +35,20 @@ pub fn build(b: *std.Build) void {
         .root_module = echo_core_module,
         .use_llvm = true, // src/llama: llvm.x86.* intrinsic extern'leri
     });
-    {
-        // CPU kontrolü: C dosyası temel x86-64 ile derlenir, hedefin özelliklerini tanımla olarak alır
+    if (target.result.cpu.arch == .x86_64) {
+        // CPU kontrolü: temel x86-64 ile ayrı nesne; hedefin özellikleri seçenek olarak verilir
         const x86 = std.Target.x86;
-        const r = target.result;
-        var flags: std.ArrayList([]const u8) = .empty;
-        flags.append(b.allocator, "-march=x86-64") catch @panic("oom");
-        inline for (.{ "avx", "avx2", "fma", "f16c", "bmi", "bmi2", "avx512f", "avx512bw", "avx512vl", "avx512vnni" }) |ad| {
-            const var_mi = r.cpu.arch == .x86_64 and x86.featureSetHas(r.cpu.features, @field(x86.Feature, ad));
-            flags.append(b.allocator, b.fmt("-DECHO_GEREKLI_{s}={d}", .{ ad, @intFromBool(var_mi) })) catch @panic("oom");
-        }
-        if (r.cpu.arch == .x86_64) exe.root_module.addCSourceFile(.{ .file = b.path("src/c/cpu_kontrol.c"), .flags = flags.items });
+        const opts = b.addOptions();
+        inline for (.{ "avx", "avx2", "fma", "f16c", "bmi", "bmi2", "avx512f", "avx512bw", "avx512vl", "avx512vnni" }) |ad|
+            opts.addOption(bool, ad, x86.featureSetHas(target.result.cpu.features, @field(x86.Feature, ad)));
+        const kmod = b.createModule(.{
+            .root_source_file = b.path("src/cpu_kontrol.zig"),
+            .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = target.result.os.tag, .abi = target.result.abi, .cpu_model = .baseline }),
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        kmod.addOptions("cpu_gerekli", opts);
+        exe.root_module.addObject(b.addObject(.{ .name = "cpu_kontrol", .root_module = kmod }));
     }
     b.installArtifact(exe);
     // kullanıcıya dönük ad (eski ad betikler için kalır); `echo` kabuk komutuyla çakıştığı için kullanılmadı
