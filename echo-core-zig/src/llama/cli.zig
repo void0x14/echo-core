@@ -434,6 +434,17 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
 
 fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io: std.Io) !void {
     const o = o_;
+    if (o.fast and !o.prefill_fast) {
+        // sohbet seti (~/sohbet-seti/olcum.py) taramasıyla seçildi: 18 katman atlama + FFN 1920
+        _ = setenv("ECHO_SKIP", "20,7,18,11,12,8,5,13,10,9,6,17,16,3,21,1,15,4", 0);
+        _ = setenv("ECHO_FFN_KEEP", "1920", 0);
+        var buf: [4096]u8 = undefined;
+        const n = std.process.executableDirPath(io, &buf) catch 0;
+        const tam = std.fmt.allocPrintSentinel(a, "{s}/../../benchmarks/ffn-act-qwen35-0.8b-q8.bin", .{buf[0..n]}, 0) catch null;
+        if (tam) |t| if (std.Io.Dir.cwd().access(io, t, .{})) |_| {
+            _ = setenv("ECHO_FFN_ACT", t, 0);
+        } else |_| std.debug.print("uyarı: {s} yok\n", .{t});
+    }
     if (o.prefill_fast) {
         // README "Prefill 2000 ayarı"; aktivasyon dosyası yoksa ağırlık normuyla budanır
         _ = setenv("ECHO_FFN_KEEP", "1920", 0);
@@ -457,7 +468,8 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
     const ctx = try E.Context.init(model, o.n_ctx, n_threads, a);
     defer ctx.deinit();
     if (E == qwen35) if (lm_ix) |ix| {
-        ctx.lm = try ivf.Search.init(ix, ivf.default_nprobe, n_threads, a);
+        const np: u32 = if (std.c.getenv("ECHO_NPROBE")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch ivf.default_nprobe else ivf.default_nprobe;
+        ctx.lm = try ivf.Search.init(ix, np, n_threads, a);
     };
     defer if (ctx.lm) |l| l.deinit(a);
     if (o.fast) {
