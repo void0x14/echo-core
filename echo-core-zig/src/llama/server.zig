@@ -198,12 +198,10 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
     var bas: usize = 0;
     const k = &s.kayit.?;
     if (k.head > 0 and k.head < ids.items.len and std.mem.startsWith(u32, ids.items, s.kayit_ids.items)) {
-        s.ctx.yukle(k);
-        s.hist.shrinkRetainingCapacity(k.head);
+        s.kayittanYukle(k);
         bas = k.head;
     } else {
-        s.ctx.clear();
-        s.hist.clearRetainingCapacity();
+        s.temizle();
     }
     // bir sonraki istek için kayıt noktası: son <|im_start|> (asistan başlığı) öncesi
     s.kayit_noktasi = 0;

@@ -13,6 +13,7 @@ const sampler = @import("sampler.zig");
 
 const ArrayList = std.array_list.Managed;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 const Alloc = std.mem.Allocator;
 
 pub const yardim =
@@ -193,6 +194,51 @@ return struct {
     kayit_ids: ArrayList(u32) = undefined,
     /// runIds'te bu kadar token işlenince durum kaydedilir (0 = kaydetme)
     kayit_noktasi: usize = 0,
+    /// taslakçı (--fast ayarlı model): ana ctx ile aynı tokenları işler
+    tc: ?*E.Context = null,
+    taslak_k: usize = 0,
+    dkayit: E.Context.Kayit = .{},
+    dsnap: E.Context.Kayit = .{},
+
+    pub fn temizle(s: *Self) void {
+        s.ctx.clear();
+        if (s.tc) |tc| tc.clear();
+        s.hist.clearRetainingCapacity();
+    }
+    pub fn kayittanYukle(s: *Self, k: *const E.Context.Kayit) void {
+        s.ctx.yukle(k);
+        if (s.tc) |tc| tc.yukle(&s.dkayit);
+        s.hist.shrinkRetainingCapacity(k.head);
+    }
+
+    /// Taslakçı pending'den başlayıp out.len-1 token önerir; işlediği tokenlar out[0..m-1].
+    fn taslakla(s: *Self, tc: *E.Context, pending: u32, out: []u32) !usize {
+        if (comptime E != qwen35) return 0;
+        try tc.kaydet(&s.dsnap);
+        out[0] = pending;
+        var m: usize = 1;
+        while (m < out.len) {
+            try tc.decode(out[m - 1 .. m]);
+            out[m] = tc.lm.?.token;
+            m += 1;
+            if (s.isStop(out[m - 1])) break;
+        }
+        return m;
+    }
+    /// Kabulden sonra taslakçıyı ana ctx ile aynı noktaya getirir (ana ctx buf[0..acc] işledi).
+    fn esitle(s: *Self, tc: *E.Context, buf: []const u32, acc: usize, model_taslak: bool) !void {
+        const m = buf.len;
+        if (!model_taslak) {
+            if (acc > 0) try tc.decode(buf[0..acc]);
+        } else if (acc + 1 == m) {
+            // taslakçı tam bu kadarını işledi
+        } else if (acc == m) {
+            try tc.decode(buf[m - 1 .. m]);
+        } else {
+            tc.yukle(&s.dsnap);
+            if (acc > 0) try tc.decode(buf[0..acc]);
+        }
+    }
 
     pub fn tokenize(s: *Self, text: []const u8, special: bool, dst: *ArrayList(u32)) !void {
         try s.bpe.encode(text, dst, special);
@@ -216,6 +262,7 @@ return struct {
     fn feed(s: *Self, ids: []const u32) !void {
         if (s.ctx.head + ids.len > s.ctx.n_ctx) return error.ContextFull;
         try s.ctx.decode(ids);
+        if (s.tc) |tc| try tc.decode(ids);
         try s.hist.appendSlice(ids);
     }
 
@@ -259,6 +306,7 @@ return struct {
         if (s.kayit != null and kn > 0 and kn < ids.items.len) {
             try s.feed(ids.items[0..kn]);
             try s.ctx.kaydet(&s.kayit.?);
+            if (s.tc) |tc| try tc.kaydet(&s.dkayit);
             s.kayit_ids.clearRetainingCapacity();
             try s.kayit_ids.appendSlice(s.hist.items);
             try s.feed(ids.items[kn..]);
@@ -302,8 +350,20 @@ return struct {
             // greedy: n-gram taslağı tek forward'da doğrulanır (kayıpsız; kabul edilen tokenlar aynı)
             if (d) |*dr| {
                 const room = @min(ng_max, limit - r.n_gen, s.ctx.n_ctx - s.ctx.head - 1);
-                const m = dr.chain(buf[0..room]);
-                if (m >= ng_min and buf[0] == pending and s.ctx.trace_k >= m) {
+                var m = dr.chain(buf[0..room]);
+                var model_taslak = false;
+                if (!(m >= ng_min and buf[0] == pending and s.ctx.trace_k >= m)) {
+                    m = 0;
+                    if (s.tc) |tc| if (room >= 2) {
+                        m = try s.taslakla(tc, pending, buf[0..@min(room, s.taslak_k + 1, s.ctx.trace_k)]);
+                        model_taslak = true;
+                        if (m < 2) {
+                            try s.esitle(tc, buf[0..m], 0, true);
+                            m = 0;
+                        }
+                    };
+                }
+                if (m > 0) {
                     const before = s.ctx.head;
                     s.ctx.snapshot();
                     try s.ctx.decodeVerify(buf[0..m]);
@@ -322,6 +382,7 @@ return struct {
                         s.ctx.rollback(before);
                         if (acc > 0) try s.ctx.decode(buf[0..acc]);
                     }
+                    if (s.tc) |tc| try s.esitle(tc, buf[0..m], acc, model_taslak);
                     for (buf[0..acc]) |t| {
                         try s.hist.append(t);
                         try dr.add(t);
@@ -437,11 +498,18 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
 fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io: std.Io) !void {
     const o = o_;
     if (o.fast and !o.prefill_fast) {
-        // kullanılabilir sınır (benchmarks/arac_test.py): FFN budama 3072'de bile araç çağrısını bozuyor; 1 katman atlama sayı yazımını bozuyor
-        _ = setenv("ECHO_SKIP", "", 0); // modelin yerleşik 8 katman atlaması da kapalı
+        // sohbet seti (~/sohbet-seti/olcum.py) taramasıyla seçildi: 18 katman atlama + FFN 1920 + n-gram 2/3/128
+        _ = setenv("ECHO_SKIP", "20,7,18,11,12,8,5,13,10,9,6,17,16,3,21,1,15,4", 0);
+        _ = setenv("ECHO_FFN_KEEP", "1920", 0);
         _ = setenv("ECHO_NG_N", "2", 0);
         _ = setenv("ECHO_NG_MIN", "3", 0);
         _ = setenv("ECHO_NG_MAX", "128", 0);
+        var buf: [4096]u8 = undefined;
+        const n = std.process.executableDirPath(io, &buf) catch 0;
+        const tam = std.fmt.allocPrintSentinel(a, "{s}/../../benchmarks/ffn-act-qwen35-0.8b-q8.bin", .{buf[0..n]}, 0) catch null;
+        if (tam) |t| if (std.Io.Dir.cwd().access(io, t, .{})) |_| {
+            _ = setenv("ECHO_FFN_ACT", t, 0);
+        } else |_| std.debug.print("uyarı: {s} yok\n", .{t});
     }
     if (o.prefill_fast) {
         // README "Prefill 2000 ayarı"; aktivasyon dosyası yoksa ağırlık normuyla budanır
@@ -451,6 +519,16 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         if (std.Io.Dir.cwd().access(io, act, .{})) |_| {
             _ = setenv("ECHO_FFN_ACT", act, 0);
         } else |_| std.debug.print("uyarı: {s} yok (echo-core-zig dizininden çalıştırın)\n", .{act});
+    }
+    // --fast: ayar (atlama + FFN budama) taslakçı modelde; çıktıyı tam model doğrular (ECHO_TASLAK=0 eski tek model)
+    const taslak_k = envNum("ECHO_TASLAK", 6);
+    const taslak_ac = E == qwen35 and o.fast and !o.prefill_fast and taslak_k > 0;
+    const dmodel: ?*E.Model = if (taslak_ac) try E.Model.load(path, a) else null;
+    defer if (dmodel) |m| m.deinit();
+    if (taslak_ac) {
+        _ = unsetenv("ECHO_FFN_KEEP");
+        _ = unsetenv("ECHO_FFN_ACT");
+        _ = setenv("ECHO_SKIP", "", 1);
     }
     const model = try E.Model.load(path, a);
     defer model.deinit();
@@ -470,6 +548,12 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         ctx.lm = try ivf.Search.init(ix, np, n_threads, a);
     };
     defer if (ctx.lm) |l| l.deinit(a);
+    const dctx: ?*E.Context = if (dmodel) |m| try E.Context.init(m, o.n_ctx, n_threads, a) else null;
+    defer if (dctx) |c| c.deinit();
+    if (E == qwen35) if (dctx) |c| {
+        c.lm = try ivf.Search.init(lm_ix orelse return error.IvfYok, if (ctx.lm) |l| l.nprobe else ivf.default_nprobe, n_threads, a);
+    };
+    defer if (dctx) |c| if (c.lm) |l| l.deinit(a);
     if (o.fast) {
         o.sp.temp = 0;
         o.ngram = true;
@@ -495,8 +579,12 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         .out = &ow.interface,
         .limit = o.n_predict,
         .stops = o.stops.items,
+        .tc = dctx,
+        .taslak_k = taslak_k,
     };
     defer s.hist.deinit();
+    defer s.dkayit.deinit(a);
+    defer s.dsnap.deinit(a);
     s.stop_ids[0] = bpe.specialId("<|im_end|>") orelse std.math.maxInt(u32);
     s.stop_ids[1] = bpe.specialId("<|endoftext|>") orelse std.math.maxInt(u32);
 
@@ -577,16 +665,14 @@ fn sohbet(s: anytype) !void {
         if (t.len == 0) continue;
         if (std.mem.eql(u8, t, "/quit") or std.mem.eql(u8, t, "/exit")) break;
         if (std.mem.eql(u8, t, "/reset")) {
-            s.ctx.clear();
-            s.hist.clearRetainingCapacity();
+            s.temizle();
             s.acik_cevap = false;
             std.debug.print("[geçmiş silindi]\n", .{});
             continue;
         }
         if (std.mem.startsWith(u8, t, "/sys")) {
             s.sys = try s.a.dupe(u8, std.mem.trim(u8, t[4..], " "));
-            s.ctx.clear();
-            s.hist.clearRetainingCapacity();
+            s.temizle();
             s.acik_cevap = false;
             std.debug.print("[sistem mesajı ayarlandı, geçmiş silindi]\n", .{});
             continue;
