@@ -26,7 +26,7 @@ markmap:
   | llama.cpp | 30.5 | referans |
   | varsayılan | 34.8 | ppl +%1.1 |
   | `--exact` | 36.5 | llama.cpp ile aynı |
-  | `--fast` | 1180 | sohbet setinde (8 Kas akşam) |
+  | `--fast` | 117 | sohbette anlamsız |
 - **Açık kalanlar**
   - Varsayılan mod llama.cpp ile birebir değil (H38'den beri)
   - Araç çağırma (tool_calls) yok
@@ -36,7 +36,8 @@ markmap:
   - FFN 1920 (aktivasyon dosyası): → 961
   - n-gram derece 2, en kısa 3: → ~1020
   - en uzun taslak 128: → **1180**
-  - Kalite ölçülmedi
+  - ⛔ Geri alındı: 18 atla + FFN cevabı bozuyor, bu aşamanın amacı kullanılabilirlik
+  - Kalan: kayıpsız n-gram 2/3/128 (cevabı değiştirmez)
 - **Sıradaki iş**
   - Context window
 - **İlk okunacak**
@@ -51,7 +52,7 @@ markmap:
   | 70 → 500 | ✅ | çekirdek + n-gram |
   | 750 | ✅ 762 | kayıpsız |
   | 1000 | ✅ ~1270 | 8 katman atla |
-  | 1000 (sohbet seti) | ✅ 1180 | 18 atla + FFN 1920 + n-gram 2/3/128 |
+  | 1000 (sohbet seti) | 1180 (geri alındı) | kayıplı, kullanılabilirliği bozuyor |
 - **Prefill (pp512)**
   | Baraj | Durum | Kalite (top-1) |
   |---|---|---|
