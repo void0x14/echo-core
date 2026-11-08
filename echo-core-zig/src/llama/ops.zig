@@ -335,6 +335,12 @@ pub fn mulMatMultiQE(p: *const Params, mats: []const Mat, n: usize, ys: []const 
     r8Run(p, mats, n, ys, ctx, p.wdata, 0);
 }
 
+/// N6: r8Run işareti: ilk matris (wq) yalnız son token sütunu için hesaplanır.
+pub const Last0 = struct {};
+pub fn mulMatLast0(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32) void {
+    r8Run(p, mats, n, ys, Last0{}, p.wdata, 0);
+}
+
 fn r8Run(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx: anytype, wdata: [*]u8, set: u1) void {
     const k = mats[0].k;
     const row_size = dotRowSize(.q8_0, k);
@@ -345,8 +351,9 @@ fn r8Run(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx:
             const nc = sgemm.GemmR8.chunks(a.m);
             if (c < nc) {
                 const g = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith, .r16 = a.r16 };
-                g.chunkCols(c, a.m, cols[0], cols[1]);
-                if (@TypeOf(ctx) != void) {
+                const j0 = if (@TypeOf(ctx) == Last0 and mi == 0) @max(cols[0], n - 1) else cols[0];
+                if (j0 < cols[1]) g.chunkCols(c, a.m, j0, cols[1]);
+                if (@TypeOf(ctx) != void and @TypeOf(ctx) != Last0) {
                     // parça sonu işlemi tüm tokenları ister: son yarıyı bitiren yapar
                     const pc = &p.pool.part_cnt[u / SPLIT];
                     if (pc.fetchAdd(1, .acq_rel) + 1 == SPLIT) {

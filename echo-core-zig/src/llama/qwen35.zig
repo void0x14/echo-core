@@ -968,8 +968,25 @@ pub const Context = struct {
         const dh = m.head_dim;
         const kv_row = dh * m.n_head_kv;
 
-        ops.mulMatMultiQ(p, &.{ l.wq, l.wv, l.wk }, self.b_norm.ptr, n_t, &.{ self.b_qfull.ptr, self.b_vv.ptr, self.b_kk.ptr });
         const qw = ops.r8Ok(&.{l.wo});
+        // N6: son katmanda (want_all yoksa) yalnız son token'ın çıktısı okunur: q, flash, gate, wo tek token; k/v tümü (önbellek)
+        if (il + 1 == m.layers.len and !self.want_all and n_t > 1 and qw and ops.r8Ok(&.{ l.wq, l.wv, l.wk }) and m.n_rot <= 128 and std.c.getenv("ECHO_OLD_ATTN") == null) {
+            ops.mulMatLast0(p, &.{ l.wq, l.wv, l.wk }, n_t, &.{ self.b_qfull.ptr, self.b_vv.ptr, self.b_kk.ptr });
+            ops.attnPrep(p, n_t, dh, m.n_head, m.n_head_kv, self.b_qfull.ptr, self.b_gdn.ptr, self.b_kk.ptr, self.b_vv.ptr, self.kv_k[il].ptr + self.head * kv_row, self.kv_v[il].ptr + self.head * kv_row, m.eps, l.q_norm, l.k_norm, self.head, m.n_rot, self.theta_scale);
+            p.barrier();
+            const qrow = dh * m.n_head;
+            var args = self.flashArgs(il);
+            args.q = self.b_gdn.ptr + (n_t - 1) * qrow;
+            args.n_t = 1;
+            args.first_cell = self.head + n_t - 1;
+            ops.flashAttn(p, &args);
+            p.barrier();
+            ops.gateAttn(p, 1, m.n_head, dh, self.b_q.ptr, self.b_qfull.ptr + (n_t - 1) * qrow * 2, true);
+            ops.r8Pre(p, &.{l.wo});
+            p.barrier();
+            return ops.mulMatMultiQ(p, &.{l.wo}, self.b_q.ptr, 1, &.{self.b_attn.ptr + (n_t - 1) * m.n_embd});
+        }
+        ops.mulMatMultiQ(p, &.{ l.wq, l.wv, l.wk }, self.b_norm.ptr, n_t, &.{ self.b_qfull.ptr, self.b_vv.ptr, self.b_kk.ptr });
         const fg = qw and ops.flashGateOk(n_t, dh) and m.n_rot <= 128;
         if (m.n_rot <= 128 and std.c.getenv("ECHO_OLD_ATTN") == null) {
             ops.attnPrep(p, n_t, dh, m.n_head, m.n_head_kv, self.b_qfull.ptr, self.b_gdn.ptr, self.b_kk.ptr, self.b_vv.ptr, self.kv_k[il].ptr + self.head * kv_row, self.kv_v[il].ptr + self.head * kv_row, m.eps, l.q_norm, l.k_norm, self.head, m.n_rot, self.theta_scale);
