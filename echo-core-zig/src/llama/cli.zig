@@ -335,6 +335,13 @@ return struct {
         var buf: [256]u32 = undefined;
         const ng_max = @min(envNum("ECHO_NG_MAX", 128), buf.len);
         const ng_min = envNum("ECHO_NG_MIN", 3);
+        // tutmayan taslak yolu geri çekilir: reddedilince bekleme 2 katına (en çok 64 token), tutunca sıfır
+        // zincir boyu kabule uyar: 8'den başlar, tamamı tutarsa 2 katı (ECHO_NG_MAX'a kadar), tutmazsa kabulün 2 katı
+        var gc = [2]struct { sonraki: usize = 0, bekle: usize = 1, boy: usize = 8, deneme: usize = 0, kabul: usize = 0, onerilen: usize = 0 }{ .{}, .{} };
+        var t_taslak: u64 = 0;
+        const t_bas = std.Io.Timestamp.now(s.io, .awake);
+        // ECHO_TASLAK_IST=dosya: yalnız sayılar eklenir (içerik yazılmaz)
+        defer if (std.c.getenv("ECHO_TASLAK_IST")) |yol| istYaz(s.io, std.mem.span(yol), .{ gc[0].deneme, gc[0].kabul, gc[0].onerilen, gc[1].deneme, gc[1].kabul, gc[1].onerilen, t_taslak / 1_000_000, r.n_gen, @as(u64, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds())) / 1_000_000 });
         while (r.n_gen < limit) {
             if (kesildi.load(.acquire)) {
                 r.neden = "Ctrl+C";
@@ -350,12 +357,14 @@ return struct {
             // greedy: n-gram taslağı tek forward'da doğrulanır (kayıpsız; kabul edilen tokenlar aynı)
             if (d) |*dr| {
                 const room = @min(ng_max, limit - r.n_gen, s.ctx.n_ctx - s.ctx.head - 1);
-                var m = dr.chain(buf[0..room]);
+                var m: usize = if (r.n_gen >= gc[0].sonraki) dr.chain(buf[0..@min(room, gc[0].boy)]) else 0;
                 var model_taslak = false;
                 if (!(m >= ng_min and buf[0] == pending and s.ctx.trace_k >= m)) {
                     m = 0;
-                    if (s.tc) |tc| if (room >= 2) {
+                    if (s.tc) |tc| if (room >= 2 and r.n_gen >= gc[1].sonraki) {
+                        const tt = std.Io.Timestamp.now(s.io, .awake);
                         m = try s.taslakla(tc, pending, buf[0..@min(room, s.taslak_k + 1, s.ctx.trace_k)]);
+                        t_taslak += @intCast(tt.untilNow(s.io, .awake).toNanoseconds());
                         model_taslak = true;
                         if (m < 2) {
                             try s.esitle(tc, buf[0..m], 0, true);
@@ -383,6 +392,15 @@ return struct {
                         if (acc > 0) try s.ctx.decode(buf[0..acc]);
                     }
                     if (s.tc) |tc| try s.esitle(tc, buf[0..m], acc, model_taslak);
+                    const g = &gc[@intFromBool(model_taslak)];
+                    g.deneme += 1;
+                    g.kabul += acc -| 1;
+                    g.onerilen += m - 1;
+                    if (acc <= 1) {
+                        g.sonraki = r.n_gen + acc + g.bekle;
+                        g.bekle = @min(g.bekle * 2, 64);
+                    } else g.bekle = 1;
+                    g.boy = if (acc == m) @min(g.boy * 2, ng_max) else std.math.clamp(acc * 2, ng_min, ng_max);
                     for (buf[0..acc]) |t| {
                         try s.hist.append(t);
                         try dr.add(t);
@@ -684,4 +702,13 @@ fn sohbet(s: anytype) !void {
 fn envNum(name: [*:0]const u8, def: usize) usize {
     const v = std.c.getenv(name) orelse return def;
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch def;
+}
+
+fn istYaz(io: std.Io, yol: []const u8, v: anytype) void {
+    var b: [256]u8 = undefined;
+    const t = std.fmt.bufPrint(&b, "ng_deneme={d} ng_kabul={d} ng_oneri={d} md_deneme={d} md_kabul={d} md_oneri={d} taslak_ms={d} uretim={d} uretim_ms={d}\n", v) catch return;
+    const f = std.Io.Dir.cwd().createFile(io, yol, .{ .truncate = false }) catch return;
+    defer f.close(io);
+    const n = f.length(io) catch return;
+    f.writePositionalAll(io, t, n) catch {};
 }
