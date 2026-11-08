@@ -3,6 +3,7 @@
 const std = @import("std");
 const cli = @import("cli.zig");
 const sampler = @import("sampler.zig");
+const sablon = @import("sablon.zig");
 
 const ArrayList = std.array_list.Managed;
 const Value = std.json.Value;
@@ -86,12 +87,25 @@ const Akis = struct {
     created: i64,
     chat: bool,
     metin: ArrayList(u8),
+    arac: bool = false, // tools verildi: <tool_call> sonrası akıtılmaz, sonda tool_calls olarak gider
+    gonderilen: usize = 0,
 
     fn parca(ctx: *anyopaque, t: []const u8) anyerror!void {
         const k: *Akis = @ptrCast(@alignCast(ctx));
         try k.metin.appendSlice(t);
         if (k.id.len == 0) return; // stream değil: yalnız biriktir
-        try k.gonder(t, null);
+        if (!k.arac) return k.gonder(t, null);
+        const m = k.metin.items;
+        var lim = std.mem.indexOf(u8, m, "<tool_call>") orelse m.len;
+        if (lim == m.len) { // "<tool_call>" başı olabilecek kuyruğu tut
+            var j: usize = @min(m.len, "<tool_call>".len - 1);
+            while (j > 0) : (j -= 1) if (std.mem.startsWith(u8, "<tool_call>", m[m.len - j ..])) break;
+            lim = m.len - j;
+        }
+        if (lim > k.gonderilen) {
+            try k.gonder(m[k.gonderilen..lim], null);
+            k.gonderilen = lim;
+        }
     }
     fn gonder(k: *Akis, t: []const u8, finish: ?[]const u8) !void {
         const b = if (k.chat)
@@ -157,6 +171,7 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
 
     // prompt → token
     var ids = ArrayList(u32).init(a);
+    var tools: ?Value = null;
     if (chat) {
         const msgs = o.get("messages") orelse return hata(w, "400 Bad Request", "messages yok", a);
         if (msgs != .array) return hata(w, "400 Bad Request", "messages dizi olmalı", a);
@@ -164,23 +179,15 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
         if (o.get("chat_template_kwargs")) |k| if (k == .object) if (k.object.get("enable_thinking")) |e| {
             think = e == .bool and e.bool;
         };
-        for (msgs.array.items) |m| {
-            if (m != .object) continue;
-            const role = str(m.object.get("role")) orelse "user";
-            try s.tokenize("<|im_start|>", true, &ids);
-            try s.tokenize(if (std.mem.eql(u8, role, "developer")) "system" else role, false, &ids);
-            try s.tokenize("\n", false, &ids);
-            const asistan = std.mem.eql(u8, role, "assistant");
-            if (m.object.get("content")) |c| switch (c) {
-                // resmi şablon: geçmiş asistan mesajında düşünce bloğu atılır
-                .string => |t| try s.tokenize(if (asistan) if (std.mem.lastIndexOf(u8, t, "</think>")) |e| std.mem.trimStart(u8, t[e + 8 ..], "\n") else t else t, false, &ids),
-                .array => |parts| for (parts.items) |p| if (p == .object) if (str(p.object.get("text"))) |t| try s.tokenize(t, false, &ids),
-                else => {},
-            };
-            try s.tokenize("<|im_end|>\n", true, &ids);
-        }
-        try s.tokenize("<|im_start|>assistant\n", true, &ids);
-        try s.tokenize(if (think) "<think>\n" else "<think>\n\n</think>\n\n", true, &ids);
+        // şablon için sayılar metin olarak (HF tojson ile aynı yazım)
+        const pv = (std.json.parseFromSlice(Value, a, req.body, .{ .parse_numbers = false }) catch return hata(w, "400 Bad Request", "geçersiz JSON", a)).value.object;
+        tools = pv.get("tools");
+        if (tools) |t| if (t != .array or t.array.items.len == 0) {
+            tools = null;
+        };
+        const metin = try sablon.kur(a, pv.get("messages").?.array.items, tools, think);
+        if (std.c.getenv("ECHO_SABLON_YAZ")) |yol| std.Io.Dir.cwd().writeFile(s.io, .{ .sub_path = std.mem.span(yol), .data = metin }) catch {};
+        try s.tokenize(metin, true, &ids);
     } else {
         const p = str(o.get("prompt")) orelse return hata(w, "400 Bad Request", "prompt yok", a);
         try s.tokenize(p, true, &ids);
@@ -209,24 +216,33 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
         };
     }
     const id = try std.fmt.allocPrint(a, "{s}-echo-{d}", .{ if (chat) "chatcmpl" else "cmpl", now });
-    var ak = Akis{ .w = w, .a = a, .id = if (stream) id else "", .model = model_name, .created = now, .chat = chat, .metin = ArrayList(u8).init(a) };
+    var ak = Akis{ .w = w, .a = a, .id = if (stream) id else "", .model = model_name, .created = now, .chat = chat, .metin = ArrayList(u8).init(a), .arac = tools != null };
     s.sink = .{ .ctx = &ak, .f = Akis.parca };
     defer s.sink = null;
     if (stream) try w.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
     if (stream and chat) try ak.gonder("", null); // ilk chunk: rol
     var r = try s.runIds(ids.items[bas..]);
     r.n_prompt = ids.items.len;
-    const finish: []const u8 = if (std.mem.eql(u8, r.neden, "-n sınırı") or std.mem.eql(u8, r.neden, "context dolu")) "length" else "stop";
+    var finish: []const u8 = if (std.mem.eql(u8, r.neden, "-n sınırı") or std.mem.eql(u8, r.neden, "context dolu")) "length" else "stop";
     std.debug.print("[{s} {s}: prompt {d} tok ({d} hazır), üretim {d} tok, {d:.1} tok/s, {s}]\n", .{ req.method, req.path, r.n_prompt, bas, r.n_gen, @as(f64, @floatFromInt(r.n_gen)) / (@as(f64, @floatFromInt(@max(r.t_gen, 1))) / 1e9), r.neden });
+    const ay = if (tools != null) try sablon.ayir(a, ak.metin.items, tools) else sablon.Ayrik{ .content = ak.metin.items, .calls = &.{} };
+    const Tc = struct { index: usize, id: []const u8, type: []const u8 = "function", function: sablon.Cagri };
+    const tcs = try a.alloc(Tc, ay.calls.len);
+    for (ay.calls, 0..) |c, i| tcs[i] = .{ .index = i, .id = try std.fmt.allocPrint(a, "call_{d}_{d}", .{ now, i }), .function = c };
+    if (tcs.len > 0) finish = "tool_calls";
     if (stream) {
         ak.id = id;
+        if (tcs.len > 0) {
+            const b = try std.json.Stringify.valueAlloc(a, .{ .id = id, .object = "chat.completion.chunk", .created = now, .model = model_name, .choices = .{.{ .index = 0, .delta = .{ .tool_calls = tcs }, .finish_reason = null }} }, .{});
+            try w.print("data: {s}\n\n", .{b});
+        } else if (ak.arac and ak.gonderilen < ak.metin.items.len) try ak.gonder(ak.metin.items[ak.gonderilen..], null);
         try ak.gonder("", finish);
         try w.writeAll("data: [DONE]\n\n");
         return w.flush();
     }
     const usage = .{ .prompt_tokens = r.n_prompt, .completion_tokens = r.n_gen, .total_tokens = r.n_prompt + r.n_gen };
     const b = if (chat)
-        try std.json.Stringify.valueAlloc(a, .{ .id = id, .object = "chat.completion", .created = now, .model = model_name, .choices = .{.{ .index = 0, .message = .{ .role = "assistant", .content = ak.metin.items }, .finish_reason = finish }}, .usage = usage }, .{})
+        try std.json.Stringify.valueAlloc(a, .{ .id = id, .object = "chat.completion", .created = now, .model = model_name, .choices = .{.{ .index = 0, .message = .{ .role = "assistant", .content = ay.content, .tool_calls = if (tcs.len > 0) tcs else null }, .finish_reason = finish }}, .usage = usage }, .{ .emit_null_optional_fields = false })
     else
         try std.json.Stringify.valueAlloc(a, .{ .id = id, .object = "text_completion", .created = now, .model = model_name, .choices = .{.{ .index = 0, .text = ak.metin.items, .finish_reason = finish }}, .usage = usage }, .{});
     try yanit(w, "200 OK", "application/json", b);
