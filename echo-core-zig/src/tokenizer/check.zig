@@ -23,6 +23,9 @@ pub fn run(model_path: []const u8, korpus_path: []const u8, ref_path: []const u8
     var rl = std.mem.splitScalar(u8, ref, '\n');
     var it = std.mem.splitSequence(u8, korpus, "\n\n");
     var ilk_fark = true;
+    var geri_ok: usize = 0; // decode(encode(x)) == x
+    var dec = ArrayList(u8).init(a);
+    defer dec.deinit();
     while (it.next()) |par| {
         const line = rl.next() orelse "";
         out.clearRetainingCapacity();
@@ -38,6 +41,9 @@ pub fn run(model_path: []const u8, korpus_path: []const u8, ref_path: []const u8
             }
         }
         if (j != out.items.len) ok = false;
+        dec.clearRetainingCapacity();
+        for (out.items) |t| try dec.appendSlice(if (bpe.isControl(t)) bpe.pieces[t] else bpe.piece(t));
+        if (std.mem.eql(u8, dec.items, par)) geri_ok += 1;
         if (ok) tam += 1 else if (ilk_fark) {
             ilk_fark = false;
             std.debug.print("ilk fark: paragraf {d}, token {d}: {s}\n", .{ top, j, par[0..@min(par.len, 80)] });
@@ -53,5 +59,5 @@ pub fn run(model_path: []const u8, korpus_path: []const u8, ref_path: []const u8
         best = @min(best, @as(u64, @intCast(t0.untilNow(io, .awake).toNanoseconds())));
     }
     const mbs = @as(f64, @floatFromInt(korpus.len)) / @as(f64, @floatFromInt(best)) * 1e3;
-    std.debug.print("{s}: {d}/{d} paragraf ayni, {d} token, {d:.1} MB/s\n", .{ korpus_path, tam, top, out.items.len, mbs });
+    std.debug.print("{s}: {d}/{d} paragraf ayni, geri cevirme {d}/{d}, {d} token, {d:.1} MB/s\n", .{ korpus_path, tam, top, geri_ok, top, out.items.len, mbs });
 }

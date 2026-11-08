@@ -42,6 +42,9 @@ pub const yardim =
     \\                         prompt işleme ~2x yavaş, üretim ~%5 hızlı
     \\      --ngram            greedy'de n-gram taslak doğrulama (tekrarlı metinde hızlı,
     \\                         doğal metinde yavaş; --fast ile otomatik açık)
+    \\      --prefill-fast     prompt işleme hız profili (prefill 2000 ayarı: FFN budama +
+    \\                         12 katman atlama; kalite çok düşer)
+    \\      --print-tokens     prompt'un token id'lerini yaz ve çık (şablon doğrulama)
     \\      --no-stats         sondaki hız satırını yazma
     \\      --server           OpenAI uyumlu HTTP sunucu (/v1/chat/completions, /v1/completions)
     \\      --host ADRES       [127.0.0.1]
@@ -69,6 +72,8 @@ pub const Opts = struct {
     raw: bool = false,
     fast: bool = false,
     exact: bool = false,
+    prefill_fast: bool = false,
+    print_tokens: bool = false,
     /// greedy'de n-gram taslak doğrulama; tam LM head ile doğal metinde yavaşlatır (ölçüm: 37 → 23 tok/s), --fast açar
     ngram: bool = false,
     stats: bool = true,
@@ -115,6 +120,8 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         else if (eq(u8, x, "--raw")) o.raw = true
         else if (eq(u8, x, "--fast")) o.fast = true
         else if (eq(u8, x, "--exact")) o.exact = true
+        else if (eq(u8, x, "--prefill-fast")) o.prefill_fast = true
+        else if (eq(u8, x, "--print-tokens")) o.print_tokens = true
         else if (eq(u8, x, "--no-ngram")) o.ngram = false
         else if (eq(u8, x, "--ngram")) o.ngram = true
         else if (eq(u8, x, "--no-stats")) o.stats = false
@@ -387,6 +394,15 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
     defer bpe.deinit();
 
     if (o.exact) _ = setenv("ECHO_NO_R8", "1", 1); // Model.load okur
+    if (o.prefill_fast) {
+        // README "Prefill 2000 ayarı"; aktivasyon dosyası yoksa ağırlık normuyla budanır
+        _ = setenv("ECHO_FFN_KEEP", "1920", 0);
+        _ = setenv("ECHO_SKIP", "20,7,18,11,12,8,5,13,10,9,6,17", 0);
+        const act = "benchmarks/ffn-act-qwen35-0.8b-q8.bin";
+        if (std.Io.Dir.cwd().access(io, act, .{})) |_| {
+            _ = setenv("ECHO_FFN_ACT", act, 0);
+        } else |_| std.debug.print("uyarı: {s} yok (echo-core-zig dizininden çalıştırın)\n", .{act});
+    }
     const model = try qwen35.Model.load(path, a);
     defer model.deinit();
     // varsayılan kayıpsız: katman atlama yalnız --fast ile (ECHO_SKIP elle verilmişse ona uyulur)
@@ -446,6 +462,14 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
         tek = try ir.interface.allocRemaining(a, .unlimited);
     }
     const soru: ?[]const u8 = o.prompt orelse tek;
+    if (o.print_tokens) {
+        var ids = ArrayList(u32).init(a);
+        defer ids.deinit();
+        try s.turn(soru orelse "", &ids);
+        for (ids.items, 0..) |t, i| std.debug.print("{s}{d}", .{ if (i == 0) "" else ",", t });
+        std.debug.print("\n", .{});
+        return;
+    }
     if (soru) |q| {
         try cevapla(&s, q);
         if (!o.interactive) return;
