@@ -26,10 +26,17 @@ markmap:
   | llama.cpp | 30.5 | referans |
   | varsayılan | 34.8 | ppl +%1.1 |
   | `--exact` | 36.5 | llama.cpp ile aynı |
-  | `--fast` | 117 | sohbette anlamsız |
+  | `--fast` | 1180 | sohbet setinde (8 Kas akşam) |
 - **Açık kalanlar**
   - Varsayılan mod llama.cpp ile birebir değil (H38'den beri)
   - Araç çağırma (tool_calls) yok
+- **`--fast` sohbet seti (8 Kas akşam)** ✅ 1180
+  - Ölçüm: `python ~/sohbet-seti/olcum.py` (25 sohbet, 2119–5745 tok)
+  - 18 katman atla: 109.8 → 749
+  - FFN 1920 (aktivasyon dosyası): → 961
+  - n-gram derece 2, en kısa 3: → ~1020
+  - en uzun taslak 128: → **1180**
+  - Kalite ölçülmedi
 - **Sıradaki iş**
   - Context window
 - **İlk okunacak**
@@ -44,6 +51,7 @@ markmap:
   | 70 → 500 | ✅ | çekirdek + n-gram |
   | 750 | ✅ 762 | kayıpsız |
   | 1000 | ✅ ~1270 | 8 katman atla |
+  | 1000 (sohbet seti) | ✅ 1180 | 18 atla + FFN 1920 + n-gram 2/3/128 |
 - **Prefill (pp512)**
   | Baraj | Durum | Kalite (top-1) |
   |---|---|---|
@@ -123,9 +131,11 @@ markmap:
 - Ağırlık normlu FFN budama (ppl 1089)
 - Bileşen atlama (FFN / mixer ayrı)
 - Hibrit int8 + FMA (≤%2.5)
-- n-gram sırası büyütmek
+- n-gram sırası büyütmek (4 yavaş; 2 en iyi)
 - Tiled flash her boyutta
-- nprobe < 128
+- nprobe < 128 (sohbet setinde de: 64 ≈ 128, 32/16 yavaş)
+- 19. katman atlama (en iyi 829 < 925)
+- n-gram taslağı 192/256 (128'den yavaş)
 - SPLIT=4, hsum transpoze, mwaitx, nice
 - SmolLM2-135M (tavan yetmiyor)
 
