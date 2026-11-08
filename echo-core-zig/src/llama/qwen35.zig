@@ -151,6 +151,12 @@ pub const Model = struct {
         // N1: FFN ara kanal budama (isteğe bağlı, sayısal sonucu değiştirir): ECHO_FFN_KEEP=K (32'nin katı)
         const ffn_keep: ?usize = if (std.c.getenv("ECHO_FFN_KEEP")) |x| try std.fmt.parseInt(usize, std.mem.span(x), 10) else null;
         if (ffn_keep) |kk| if (kk % 32 != 0 or kk == 0 or kk > self.n_ff) return error.BadFfnKeep;
+        if (std.c.getenv("ECHO_FFN_STATS") != null) {
+            act_stats = try allocator.alloc(f64, n_layer * self.n_ff);
+            @memset(act_stats.?, 0);
+        }
+        const act: ?[]f64 = if (ffn_keep != null) if (std.c.getenv("ECHO_FFN_ACT")) |x| try readF64File(allocator, x, n_layer * self.n_ff) else null else null;
+        defer if (act) |x| allocator.free(x);
         for (self.layers, 0..) |*l, il| {
             const recr = (il + 1) % interval != 0;
             l.* = .{
@@ -179,7 +185,7 @@ pub const Model = struct {
                 l.q_norm = try ctx.vec1(try std.fmt.bufPrint(&nb, "blk.{d}.attn_q_norm.weight", .{il}));
                 l.k_norm = try ctx.vec1(try std.fmt.bufPrint(&nb, "blk.{d}.attn_k_norm.weight", .{il}));
             }
-            if (ffn_keep) |kk| try self.pruneFfn(l, kk);
+            if (ffn_keep) |kk| try self.pruneFfn(l, kk, if (act) |x| x[il * self.n_ff ..][0..self.n_ff] else null);
             try self.repackLayer(l);
         }
         if (ffn_keep) |kk| self.n_ff = kk;
@@ -209,7 +215,7 @@ pub const Model = struct {
 
     /// N1: önem = |gate_c|·|up_c|·|down[:,c]|; en önemli K kanal (özgün sırada) kalır. gate/up satırları aynen
     /// kopyalanır, down satırları seçilen sütunlarla yeniden Q8_0 nicemlenir.
-    fn pruneFfn(self: *Model, l: *Layer, kk: usize) !void {
+    fn pruneFfn(self: *Model, l: *Layer, kk: usize, act: ?[]const f64) !void {
         const a = self.allocator;
         const g = &l.ffn_gate;
         const u = &l.ffn_up;
@@ -238,6 +244,10 @@ pub const Model = struct {
             for (row[0..nff], dn) |x, *v| v.* += x * x;
         }
         for (imp, dn) |*v, x| v.* *= @sqrt(x);
+        // N3: aktivasyon istatistiği varsa önem = Σ|act_c| × ‖down[:,c]‖
+        if (act) |ac| for (imp, dn, ac) |*v, x, y| {
+            v.* = @as(f32, @floatCast(y)) * @sqrt(x);
+        };
         const idx = try a.alloc(u32, nff);
         defer a.free(idx);
         for (idx, 0..) |*v, i| v.* = @intCast(i);
@@ -294,6 +304,14 @@ pub const Model = struct {
 
     pub fn deinit(self: *Model) void {
         const allocator = self.allocator;
+        if (act_stats) |st| {
+            if (std.c.getenv("ECHO_FFN_STATS")) |path| if (std.c.fopen(path, "wb")) |f| {
+                _ = std.c.fwrite(@ptrCast(st.ptr), @sizeOf(f64), st.len, f);
+                _ = std.c.fclose(f);
+            };
+            allocator.free(st);
+            act_stats = null;
+        }
         allocator.free(self.layers);
         for (self.repacked.items) |b| allocator.free(b);
         self.repacked.deinit(allocator);
@@ -348,6 +366,17 @@ const Loader = struct {
 
 fn pad(x: usize, n: usize) usize {
     return (x + n - 1) / n * n;
+}
+
+/// N3: FFN aktivasyon istatistiği (ECHO_FFN_STATS=dosya): katman × kanal Σ|swiglu çıktısı|, Model.deinit'te yazılır
+var act_stats: ?[]f64 = null;
+
+fn readF64File(a: Alloc, path: [*:0]const u8, n: usize) ![]f64 {
+    const f = std.c.fopen(path, "rb") orelse return error.StatsOpen;
+    defer _ = std.c.fclose(f);
+    const buf = try a.alloc(f64, n);
+    if (std.c.fread(@ptrCast(buf.ptr), @sizeOf(f64), n, f) != n) return error.StatsRead;
+    return buf;
 }
 
 pub const Context = struct {
@@ -724,24 +753,30 @@ pub const Context = struct {
             } else {
                 self.layerAttn(p, l, il);
             }
+            // N4: son katmanda yalnız son satır okunur (want_all yoksa); FFN tek token için
+            const nf = if (il + 1 == m.layers.len and !self.want_all) 1 else n_t;
+            const o = (n_t - nf) * m.n_embd;
             // attn_residual + attn_post_norm (H57: tek geçiş)
             const ffn_in = [_]ops.Mat{ l.ffn_gate, l.ffn_up };
-            const fast = ops.ffnOk(l.ffn_gate, l.ffn_up, l.ffn_down);
+            const fast = ops.ffnOk(l.ffn_gate, l.ffn_up, l.ffn_down) and act_stats == null;
             const qf = ops.r8Ok(&ffn_in);
-            ops.addRmsNorm(p, m.n_embd, n_t, self.b_resid.ptr, self.b_attn.ptr, self.b_inp.ptr, self.b_norm.ptr, m.eps, l.post_norm, qf);
+            ops.addRmsNorm(p, m.n_embd, nf, self.b_resid.ptr + o, self.b_attn.ptr + o, self.b_inp.ptr + o, self.b_norm.ptr, m.eps, l.post_norm, qf);
             if (fast) ops.ffnPre(p, l.ffn_gate) else if (qf) ops.r8Pre(p, &ffn_in);
             p.barrier();
             // build_ffn(LLM_FFN_SILU, LLM_FFN_PAR)
             if (fast) {
                 // H62: gate+up parça başına, swiglu + down nicemleme parça sonunda
-                ops.ffnGateUp(p, l.ffn_gate, l.ffn_up, l.ffn_down, n_t, self.b_ffn_g.ptr, self.b_ffn_u.ptr, self.wdata2.ptr, self.b_attn.ptr);
+                ops.ffnGateUp(p, l.ffn_gate, l.ffn_up, l.ffn_down, nf, self.b_ffn_g.ptr, self.b_ffn_u.ptr, self.wdata2.ptr, self.b_attn.ptr);
             } else {
-                ops.mulMatMultiQ(p, &ffn_in, self.b_norm.ptr, n_t, &.{ self.b_ffn_g.ptr, self.b_ffn_u.ptr });
+                ops.mulMatMultiQ(p, &ffn_in, self.b_norm.ptr, nf, &.{ self.b_ffn_g.ptr, self.b_ffn_u.ptr });
                 const qd = ops.r8Ok(&.{l.ffn_down});
-                ops.swigluQ(p, m.n_ff, n_t, self.b_ffn_g.ptr, self.b_ffn_g.ptr, self.b_ffn_u.ptr, qd);
+                ops.swigluQ(p, m.n_ff, nf, self.b_ffn_g.ptr, self.b_ffn_g.ptr, self.b_ffn_u.ptr, qd);
                 if (qd) ops.r8Pre(p, &.{l.ffn_down});
                 p.barrier();
-                ops.mulMatMultiQ(p, &.{l.ffn_down}, self.b_ffn_g.ptr, n_t, &.{self.b_attn.ptr});
+                if (act_stats) |st| if (p.ith == 0) for (0..nf) |t| for (0..m.n_ff) |c| {
+                    st[il * m.n_ff + c] += @abs(self.b_ffn_g[t * m.n_ff + c]);
+                };
+                ops.mulMatMultiQ(p, &.{l.ffn_down}, self.b_ffn_g.ptr, nf, &.{self.b_attn.ptr});
             }
             // l_out (+ sonraki katmanın attn_norm'u)
             if (il + 1 < m.layers.len) {
@@ -749,7 +784,7 @@ pub const Context = struct {
                 const qn = inOk(nl);
                 ops.addRmsNorm(p, m.n_embd, n_t, self.b_inp.ptr, self.b_attn.ptr, self.b_resid.ptr, self.b_norm.ptr, m.eps, nl.attn_norm, qn);
                 if (qn) inPre(p, nl);
-            } else ops.add(p, m.n_embd, n_t, self.b_inp.ptr, self.b_attn.ptr, self.b_resid.ptr);
+            } else ops.add(p, m.n_embd, nf, self.b_inp.ptr + o, self.b_attn.ptr, self.b_resid.ptr + o);
             p.barrier();
         }
 

@@ -17,7 +17,7 @@ Achieving 50-100 t/s on local CPU/RAM configurations (i5-13500H / Ryzen 3600).
 ### Prefill
 - [x] 750 barajını aşmak
 - [x] 1000 barajını aşmak (kayıplı: ECHO_SKIP 8 katman)
-- [x] 1500 barajını aşmak (kayıplı: ECHO_SKIP 13 katman, top-1 −%37)
+- [x] 1500 barajını aşmak (kayıplı: ECHO_FFN_KEEP=2176 + ECHO_FFN_ACT + ECHO_SKIP 9 katman, top-1 −%48)
 - [ ] 2000 barajını aşmak
 - [ ] 5000 barajını aşmak
 - [ ] 7500 barajını aşmak
