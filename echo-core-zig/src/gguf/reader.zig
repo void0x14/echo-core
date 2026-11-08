@@ -92,6 +92,10 @@ pub const Reader = struct {
     tensors: std.StringHashMap(TensorInfo),
     config: config_mod.ModelConfig,
     alignment: u32,
+    /// başlık okuma tamponu: küçük alanlar (500k+ token/merge dizgisi) için tek tek pread yerine 64 KB'lık okuma
+    rbuf: [1 << 16]u8 = undefined,
+    rpos: u64 = 0,
+    rlen: usize = 0,
 
     fn runtimeIo() std.Io {
         return std.Io.Threaded.global_single_threaded.io();
@@ -316,9 +320,20 @@ pub const Reader = struct {
 
     fn readExact(self: *Reader, buf: []u8) !void {
         if (buf.len == 0) return;
-        const n = try self.file.readPositionalAll(runtimeIo(), buf, self.cursor);
-        if (n != buf.len) return error.EndOfStream;
-        self.cursor += n;
+        if (self.cursor < self.rpos or self.cursor + buf.len > self.rpos + self.rlen) {
+            if (buf.len > self.rbuf.len / 2) {
+                const n = try self.file.readPositionalAll(runtimeIo(), buf, self.cursor);
+                if (n != buf.len) return error.EndOfStream;
+                self.cursor += n;
+                return;
+            }
+            self.rpos = self.cursor;
+            self.rlen = try self.file.readPositionalAll(runtimeIo(), &self.rbuf, self.cursor);
+            if (self.rlen < buf.len) return error.EndOfStream;
+        }
+        const off: usize = @intCast(self.cursor - self.rpos);
+        @memcpy(buf, self.rbuf[off..][0..buf.len]);
+        self.cursor += buf.len;
     }
 
     fn readU8(self: *Reader) !u8 {

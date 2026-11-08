@@ -40,7 +40,8 @@ pub const yardim =
     \\                         (TG ~1000+ tok/s, kalite düşer)
     \\      --exact            llama.cpp ile aynı sayısal sonuç (R8 çekirdeği kapalı):
     \\                         prompt işleme ~2x yavaş, üretim ~%5 hızlı
-    \\      --no-ngram         greedy'de n-gram taslak hızlandırmasını kapat
+    \\      --ngram            greedy'de n-gram taslak doğrulama (tekrarlı metinde hızlı,
+    \\                         doğal metinde yavaş; --fast ile otomatik açık)
     \\      --no-stats         sondaki hız satırını yazma
     \\  -h, --help             bu yardım
     \\
@@ -65,7 +66,8 @@ pub const Opts = struct {
     raw: bool = false,
     fast: bool = false,
     exact: bool = false,
-    ngram: bool = true,
+    /// greedy'de n-gram taslak doğrulama; tam LM head ile doğal metinde yavaşlatır (ölçüm: 37 → 23 tok/s), --fast açar
+    ngram: bool = false,
     stats: bool = true,
 };
 
@@ -108,6 +110,7 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         else if (eq(u8, x, "--fast")) o.fast = true
         else if (eq(u8, x, "--exact")) o.exact = true
         else if (eq(u8, x, "--no-ngram")) o.ngram = false
+        else if (eq(u8, x, "--ngram")) o.ngram = true
         else if (eq(u8, x, "--no-stats")) o.stats = false
         else if (eq(u8, x, "-h") or eq(u8, x, "--help")) {
             std.debug.print("{s}", .{yardim});
@@ -369,7 +372,10 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
     defer ctx.deinit();
     if (lm_ix) |ix| ctx.lm = try ivf.Search.init(ix, ivf.default_nprobe, n_threads, a);
     defer if (ctx.lm) |l| l.deinit(a);
-    if (o.fast) o.sp.temp = 0;
+    if (o.fast) {
+        o.sp.temp = 0;
+        o.ngram = true;
+    }
     if (o.ngram and (o.fast or o.sp.temp <= 0)) {
         try ctx.enableTrace(64);
         ctx.no_trace = true; // geri alma snapshot ile (H13)
