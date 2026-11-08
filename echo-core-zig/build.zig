@@ -36,6 +36,11 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true, // src/llama: llvm.x86.* intrinsic extern'leri
     });
     b.installArtifact(exe);
+    // kullanıcıya dönük ad (eski ad betikler için kalır); `echo` kabuk komutuyla çakıştığı için kullanılmadı
+    b.getInstallStep().dependOn(&b.addInstallArtifact(exe, .{ .dest_sub_path = "echo-core" }).step);
+
+    // Deney/araç programları yalnız -Ddeneyler=true ile derlenir (varsayılan derleme hızlı kalsın)
+    const deneyler = b.option(bool, "deneyler", "deney ve araç programlarını da derle") orelse false;
 
     // Birim testleri: zig build test
     const test_mod = b.createModule(.{ .root_source_file = b.path("src/testler.zig"), .target = target, .optimize = optimize, .link_libc = true });
@@ -51,7 +56,7 @@ pub fn build(b: *std.Build) void {
     });
     dump_model_mod.addImport("core_config", core_config_mod);
     dump_model_mod.addImport("gguf", gguf_mod);
-    b.installArtifact(b.addExecutable(.{
+    if (deneyler) b.installArtifact(b.addExecutable(.{
         .name = "dump-model",
         .root_module = dump_model_mod,
     }));
@@ -63,7 +68,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     deney_a_mod.addImport("gguf", gguf_mod);
-    b.installArtifact(b.addExecutable(.{
+    if (deneyler) b.installArtifact(b.addExecutable(.{
         .name = "deney-a",
         .root_module = deney_a_mod,
     }));
@@ -77,7 +82,7 @@ pub fn build(b: *std.Build) void {
     deney_e2e_mod.addImport("core_config", core_config_mod);
     deney_e2e_mod.addImport("gguf", gguf_mod);
     deney_e2e_mod.addImport("config", core_config_mod);
-    b.installArtifact(b.addExecutable(.{
+    if (deneyler) b.installArtifact(b.addExecutable(.{
         .name = "deney-a-e2e",
         .root_module = deney_e2e_mod,
     }));
@@ -88,7 +93,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.installArtifact(b.addExecutable(.{
+    if (deneyler) b.installArtifact(b.addExecutable(.{
         .name = "kolektif",
         .root_module = kolektif_mod,
     }));
@@ -99,7 +104,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    b.installArtifact(b.addExecutable(.{
+    if (deneyler) b.installArtifact(b.addExecutable(.{
         .name = "saturn",
         .root_module = saturn_mod,
     }));
