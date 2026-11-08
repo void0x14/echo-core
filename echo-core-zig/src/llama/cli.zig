@@ -280,13 +280,13 @@ return struct {
         var d: ?ngram.TokenDrafter = null;
         defer if (d) |*x| x.deinit();
         if (greedy and s.o.ngram) {
-            d = try ngram.TokenDrafter.init(s.a, envNum("ECHO_NG_N", 2));
+            d = try ngram.TokenDrafter.init(s.a, envNum("ECHO_NG_N", 3));
             for (s.hist.items) |t| try d.?.add(t);
         }
         var pending = s.next();
         var buf: [256]u32 = undefined;
-        const ng_max = @min(envNum("ECHO_NG_MAX", 128), buf.len);
-        const ng_min = envNum("ECHO_NG_MIN", 3);
+        const ng_max = @min(envNum("ECHO_NG_MAX", 64), buf.len);
+        const ng_min = envNum("ECHO_NG_MIN", 4);
         while (r.n_gen < limit) {
             if (kesildi.load(.acquire)) {
                 r.neden = "Ctrl+C";
@@ -436,6 +436,20 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
 
 fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io: std.Io) !void {
     const o = o_;
+    if (o.fast and !o.prefill_fast) {
+        // sohbet seti (~/sohbet-seti/olcum.py) taramasıyla seçildi: 18 katman atlama + FFN 1920
+        _ = setenv("ECHO_SKIP", "20,7,18,11,12,8,5,13,10,9,6,17,16,3,21,1,15,4", 0);
+        _ = setenv("ECHO_FFN_KEEP", "1920", 0);
+        _ = setenv("ECHO_NG_N", "2", 0);
+        _ = setenv("ECHO_NG_MIN", "3", 0);
+        _ = setenv("ECHO_NG_MAX", "128", 0);
+        var buf: [4096]u8 = undefined;
+        const n = std.process.executableDirPath(io, &buf) catch 0;
+        const tam = std.fmt.allocPrintSentinel(a, "{s}/../../benchmarks/ffn-act-qwen35-0.8b-q8.bin", .{buf[0..n]}, 0) catch null;
+        if (tam) |t| if (std.Io.Dir.cwd().access(io, t, .{})) |_| {
+            _ = setenv("ECHO_FFN_ACT", t, 0);
+        } else |_| std.debug.print("uyarı: {s} yok\n", .{t});
+    }
     if (o.prefill_fast) {
         // README "Prefill 2000 ayarı"; aktivasyon dosyası yoksa ağırlık normuyla budanır
         _ = setenv("ECHO_FFN_KEEP", "1920", 0);
@@ -468,7 +482,7 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         o.ngram = true;
     }
     if (o.ngram and (o.fast or o.sp.temp <= 0)) {
-        try ctx.enableTrace(@intCast(@min(envNum("ECHO_NG_MAX", 128), 256)));
+        try ctx.enableTrace(@intCast(@min(envNum("ECHO_NG_MAX", 64), 256)));
         ctx.no_trace = true; // geri alma snapshot ile (H13)
     }
 
