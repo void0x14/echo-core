@@ -7,7 +7,7 @@ const sampler = @import("sampler.zig");
 const ArrayList = std.array_list.Managed;
 const Value = std.json.Value;
 
-pub fn serve(s: *cli.Session, host: []const u8, port: u16, model_name: []const u8) !void {
+pub fn serve(s: anytype, host: []const u8, port: u16, model_name: []const u8) !void {
     s.kayit = .{};
     s.kayit_ids = ArrayList(u32).init(s.a);
     defer {
@@ -103,7 +103,7 @@ const Akis = struct {
     }
 };
 
-fn handle(s: *cli.Session, conn: std.Io.net.Stream, model_name: []const u8) !void {
+fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
     var arena_s = std.heap.ArenaAllocator.init(s.a);
     defer arena_s.deinit();
     const a = arena_s.allocator();

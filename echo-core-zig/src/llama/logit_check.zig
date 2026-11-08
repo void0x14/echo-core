@@ -9,12 +9,21 @@ const NAMES = [_][]const u8{ "Qwen3.5-0.8B-Q8_0", "Qwen3.5-0.8B-UD-Q8_K_XL", "un
 const SEQS = [_][]const usize{ &.{ 5, 1, 128, 1, 300, 1 }, &.{ 512, 1, 1 }, &.{ 7, 300, 300, 1, 1 } };
 
 pub fn run(save: bool, n_threads: u32, a: std.mem.Allocator, io: std.Io) !void {
+    return runE(qwen35, save, n_threads, a, io);
+}
+
+/// --exact motoru için: echo-core --logit-check --exact
+pub fn runExact(n_threads: u32, a: std.mem.Allocator, io: std.Io) !void {
+    return runE(@import("exact/qwen35.zig"), false, n_threads, a, io);
+}
+
+fn runE(comptime E: type, save: bool, n_threads: u32, a: std.mem.Allocator, io: std.Io) !void {
     var text: std.Io.Writer.Allocating = .init(a);
     defer text.deinit();
     for (NAMES) |name| {
         const path = try std.fmt.allocPrint(a, "../ArastirmaModelleri/{s}.gguf", .{name});
         defer a.free(path);
-        const model = try qwen35.Model.load(path, a);
+        const model = try E.Model.load(path, a);
         defer model.deinit();
         for (SEQS, 0..) |steps, si| {
             var n: usize = 0;
@@ -23,7 +32,7 @@ pub fn run(save: bool, n_threads: u32, a: std.mem.Allocator, io: std.Io) !void {
             const toks = try a.alloc(u32, n);
             defer a.free(toks);
             for (toks) |*t| t.* = 1000 + prng.random().uintLessThan(u32, 47000);
-            const ctx = try qwen35.Context.init(model, n + 1, n_threads, a);
+            const ctx = try E.Context.init(model, n + 1, n_threads, a);
             defer ctx.deinit();
             var h = std.crypto.hash.sha2.Sha256.init(.{});
             var off: usize = 0;

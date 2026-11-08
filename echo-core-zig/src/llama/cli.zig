@@ -5,6 +5,8 @@ const gguf = @import("../gguf/reader.zig");
 const Bpe = @import("../tokenizer/bpe.zig").Bpe;
 const Utf8Stream = @import("../tokenizer/bpe.zig").Utf8Stream;
 const qwen35 = @import("qwen35.zig");
+/// --exact: bit eşitliği korunmuş eski hesap yolu (src/llama/exact)
+const exact_motor = @import("exact/qwen35.zig");
 const ivf = @import("ivf.zig");
 const ngram = @import("ngram.zig");
 const sampler = @import("sampler.zig");
@@ -155,12 +157,17 @@ fn sigint(_: std.posix.SIG) callconv(.c) void {
 /// Metin parçası alıcısı (sunucu SSE için); null ise `out`a yazılır.
 pub const Sink = struct { ctx: *anyopaque, f: *const fn (*anyopaque, []const u8) anyerror!void };
 
-pub const Session = struct {
+/// Varsayılan motorla oturum; --exact için SessionT(exact_motor).
+pub const Session = SessionT(qwen35);
+
+pub fn SessionT(comptime E: type) type {
+return struct {
+    const Self = @This();
     a: Alloc,
     io: std.Io,
     o: *const Opts,
-    model: *qwen35.Model,
-    ctx: *qwen35.Context,
+    model: *E.Model,
+    ctx: *E.Context,
     lm_ix: ?*ivf.Runtime,
     bpe: Bpe,
     smp: sampler.Sampler,
@@ -176,17 +183,17 @@ pub const Session = struct {
     stops: []const []const u8,
     sink: ?Sink = null,
     /// sunucu: önek kaydı (null = kapalı). kayit_ids: kaydın kapsadığı tokenlar.
-    kayit: ?qwen35.Context.Kayit = null,
+    kayit: ?E.Context.Kayit = null,
     kayit_ids: ArrayList(u32) = undefined,
     /// runIds'te bu kadar token işlenince durum kaydedilir (0 = kaydetme)
     kayit_noktasi: usize = 0,
 
-    pub fn tokenize(s: *Session, text: []const u8, special: bool, dst: *ArrayList(u32)) !void {
+    pub fn tokenize(s: *Self, text: []const u8, special: bool, dst: *ArrayList(u32)) !void {
         try s.bpe.encode(text, dst, special);
     }
 
     /// ChatML (Qwen3.5 şablonu): kullanıcı mesajını ve asistan girişini token dizisine çevirir.
-    fn turn(s: *Session, user: []const u8, dst: *ArrayList(u32)) !void {
+    fn turn(s: *Self, user: []const u8, dst: *ArrayList(u32)) !void {
         if (s.o.raw) return s.tokenize(user, false, dst);
         if (s.acik_cevap) try s.tokenize("<|im_end|>\n", true, dst);
         if (s.hist.items.len == 0) if (s.sys) |sy| {
@@ -200,18 +207,18 @@ pub const Session = struct {
         try s.tokenize(if (s.o.think) "<think>\n" else "<think>\n\n</think>\n\n", true, dst);
     }
 
-    fn feed(s: *Session, ids: []const u32) !void {
+    fn feed(s: *Self, ids: []const u32) !void {
         if (s.ctx.head + ids.len > s.ctx.n_ctx) return error.ContextFull;
         try s.ctx.decode(ids);
         try s.hist.appendSlice(ids);
     }
 
-    fn next(s: *Session) u32 {
+    fn next(s: *Self) u32 {
         if (s.ctx.lm) |l| return l.token;
         return s.smp.sample(s.ctx.logits, s.hist.items);
     }
 
-    fn isStop(s: *const Session, t: u32) bool {
+    fn isStop(s: *const Self, t: u32) bool {
         for (s.stop_ids) |x| if (x == t) return true;
         return s.bpe.isControl(t);
     }
@@ -219,7 +226,7 @@ pub const Session = struct {
     pub const Sonuc = struct { n_prompt: usize, n_gen: usize, t_prompt: u64, t_gen: u64, neden: []const u8, fed: bool = false };
 
     /// Bir tur: prompt'u işler, cevabı akıtır.
-    fn respond(s: *Session, user: []const u8) !Sonuc {
+    fn respond(s: *Self, user: []const u8) !Sonuc {
         var ids = ArrayList(u32).init(s.a);
         defer ids.deinit();
         try s.turn(user, &ids);
@@ -230,7 +237,7 @@ pub const Session = struct {
     }
 
     /// Hazır token dizisini işler ve cevabı akıtır (sohbet ve sunucu ortak).
-    pub fn runIds(s: *Session, ids_in: []const u32) !Sonuc {
+    pub fn runIds(s: *Self, ids_in: []const u32) !Sonuc {
         const ids = struct { items: []const u32 }{ .items = ids_in };
         var r = Sonuc{ .n_prompt = ids.items.len, .n_gen = 0, .t_prompt = 0, .t_gen = 0, .neden = "durma tokenı" };
         if (s.ctx.head + ids.items.len + 1 > s.ctx.n_ctx) {
@@ -259,8 +266,8 @@ pub const Session = struct {
         return r;
     }
 
-    fn generate(s: *Session, r: *Sonuc) !void {
-        var yaz = Yazici{ .s = s };
+    fn generate(s: *Self, r: *Sonuc) !void {
+        var yaz = Yazici{ .s = .{ .a = s.a, .out = s.out, .sink = s.sink, .bpe = &s.bpe, .stops = s.stops } };
         defer yaz.deinit();
         const greedy = s.ctx.lm != null or s.smp.p.temp <= 0;
         const limit: usize = if (s.limit < 0) std.math.maxInt(usize) else @intCast(s.limit);
@@ -339,10 +346,11 @@ pub const Session = struct {
         if (r.n_gen >= limit) r.neden = "-n sınırı";
     }
 };
+}
 
 /// Token baytlarını UTF-8 güvenli akıtır; --stop metinlerini yakalar (eşleşme olasılığı olan kuyruğu bekletir).
 const Yazici = struct {
-    s: *Session,
+    s: struct { a: Alloc, out: *std.Io.Writer, sink: ?Sink, bpe: *const Bpe, stops: []const []const u8 },
     u: Utf8Stream = .{},
     bekleyen: ArrayList(u8) = undefined,
     init_ok: bool = false,
@@ -405,7 +413,16 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
     reader.deinit();
     defer bpe.deinit();
 
-    if (o.exact) _ = setenv("ECHO_NO_R8", "1", 1); // Model.load okur
+    if (o.exact and (o.fast or o.prefill_fast)) {
+        std.debug.print("hata: --exact, --fast / --prefill-fast ile birlikte kullanılamaz\n", .{});
+        std.process.exit(2);
+    }
+    if (o.exact) return runWith(exact_motor, &o, path, bpe, a, io);
+    return runWith(qwen35, &o, path, bpe, a, io);
+}
+
+fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io: std.Io) !void {
+    const o = o_;
     if (o.prefill_fast) {
         // README "Prefill 2000 ayarı"; aktivasyon dosyası yoksa ağırlık normuyla budanır
         _ = setenv("ECHO_FFN_KEEP", "1920", 0);
@@ -415,18 +432,22 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
             _ = setenv("ECHO_FFN_ACT", act, 0);
         } else |_| std.debug.print("uyarı: {s} yok (echo-core-zig dizininden çalıştırın)\n", .{act});
     }
-    const model = try qwen35.Model.load(path, a);
+    const model = try E.Model.load(path, a);
     defer model.deinit();
     // varsayılan kayıpsız: katman atlama yalnız --fast ile (ECHO_SKIP elle verilmişse ona uyulur)
-    if (!o.fast and std.c.getenv("ECHO_SKIP") == null) model.skip = 0;
+    if (@hasField(E.Model, "skip")) if (!o.fast and std.c.getenv("ECHO_SKIP") == null) {
+        model.skip = 0;
+    };
     const cpus = std.Thread.getCpuCount() catch 2;
     const n_threads: u32 = o.threads orelse @intCast(@max(cpus / 2, 1));
-    const lm_ix: ?*ivf.Runtime = if (o.fast) ivf.open(path, model.output, ivf.default_l, n_threads, a, io) catch null else null;
+    const lm_ix: ?*ivf.Runtime = if (E != qwen35) null else if (o.fast) ivf.open(path, model.output, ivf.default_l, n_threads, a, io) catch null else null;
     defer if (lm_ix) |ix| ix.deinit(a);
 
-    const ctx = try qwen35.Context.init(model, o.n_ctx, n_threads, a);
+    const ctx = try E.Context.init(model, o.n_ctx, n_threads, a);
     defer ctx.deinit();
-    if (lm_ix) |ix| ctx.lm = try ivf.Search.init(ix, ivf.default_nprobe, n_threads, a);
+    if (E == qwen35) if (lm_ix) |ix| {
+        ctx.lm = try ivf.Search.init(ix, ivf.default_nprobe, n_threads, a);
+    };
     defer if (ctx.lm) |l| l.deinit(a);
     if (o.fast) {
         o.sp.temp = 0;
@@ -439,10 +460,10 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
 
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
-    var s = Session{
+    var s = SessionT(E){
         .a = a,
         .io = io,
-        .o = &o,
+        .o = o,
         .model = model,
         .ctx = ctx,
         .lm_ix = lm_ix,
@@ -489,7 +510,7 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
     try sohbet(&s);
 }
 
-fn cevapla(s: *Session, q: []const u8) !void {
+fn cevapla(s: anytype, q: []const u8) !void {
     const r = s.respond(q) catch |e| switch (e) {
         error.ContextFull => {
             std.debug.print("\n[context doldu ({d} token). /reset ile temizle ya da -c ile büyüt]\n", .{s.ctx.n_ctx});
@@ -508,7 +529,7 @@ fn cevapla(s: *Session, q: []const u8) !void {
     }
 }
 
-fn sohbet(s: *Session) !void {
+fn sohbet(s: anytype) !void {
     std.debug.print("echo-core sohbet — /reset, /sys METİN, /quit (Ctrl+D çıkış)\n", .{});
     var ib: [1 << 16]u8 = undefined;
     var ir = std.Io.File.stdin().readerStreaming(s.io, &ib);

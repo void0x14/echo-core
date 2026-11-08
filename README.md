@@ -26,11 +26,11 @@ Sohbette: `/reset` geçmişi siler, `/sys METİN` sistem mesajı, `/quit` çık�
 |---|---|---|---|---|---|
 | llama.cpp (pp512 / tg128) | 171 | 30.5 | 1.00x | 1.00x | referans |
 | echo-core varsayılan | 757 | 34.8 | 4.43x | 1.14x | llama.cpp ile ilk tahmin uyumu %96.5, ppl +%1.1 |
-| echo-core `--exact` | 304 | 36.7 | 1.78x | 1.20x | uyum %99.2, ppl aynı |
+| echo-core `--exact` | ~250 | 36.5 | 1.46x | 1.20x | llama.cpp ile token token aynı |
 | echo-core `--fast` | 1145 | 117 | 6.70x | 3.84x | 8 katman atlanır: sohbette anlamsız metin |
 
 - Varsayılan: Qwen önerisi örnekleme (temp 0.7, top-k 20, top-p 0.8), tam model, chat şablonu, düşünme kapalı (`--think` açar).
-- `--exact`: hızlı R8 çekirdeği kapalı; llama.cpp ile en yakın sayısal sonuç. Greedy çıktı ilk ~25–30 token aynı, sonra küçük sayısal farklar yolu ayırabiliyor.
+- `--exact`: logit'leri llama.cpp ile bit bit aynı olan hesap yolu (`src/llama/exact/`). Greedy çıktı 5 prompt × 128 tokende llama.cpp ile karakter karakter aynı (`benchmarks/greedy-llama.sh`). pp ölçümü 601 tokenlik prompt ile.
 - `--fast`: barajlarda ölçülen hız ayarı; sohbet kalitesi bozuk.
 - Tokenizer: Qwen resmi tokenizer ile 6903/6903 paragraf aynı (`--tok-check`, `benchmarks/tokenizer/`).
 

@@ -223,6 +223,7 @@ pub fn main(init: std.process.Init) !void {
         return @import("llama/ivf.zig").eval(args.items[2], m.output, args.items[3], args.items[4], try std.fmt.parseInt(usize, args.items[5], 10), init.gpa, init.io);
     }
     if (qwen35.supported and args.items.len > 1 and std.mem.eql(u8, args.items[1], "--logit-check")) {
+        if (args.items.len > 2 and std.mem.eql(u8, args.items[2], "--exact")) return @import("llama/logit_check.zig").runExact(6, init.gpa, init.io);
         const save = args.items.len > 2 and std.mem.eql(u8, args.items[2], "--save");
         return @import("llama/logit_check.zig").run(save, 6, init.gpa, init.io);
     }
