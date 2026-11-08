@@ -43,6 +43,9 @@ pub const yardim =
     \\      --ngram            greedy'de n-gram taslak doğrulama (tekrarlı metinde hızlı,
     \\                         doğal metinde yavaş; --fast ile otomatik açık)
     \\      --no-stats         sondaki hız satırını yazma
+    \\      --server           OpenAI uyumlu HTTP sunucu (/v1/chat/completions, /v1/completions)
+    \\      --host ADRES       [127.0.0.1]
+    \\      --port N           [8080]
     \\  -h, --help             bu yardım
     \\
     \\Sohbet komutları: /reset  /sys METİN  /quit   (satır sonu \ ile çok satırlı giriş)
@@ -69,6 +72,9 @@ pub const Opts = struct {
     /// greedy'de n-gram taslak doğrulama; tam LM head ile doğal metinde yavaşlatır (ölçüm: 37 → 23 tok/s), --fast açar
     ngram: bool = false,
     stats: bool = true,
+    server: bool = false,
+    host: []const u8 = "127.0.0.1",
+    port: u16 = 8080,
 };
 
 fn need(args: []const []const u8, i: *usize) ![]const u8 {
@@ -112,6 +118,9 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         else if (eq(u8, x, "--no-ngram")) o.ngram = false
         else if (eq(u8, x, "--ngram")) o.ngram = true
         else if (eq(u8, x, "--no-stats")) o.stats = false
+        else if (eq(u8, x, "--server") or eq(u8, x, "serve")) o.server = true
+        else if (eq(u8, x, "--host")) o.host = try need(args, &i)
+        else if (eq(u8, x, "--port")) o.port = try std.fmt.parseInt(u16, try need(args, &i), 10)
         else if (eq(u8, x, "-h") or eq(u8, x, "--help")) {
             std.debug.print("{s}", .{yardim});
             std.process.exit(0);
@@ -130,13 +139,16 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
 }
 
 // ---- Ctrl+C ----
-var kesildi = std.atomic.Value(bool).init(false);
-var uretiyor = std.atomic.Value(bool).init(false);
+pub var kesildi = std.atomic.Value(bool).init(false);
+pub var uretiyor = std.atomic.Value(bool).init(false);
 fn sigint(_: std.posix.SIG) callconv(.c) void {
     if (uretiyor.load(.acquire)) kesildi.store(true, .release) else std.process.exit(130);
 }
 
-const Session = struct {
+/// Metin parçası alıcısı (sunucu SSE için); null ise `out`a yazılır.
+pub const Sink = struct { ctx: *anyopaque, f: *const fn (*anyopaque, []const u8) anyerror!void };
+
+pub const Session = struct {
     a: Alloc,
     io: std.Io,
     o: *const Opts,
@@ -152,8 +164,12 @@ const Session = struct {
     acik_cevap: bool = false,
     sys: ?[]const u8,
     out: *std.Io.Writer,
+    /// tur başına: en çok token (-1 sınırsız) ve stop metinleri (sunucu istek başına değiştirir)
+    limit: i64,
+    stops: []const []const u8,
+    sink: ?Sink = null,
 
-    fn tokenize(s: *Session, text: []const u8, special: bool, dst: *ArrayList(u32)) !void {
+    pub fn tokenize(s: *Session, text: []const u8, special: bool, dst: *ArrayList(u32)) !void {
         try s.bpe.encode(text, dst, special);
     }
 
@@ -188,13 +204,22 @@ const Session = struct {
         return s.bpe.isControl(t);
     }
 
-    const Sonuc = struct { n_prompt: usize, n_gen: usize, t_prompt: u64, t_gen: u64, neden: []const u8 };
+    pub const Sonuc = struct { n_prompt: usize, n_gen: usize, t_prompt: u64, t_gen: u64, neden: []const u8, fed: bool = false };
 
     /// Bir tur: prompt'u işler, cevabı akıtır.
     fn respond(s: *Session, user: []const u8) !Sonuc {
         var ids = ArrayList(u32).init(s.a);
         defer ids.deinit();
         try s.turn(user, &ids);
+        const r = try s.runIds(ids.items);
+        // asistan turu KV'de hiç kapanmaz (durma tokenı yazılmaz); bir sonraki tur <|im_end|> ile kapatır
+        if (r.fed) s.acik_cevap = !s.o.raw;
+        return r;
+    }
+
+    /// Hazır token dizisini işler ve cevabı akıtır (sohbet ve sunucu ortak).
+    pub fn runIds(s: *Session, ids_in: []const u32) !Sonuc {
+        const ids = struct { items: []const u32 }{ .items = ids_in };
         var r = Sonuc{ .n_prompt = ids.items.len, .n_gen = 0, .t_prompt = 0, .t_gen = 0, .neden = "durma tokenı" };
         if (s.ctx.head + ids.items.len + 1 > s.ctx.n_ctx) {
             r.neden = "context dolu";
@@ -207,7 +232,7 @@ const Session = struct {
         const t0 = std.Io.Timestamp.now(s.io, .awake);
         try s.feed(ids.items);
         r.t_prompt = @intCast(t0.untilNow(s.io, .awake).toNanoseconds());
-        s.acik_cevap = !s.o.raw;
+        r.fed = true;
 
         const t1 = std.Io.Timestamp.now(s.io, .awake);
         try s.generate(&r);
@@ -219,7 +244,7 @@ const Session = struct {
         var yaz = Yazici{ .s = s };
         defer yaz.deinit();
         const greedy = s.ctx.lm != null or s.smp.p.temp <= 0;
-        const limit: usize = if (s.o.n_predict < 0) std.math.maxInt(usize) else @intCast(s.o.n_predict);
+        const limit: usize = if (s.limit < 0) std.math.maxInt(usize) else @intCast(s.limit);
         var d: ?ngram.TokenDrafter = null;
         defer if (d) |*x| x.deinit();
         if (greedy and s.o.ngram) {
@@ -234,7 +259,6 @@ const Session = struct {
                 break;
             }
             if (s.isStop(pending)) {
-                if (pending != s.stop_ids[0]) s.acik_cevap = true;
                 break;
             }
             if (s.ctx.head + 1 >= s.ctx.n_ctx) {
@@ -310,8 +334,12 @@ const Yazici = struct {
         y.bekleyen.deinit();
     }
     fn y_flush(y: *Yazici, n: usize) !void {
-        try y.s.out.writeAll(y.bekleyen.items[0..n]);
-        y.s.out.flush() catch {};
+        if (y.s.sink) |k| {
+            if (n > 0) try k.f(k.ctx, y.bekleyen.items[0..n]);
+        } else {
+            try y.s.out.writeAll(y.bekleyen.items[0..n]);
+            y.s.out.flush() catch {};
+        }
         std.mem.copyForwards(u8, y.bekleyen.items, y.bekleyen.items[n..]);
         y.bekleyen.shrinkRetainingCapacity(y.bekleyen.items.len - n);
     }
@@ -323,7 +351,7 @@ const Yazici = struct {
         }
         try y.u.feed(y.s.bpe.piece(t), &y.bekleyen);
         var maxlen: usize = 0;
-        for (y.s.o.stops.items) |st| {
+        for (y.s.stops) |st| {
             if (std.mem.indexOf(u8, y.bekleyen.items, st)) |at| {
                 y.bekleyen.shrinkRetainingCapacity(at);
                 try y.y_flush(at);
@@ -395,6 +423,8 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
         .hist = ArrayList(u32).init(a),
         .sys = o.sys,
         .out = &ow.interface,
+        .limit = o.n_predict,
+        .stops = o.stops.items,
     };
     defer s.hist.deinit();
     s.stop_ids[0] = bpe.specialId("<|im_end|>") orelse std.math.maxInt(u32);
@@ -402,6 +432,8 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
 
     var act = std.posix.Sigaction{ .handler = .{ .handler = sigint }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(.INT, &act, null);
+
+    if (o.server) return @import("server.zig").serve(&s, o.host, o.port, std.fs.path.basename(path));
 
     // tek seferlik soru
     var tek: ?[]u8 = null;
