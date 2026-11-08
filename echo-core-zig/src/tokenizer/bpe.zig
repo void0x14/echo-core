@@ -2,6 +2,7 @@
 //! elle yazılmış hali + merge sırası + özel token ayırma. Doğrulama: benchmarks/tokenizer (6902 paragraf).
 const std = @import("std");
 const gguf = @import("../gguf/reader.zig");
+const nfc = @import("nfc.zig");
 
 const Allocator = std.mem.Allocator;
 const ArrayList = std.array_list.Managed;
@@ -142,9 +143,12 @@ pub const Bpe = struct {
         try self.encodeRaw(text[bas..], out);
     }
 
-    /// shortcut: NFC normalizasyonu yapılmıyor (resmi tokenizer yapıyor); ayrışık aksanlı metinde fark çıkabilir.
-    fn encodeRaw(self: *const Bpe, text: []const u8, out: *ArrayList(u32)) !void {
-        if (text.len == 0) return;
+    /// Özel token dışındaki parça: NFC (resmi normalizer) → ön-bölme → BPE.
+    fn encodeRaw(self: *const Bpe, text0: []const u8, out: *ArrayList(u32)) !void {
+        if (text0.len == 0) return;
+        var nb = ArrayList(u8).init(self.allocator);
+        defer nb.deinit();
+        const text = (try nfc.normalize(text0, &nb)) orelse text0;
         var it = PreTok{ .t = text };
         var syms = ArrayList(u32).init(self.allocator);
         defer syms.deinit();
