@@ -284,7 +284,8 @@ return struct {
             for (s.hist.items) |t| try d.?.add(t);
         }
         var pending = s.next();
-        var buf: [64]u32 = undefined;
+        var buf: [256]u32 = undefined;
+        const ng_max = @min(envNum("ECHO_NG_MAX", 64), buf.len);
         const ng_min = envNum("ECHO_NG_MIN", 4);
         while (r.n_gen < limit) {
             if (kesildi.load(.acquire)) {
@@ -300,7 +301,7 @@ return struct {
             }
             // greedy: n-gram taslağı tek forward'da doğrulanır (kayıpsız; kabul edilen tokenlar aynı)
             if (d) |*dr| {
-                const room = @min(buf.len, limit - r.n_gen, s.ctx.n_ctx - s.ctx.head - 1);
+                const room = @min(ng_max, limit - r.n_gen, s.ctx.n_ctx - s.ctx.head - 1);
                 const m = dr.chain(buf[0..room]);
                 if (m >= ng_min and buf[0] == pending and s.ctx.trace_k >= m) {
                     const before = s.ctx.head;
@@ -441,6 +442,7 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         _ = setenv("ECHO_FFN_KEEP", "1920", 0);
         _ = setenv("ECHO_NG_N", "2", 0);
         _ = setenv("ECHO_NG_MIN", "3", 0);
+        _ = setenv("ECHO_NG_MAX", "128", 0);
         var buf: [4096]u8 = undefined;
         const n = std.process.executableDirPath(io, &buf) catch 0;
         const tam = std.fmt.allocPrintSentinel(a, "{s}/../../benchmarks/ffn-act-qwen35-0.8b-q8.bin", .{buf[0..n]}, 0) catch null;
@@ -480,7 +482,7 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         o.ngram = true;
     }
     if (o.ngram and (o.fast or o.sp.temp <= 0)) {
-        try ctx.enableTrace(64);
+        try ctx.enableTrace(@intCast(@min(envNum("ECHO_NG_MAX", 64), 256)));
         ctx.no_trace = true; // geri alma snapshot ile (H13)
     }
 
