@@ -29,7 +29,6 @@ markmap:
   | `--fast` | 117 | sohbette anlamsız |
 - **Açık kalanlar**
   - Varsayılan mod llama.cpp ile birebir değil (H38'den beri)
-  - Araç çağırma (tool_calls) yok
 - **`--fast` sohbet seti (8 Kas akşam)** ✅ 1180
   - Ölçüm: `python ~/sohbet-seti/olcum.py` (25 sohbet, 2119–5745 tok)
   - 18 katman atla: 109.8 → 749
@@ -38,7 +37,15 @@ markmap:
   - en uzun taslak 128: → **1180**
   - ⛔ Geri alındı: 18 atla + FFN cevabı bozuyor, bu aşamanın amacı kullanılabilirlik
   - Kalan: kayıpsız n-gram 2/3/128 (cevabı değiştirmez)
+- **9 Kas: kullanılabilir `--fast`** (1 çekirdek)
+  - Araç çağırma ✅ (sunucu `tools`/`tool_calls`, şablon resmi jinja 12/12)
+  - `--fast`: senin ayarın taslakçı, tam model doğrular → araç testi ✅
+  - Sohbet seti 1 çekirdek: 4.2 → 18.9 tok/s
+  - Tavan: 1 çekirdekte tek token 37.5 ms, işlem dolu
+  - Taslakçı %0.3 tutuyor; doğrulama deneme başı ~146 ms
+  - Test: `benchmarks/arac_test.py --fast`, `benchmarks/sablon_test.py`
 - **Sıradaki iş**
+  - Küçük toplu (2-8 token) doğrulamayı ucuzlatmak
   - Context window
 - **İlk okunacak**
   - `KULLANILABILIRLIK-PLANI.md`
