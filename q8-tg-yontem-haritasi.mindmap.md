@@ -12,17 +12,28 @@ markmap:
 - **Ne yapıyoruz?**
   - Qwen3.5-0.8B, yalnız CPU
   - Ryzen 5 3600, kirli ortam
-  - Tek amaç: tok/s
-- **Nerede kaldık?**
-  - TG 1000 ✅ (varsayılan, ~1270)
-  - Prefill 2000 ✅ (kayıplı, 2109)
-  - Prefill 5000 / 7500 / 10000 ❌
-- **Sıradaki karar**
-  - 5000 için hangi varsayım kırılacak?
-  - En büyük kaldıraç: V3 eğitim
+- **Nerede kaldık? (8 Kas)**
+  - Hız: TG 1000 ✅, prefill 2000 ✅
+  - Kullanılabilirlik ✅ — motor sohbet ediyor
+    - `echo-core model.gguf` → sohbet
+    - `--server` → OpenAI uyumlu API
+    - Tokenizer resmi ile 6903/6903 paragraf aynı
+- **Modlar (tg tok/s)**
+  | Mod | tg | Not |
+  |---|---|---|
+  | llama.cpp | 30.5 | referans |
+  | varsayılan | 34.8 | ppl +%1.1 |
+  | `--exact` | 36.7 | ppl aynı |
+  | `--fast` | 117 | sohbette anlamsız |
+- **Açık kalanlar**
+  - Greedy llama.cpp ile tam aynı değil
+  - Sunucuda önek KV yeniden kullanımı yok
+- **Sıradaki iş**
+  - Context window
 - **İlk okunacak**
+  - `KULLANILABILIRLIK-PLANI.md`
+  - `README.md` (5 dakikada başla)
   - `TAVAN-VE-VARSAYIMLAR.md`
-  - `ISLEYIS-ARASTIRMA.md` (tüm deneyler)
 
 ## 📊 Barajlar
 - **TG (üretim)**
