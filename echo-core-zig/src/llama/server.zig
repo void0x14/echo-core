@@ -8,6 +8,12 @@ const ArrayList = std.array_list.Managed;
 const Value = std.json.Value;
 
 pub fn serve(s: *cli.Session, host: []const u8, port: u16, model_name: []const u8) !void {
+    s.kayit = .{};
+    s.kayit_ids = ArrayList(u32).init(s.a);
+    defer {
+        s.kayit.?.deinit(s.a);
+        s.kayit_ids.deinit();
+    }
     const addr = try std.Io.net.IpAddress.parse(host, port);
     var srv = try addr.listen(s.io, .{ .reuse_address = true });
     defer srv.deinit(s.io);
@@ -164,8 +170,10 @@ fn handle(s: *cli.Session, conn: std.Io.net.Stream, model_name: []const u8) !voi
             try s.tokenize("<|im_start|>", true, &ids);
             try s.tokenize(if (std.mem.eql(u8, role, "developer")) "system" else role, false, &ids);
             try s.tokenize("\n", false, &ids);
+            const asistan = std.mem.eql(u8, role, "assistant");
             if (m.object.get("content")) |c| switch (c) {
-                .string => |t| try s.tokenize(t, false, &ids),
+                // resmi şablon: geçmiş asistan mesajında düşünce bloğu atılır
+                .string => |t| try s.tokenize(if (asistan) if (std.mem.lastIndexOf(u8, t, "</think>")) |e| std.mem.trimStart(u8, t[e + 8 ..], "\n") else t else t, false, &ids),
                 .array => |parts| for (parts.items) |p| if (p == .object) if (str(p.object.get("text"))) |t| try s.tokenize(t, false, &ids),
                 else => {},
             };
@@ -179,28 +187,47 @@ fn handle(s: *cli.Session, conn: std.Io.net.Stream, model_name: []const u8) !voi
     }
     if (ids.items.len + 1 > s.ctx.n_ctx) return hata(w, "400 Bad Request", "prompt context'ten uzun (-c ile büyütün)", a);
 
-    // shortcut: her istek context'i sıfırdan işler (önek KV yeniden kullanımı yok); uzun sohbette prefill tekrarlanır.
-    s.ctx.clear();
-    s.hist.clearRetainingCapacity();
+    // önek yeniden kullanımı: önceki isteğin son <|im_start|>'ına kadarki kısmı aynıysa oradan devam
+    var bas: usize = 0;
+    const k = &s.kayit.?;
+    if (k.head > 0 and k.head < ids.items.len and std.mem.startsWith(u32, ids.items, s.kayit_ids.items)) {
+        s.ctx.yukle(k);
+        s.hist.shrinkRetainingCapacity(k.head);
+        bas = k.head;
+    } else {
+        s.ctx.clear();
+        s.hist.clearRetainingCapacity();
+    }
+    // bir sonraki istek için kayıt noktası: son <|im_start|> (asistan başlığı) öncesi
+    s.kayit_noktasi = 0;
+    if (chat) {
+        const im_start = s.bpe.specialId("<|im_start|>") orelse 0;
+        var j = ids.items.len;
+        while (j > bas) : (j -= 1) if (ids.items[j - 1] == im_start) {
+            s.kayit_noktasi = j - 1 - bas;
+            break;
+        };
+    }
     const id = try std.fmt.allocPrint(a, "{s}-echo-{d}", .{ if (chat) "chatcmpl" else "cmpl", now });
-    var k = Akis{ .w = w, .a = a, .id = if (stream) id else "", .model = model_name, .created = now, .chat = chat, .metin = ArrayList(u8).init(a) };
-    s.sink = .{ .ctx = &k, .f = Akis.parca };
+    var ak = Akis{ .w = w, .a = a, .id = if (stream) id else "", .model = model_name, .created = now, .chat = chat, .metin = ArrayList(u8).init(a) };
+    s.sink = .{ .ctx = &ak, .f = Akis.parca };
     defer s.sink = null;
     if (stream) try w.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
-    if (stream and chat) try k.gonder("", null); // ilk chunk: rol
-    const r = try s.runIds(ids.items);
+    if (stream and chat) try ak.gonder("", null); // ilk chunk: rol
+    var r = try s.runIds(ids.items[bas..]);
+    r.n_prompt = ids.items.len;
     const finish: []const u8 = if (std.mem.eql(u8, r.neden, "-n sınırı") or std.mem.eql(u8, r.neden, "context dolu")) "length" else "stop";
-    std.debug.print("[{s} {s}: prompt {d} tok, üretim {d} tok, {d:.1} tok/s, {s}]\n", .{ req.method, req.path, r.n_prompt, r.n_gen, @as(f64, @floatFromInt(r.n_gen)) / (@as(f64, @floatFromInt(@max(r.t_gen, 1))) / 1e9), r.neden });
+    std.debug.print("[{s} {s}: prompt {d} tok ({d} hazır), üretim {d} tok, {d:.1} tok/s, {s}]\n", .{ req.method, req.path, r.n_prompt, bas, r.n_gen, @as(f64, @floatFromInt(r.n_gen)) / (@as(f64, @floatFromInt(@max(r.t_gen, 1))) / 1e9), r.neden });
     if (stream) {
-        k.id = id;
-        try k.gonder("", finish);
+        ak.id = id;
+        try ak.gonder("", finish);
         try w.writeAll("data: [DONE]\n\n");
         return w.flush();
     }
     const usage = .{ .prompt_tokens = r.n_prompt, .completion_tokens = r.n_gen, .total_tokens = r.n_prompt + r.n_gen };
     const b = if (chat)
-        try std.json.Stringify.valueAlloc(a, .{ .id = id, .object = "chat.completion", .created = now, .model = model_name, .choices = .{.{ .index = 0, .message = .{ .role = "assistant", .content = k.metin.items }, .finish_reason = finish }}, .usage = usage }, .{})
+        try std.json.Stringify.valueAlloc(a, .{ .id = id, .object = "chat.completion", .created = now, .model = model_name, .choices = .{.{ .index = 0, .message = .{ .role = "assistant", .content = ak.metin.items }, .finish_reason = finish }}, .usage = usage }, .{})
     else
-        try std.json.Stringify.valueAlloc(a, .{ .id = id, .object = "text_completion", .created = now, .model = model_name, .choices = .{.{ .index = 0, .text = k.metin.items, .finish_reason = finish }}, .usage = usage }, .{});
+        try std.json.Stringify.valueAlloc(a, .{ .id = id, .object = "text_completion", .created = now, .model = model_name, .choices = .{.{ .index = 0, .text = ak.metin.items, .finish_reason = finish }}, .usage = usage }, .{});
     try yanit(w, "200 OK", "application/json", b);
 }

@@ -650,6 +650,43 @@ pub const Context = struct {
         self.head = batch_start;
     }
 
+    /// Önek yeniden kullanımı (sunucu): head + recurrent durum kopyası. KV satırları yerinde kalır;
+    /// yükle() sonrası head'den itibaren üzerine yazılır, mask ileriyi görmez.
+    pub const Kayit = struct {
+        head: usize = 0,
+        conv: [][]f32 = &.{},
+        state: [][]f32 = &.{},
+
+        pub fn deinit(k: *Kayit, a: Alloc) void {
+            for (k.conv) |b| a.free(b);
+            for (k.state) |b| a.free(b);
+            if (k.conv.len > 0) a.free(k.conv);
+            if (k.state.len > 0) a.free(k.state);
+            k.* = .{};
+        }
+    };
+
+    pub fn kaydet(self: *Context, k: *Kayit) !void {
+        std.debug.assert(!self.gdn_alt);
+        const a = self.allocator;
+        if (k.conv.len == 0) {
+            k.conv = try a.alloc([]f32, self.rs_conv.len);
+            k.state = try a.alloc([]f32, self.rs_state.len);
+            for (k.conv, self.rs_conv) |*d, b| d.* = try a.alloc(f32, b.len);
+            for (k.state, self.rs_state) |*d, b| d.* = try a.alloc(f32, b.len);
+        }
+        for (k.conv, self.rs_conv) |d, b| @memcpy(d, b);
+        for (k.state, self.rs_state) |d, b| @memcpy(d, b);
+        k.head = self.head;
+    }
+
+    pub fn yukle(self: *Context, k: *const Kayit) void {
+        for (k.conv, self.rs_conv) |b, d| @memcpy(d, b);
+        for (k.state, self.rs_state) |b, d| @memcpy(d, b);
+        self.gdn_alt = false;
+        self.head = k.head;
+    }
+
     /// llama_memory_clear
     pub fn clear(self: *Context) void {
         self.head = 0;

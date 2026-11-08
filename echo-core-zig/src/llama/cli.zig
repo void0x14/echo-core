@@ -175,6 +175,11 @@ pub const Session = struct {
     limit: i64,
     stops: []const []const u8,
     sink: ?Sink = null,
+    /// sunucu: önek kaydı (null = kapalı). kayit_ids: kaydın kapsadığı tokenlar.
+    kayit: ?qwen35.Context.Kayit = null,
+    kayit_ids: ArrayList(u32) = undefined,
+    /// runIds'te bu kadar token işlenince durum kaydedilir (0 = kaydetme)
+    kayit_noktasi: usize = 0,
 
     pub fn tokenize(s: *Session, text: []const u8, special: bool, dst: *ArrayList(u32)) !void {
         try s.bpe.encode(text, dst, special);
@@ -237,7 +242,14 @@ pub const Session = struct {
         defer uretiyor.store(false, .release);
 
         const t0 = std.Io.Timestamp.now(s.io, .awake);
-        try s.feed(ids.items);
+        const kn = s.kayit_noktasi;
+        if (s.kayit != null and kn > 0 and kn < ids.items.len) {
+            try s.feed(ids.items[0..kn]);
+            try s.ctx.kaydet(&s.kayit.?);
+            s.kayit_ids.clearRetainingCapacity();
+            try s.kayit_ids.appendSlice(s.hist.items);
+            try s.feed(ids.items[kn..]);
+        } else try s.feed(ids.items);
         r.t_prompt = @intCast(t0.untilNow(s.io, .awake).toNanoseconds());
         r.fed = true;
 
