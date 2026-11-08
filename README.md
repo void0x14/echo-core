@@ -16,7 +16,7 @@ Achieving 50-100 t/s on local CPU/RAM configurations (i5-13500H / Ryzen 3600).
 
 ### Prefill
 - [ ] 750 barajını aşmak
-- [ ] 1000 barajını aşmak
+- [x] 1000 barajını aşmak
 - [ ] 1500 barajını aşmak
 - [ ] 2000 barajını aşmak
 - [ ] 5000 barajını aşmak
@@ -31,4 +31,4 @@ Achieving 50-100 t/s on local CPU/RAM configurations (i5-13500H / Ryzen 3600).
 - [x] 300 barajını aşmak
 - [x] 500 barajını aşmak
 - [x] 750 barajını aşmak
-- [ ] 1000 barajını aşmak
+- [x] 1000 barajını aşmak

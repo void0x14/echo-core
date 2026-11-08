@@ -68,6 +68,8 @@ pub const Model = struct {
     d_state: usize,
     n_group: usize,
     dt_rank: usize,
+    /// N2: atlanan katmanlar bit maskesi (ECHO_SKIP="a,b,..."), sayısal sonucu değiştirir
+    skip: u64 = 0,
 
     fn metaU(reader: *const gguf.Reader, comptime key: []const u8) !usize {
         const v = reader.metadata.get("qwen35." ++ key) orelse return error.MissingMetadata;
@@ -146,6 +148,9 @@ pub const Model = struct {
         if (self.n_group != self.dt_rank) return error.UnsupportedGdnHeads;
 
         var nb: [96]u8 = undefined;
+        // N1: FFN ara kanal budama (isteğe bağlı, sayısal sonucu değiştirir): ECHO_FFN_KEEP=K (32'nin katı)
+        const ffn_keep: ?usize = if (std.c.getenv("ECHO_FFN_KEEP")) |x| try std.fmt.parseInt(usize, std.mem.span(x), 10) else null;
+        if (ffn_keep) |kk| if (kk % 32 != 0 or kk == 0 or kk > self.n_ff) return error.BadFfnKeep;
         for (self.layers, 0..) |*l, il| {
             const recr = (il + 1) % interval != 0;
             l.* = .{
@@ -174,7 +179,17 @@ pub const Model = struct {
                 l.q_norm = try ctx.vec1(try std.fmt.bufPrint(&nb, "blk.{d}.attn_q_norm.weight", .{il}));
                 l.k_norm = try ctx.vec1(try std.fmt.bufPrint(&nb, "blk.{d}.attn_k_norm.weight", .{il}));
             }
+            if (ffn_keep) |kk| try self.pruneFfn(l, kk);
             try self.repackLayer(l);
+        }
+        if (ffn_keep) |kk| self.n_ff = kk;
+        if (std.c.getenv("ECHO_SKIP")) |x| {
+            var it = std.mem.tokenizeScalar(u8, std.mem.span(x), ',');
+            while (it.next()) |t| {
+                const il = try std.fmt.parseInt(u6, t, 10);
+                if (il >= n_layer) return error.BadSkip;
+                self.skip |= @as(u64, 1) << il;
+            }
         }
         return self;
     }
@@ -190,6 +205,69 @@ pub const Model = struct {
         } else {
             for ([_]*Mat{ &l.wq, &l.wk, &l.wv, &l.wo }) |w| try self.repackMat(w);
         }
+    }
+
+    /// N1: önem = |gate_c|·|up_c|·|down[:,c]|; en önemli K kanal (özgün sırada) kalır. gate/up satırları aynen
+    /// kopyalanır, down satırları seçilen sütunlarla yeniden Q8_0 nicemlenir.
+    fn pruneFfn(self: *Model, l: *Layer, kk: usize) !void {
+        const a = self.allocator;
+        const g = &l.ffn_gate;
+        const u = &l.ffn_up;
+        const d = &l.ffn_down;
+        if (g.type != .q8_0 or u.type != .q8_0 or d.type != .q8_0) return error.PruneType;
+        const nff = g.m;
+        const ne = g.k;
+        const row = try a.alloc(f32, @max(ne, nff));
+        defer a.free(row);
+        const imp = try a.alloc(f32, nff);
+        defer a.free(imp);
+        const dn = try a.alloc(f32, nff);
+        defer a.free(dn);
+        @memset(dn, 0);
+        for (0..nff) |c| {
+            var sg: f32 = 0;
+            var su: f32 = 0;
+            q.dequantizeQ80(@ptrCast(@alignCast(g.data + c * g.nb1)), row.ptr, ne);
+            for (row[0..ne]) |x| sg += x * x;
+            q.dequantizeQ80(@ptrCast(@alignCast(u.data + c * u.nb1)), row.ptr, ne);
+            for (row[0..ne]) |x| su += x * x;
+            imp[c] = @sqrt(sg * su);
+        }
+        for (0..d.m) |r| {
+            q.dequantizeQ80(@ptrCast(@alignCast(d.data + r * d.nb1)), row.ptr, nff);
+            for (row[0..nff], dn) |x, *v| v.* += x * x;
+        }
+        for (imp, dn) |*v, x| v.* *= @sqrt(x);
+        const idx = try a.alloc(u32, nff);
+        defer a.free(idx);
+        for (idx, 0..) |*v, i| v.* = @intCast(i);
+        std.mem.sort(u32, idx, imp, struct {
+            fn lt(c: []f32, x: u32, y: u32) bool {
+                return c[x] > c[y];
+            }
+        }.lt);
+        const keep = idx[0..kk];
+        std.mem.sort(u32, keep, {}, std.sort.asc(u32));
+        inline for (.{ g, u }) |w| {
+            const nd = try a.alignedAlloc(u8, .@"64", kk * w.nb1);
+            try self.repacked8.append(a, nd);
+            for (keep, 0..) |c, i| @memcpy(nd[i * w.nb1 ..][0..w.nb1], (w.data + c * w.nb1)[0..w.nb1]);
+            w.data = nd.ptr;
+            w.m = kk;
+        }
+        const drs = kk / 32 * 34;
+        const ndd = try a.alignedAlloc(u8, .@"64", d.m * drs);
+        try self.repacked8.append(a, ndd);
+        const sel = try a.alloc(f32, kk);
+        defer a.free(sel);
+        for (0..d.m) |r| {
+            q.dequantizeQ80(@ptrCast(@alignCast(d.data + r * d.nb1)), row.ptr, nff);
+            for (keep, sel) |c, *v| v.* = row[c];
+            q.quantizeRowQ80(sel.ptr, @ptrCast(@alignCast(ndd.ptr + r * drs)), kk);
+        }
+        d.data = ndd.ptr;
+        d.k = kk;
+        d.nb1 = drs;
     }
 
     fn repackMat(self: *Model, w: *Mat) !void {
@@ -630,6 +708,17 @@ pub const Context = struct {
         p.barrier();
 
         for (m.layers, 0..) |*l, il| {
+            if (m.skip >> @intCast(il) & 1 != 0) {
+                // N2: katman yok sayılır; b_inp aynen kalır, b_norm sonraki katmanın attn_norm'u ile yeniden kurulur
+                if (il + 1 < m.layers.len) {
+                    const nl = &m.layers[il + 1];
+                    const qn = inOk(nl);
+                    ops.addRmsNorm(p, m.n_embd, n_t, self.b_inp.ptr, null, self.b_inp.ptr, self.b_norm.ptr, m.eps, nl.attn_norm, qn);
+                    if (qn) inPre(p, nl);
+                    p.barrier();
+                }
+                continue;
+            }
             if (l.recr) {
                 self.layerLinear(p, l, il);
             } else {
