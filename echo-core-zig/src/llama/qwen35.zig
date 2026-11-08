@@ -440,6 +440,8 @@ pub const Context = struct {
     tokens: [*]const u32 = undefined,
     n_t: usize = 0,
     want_logits: bool = false,
+    /// taslakçı eşitlemesi: yalnız KV/durum güncellenir, LM head çalışmaz
+    head_atla: bool = false,
     n_kv: usize = 0,
     /// Spekülatif doğrulama: her pozisyon için top-1 ve geri alma izleri.
     /// want_all true iken graph her satır için LM head çalıştırır (verify_tokens).
@@ -704,7 +706,7 @@ pub const Context = struct {
             const n = @min(tokens.len - off, self.n_ubatch);
             self.tokens = tokens.ptr + off;
             self.n_t = n;
-            self.want_logits = off + n == tokens.len;
+            self.want_logits = off + n == tokens.len and !self.head_atla;
             // llama_kv_cache::get_n_kv
             self.n_kv = @min(self.n_ctx, @max(@as(usize, 256), pad(self.head + n, 256)));
             self.pool.run(self, job);

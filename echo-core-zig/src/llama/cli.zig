@@ -167,6 +167,8 @@ pub const Sink = struct { ctx: *anyopaque, f: *const fn (*anyopaque, []const u8)
 /// Varsayılan motorla oturum; --exact için SessionT(exact_motor).
 pub const Session = SessionT(qwen35);
 
+const TaslakYol = struct { sonraki: usize = 0, bekle: usize = 1, boy: usize = 8, deneme: usize = 0, kabul: usize = 0, onerilen: usize = 0 };
+
 pub fn SessionT(comptime E: type) type {
 return struct {
     const Self = @This();
@@ -199,6 +201,9 @@ return struct {
     taslak_k: usize = 0,
     dkayit: E.Context.Kayit = .{},
     dsnap: E.Context.Kayit = .{},
+    /// taslak yolları (0 n-gram, 1 model): tutmayan yol geri çekilir; oturum boyunca öğrenilir
+    // model taslakçısı (sohbet setinde %1 kabul) temkinli başlar: ilk denemeden sonra 64 token bekler
+    gc: [2]TaslakYol = .{ .{}, .{ .bekle = 64 } },
 
     pub fn temizle(s: *Self) void {
         s.ctx.clear();
@@ -215,6 +220,8 @@ return struct {
     fn taslakla(s: *Self, tc: *E.Context, pending: u32, out: []u32) !usize {
         if (comptime E != qwen35) return 0;
         try tc.kaydet(&s.dsnap);
+        tc.head_atla = false;
+        defer tc.head_atla = true;
         out[0] = pending;
         var m: usize = 1;
         while (m < out.len) {
@@ -337,11 +344,21 @@ return struct {
         const ng_min = envNum("ECHO_NG_MIN", 3);
         // tutmayan taslak yolu geri çekilir: reddedilince bekleme 2 katına (en çok 64 token), tutunca sıfır
         // zincir boyu kabule uyar: 8'den başlar, tamamı tutarsa 2 katı (ECHO_NG_MAX'a kadar), tutmazsa kabulün 2 katı
-        var gc = [2]struct { sonraki: usize = 0, bekle: usize = 1, boy: usize = 8, deneme: usize = 0, kabul: usize = 0, onerilen: usize = 0 }{ .{}, .{} };
+        const gc = &s.gc;
+        for (gc) |*g| {
+            g.sonraki = 0; // n_gen her turda sıfırdan sayar; bekleme ve boy oturum boyunca kalır
+            g.deneme = 0;
+            g.kabul = 0;
+            g.onerilen = 0;
+        }
         var t_taslak: u64 = 0;
+        var t_dog: u64 = 0; // doğrulama + geri sarma + yeniden işleme (ana ctx)
+        var t_es: u64 = 0; // taslakçı eşitleme
+        var t_tek: u64 = 0; // tek token: ana ctx
+        var t_tek_tc: u64 = 0; // tek token: taslakçı
         const t_bas = std.Io.Timestamp.now(s.io, .awake);
         // ECHO_TASLAK_IST=dosya: yalnız sayılar eklenir (içerik yazılmaz)
-        defer if (std.c.getenv("ECHO_TASLAK_IST")) |yol| istYaz(s.io, std.mem.span(yol), .{ gc[0].deneme, gc[0].kabul, gc[0].onerilen, gc[1].deneme, gc[1].kabul, gc[1].onerilen, t_taslak / 1_000_000, r.n_gen, @as(u64, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds())) / 1_000_000 });
+        defer if (std.c.getenv("ECHO_TASLAK_IST")) |yol| istYaz(s.io, std.mem.span(yol), .{ gc[0].deneme, gc[0].kabul, gc[0].onerilen, gc[1].deneme, gc[1].kabul, gc[1].onerilen, t_taslak / 1_000_000, r.n_gen, @as(u64, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds())) / 1_000_000, t_dog / 1_000_000, t_es / 1_000_000, t_tek / 1_000_000, t_tek_tc / 1_000_000 });
         while (r.n_gen < limit) {
             if (kesildi.load(.acquire)) {
                 r.neden = "Ctrl+C";
@@ -373,6 +390,7 @@ return struct {
                     };
                 }
                 if (m > 0) {
+                    const td = std.Io.Timestamp.now(s.io, .awake);
                     const before = s.ctx.head;
                     s.ctx.snapshot();
                     try s.ctx.decodeVerify(buf[0..m]);
@@ -391,14 +409,17 @@ return struct {
                         s.ctx.rollback(before);
                         if (acc > 0) try s.ctx.decode(buf[0..acc]);
                     }
+                    t_dog += @intCast(td.untilNow(s.io, .awake).toNanoseconds());
+                    const te = std.Io.Timestamp.now(s.io, .awake);
                     if (s.tc) |tc| try s.esitle(tc, buf[0..m], acc, model_taslak);
+                    t_es += @intCast(te.untilNow(s.io, .awake).toNanoseconds());
                     const g = &gc[@intFromBool(model_taslak)];
                     g.deneme += 1;
                     g.kabul += acc -| 1;
                     g.onerilen += m - 1;
                     if (acc <= 1) {
                         g.sonraki = r.n_gen + acc + g.bekle;
-                        g.bekle = @min(g.bekle * 2, 64);
+                        g.bekle = @min(g.bekle * 2, 512);
                     } else g.bekle = 1;
                     g.boy = if (acc == m) @min(g.boy * 2, ng_max) else std.math.clamp(acc * 2, ng_min, ng_max);
                     for (buf[0..acc]) |t| {
@@ -425,7 +446,16 @@ return struct {
                 try s.feed(&.{pending});
                 return;
             }
-            try s.feed(&.{pending});
+            {
+                if (s.ctx.head + 1 > s.ctx.n_ctx) return error.ContextFull;
+                const t1 = std.Io.Timestamp.now(s.io, .awake);
+                try s.ctx.decode(&.{pending});
+                t_tek += @intCast(t1.untilNow(s.io, .awake).toNanoseconds());
+                const t2 = std.Io.Timestamp.now(s.io, .awake);
+                if (s.tc) |tc| try tc.decode(&.{pending});
+                t_tek_tc += @intCast(t2.untilNow(s.io, .awake).toNanoseconds());
+                try s.hist.append(pending);
+            }
             if (d) |*dr| try dr.add(pending);
             r.n_gen += 1;
             pending = s.next();
@@ -570,6 +600,7 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
     defer if (dctx) |c| c.deinit();
     if (E == qwen35) if (dctx) |c| {
         c.lm = try ivf.Search.init(lm_ix orelse return error.IvfYok, if (ctx.lm) |l| l.nprobe else ivf.default_nprobe, n_threads, a);
+        c.head_atla = true; // yalnız taslakla() içinde açılır
     };
     defer if (dctx) |c| if (c.lm) |l| l.deinit(a);
     if (o.fast) {
@@ -706,7 +737,7 @@ fn envNum(name: [*:0]const u8, def: usize) usize {
 
 fn istYaz(io: std.Io, yol: []const u8, v: anytype) void {
     var b: [256]u8 = undefined;
-    const t = std.fmt.bufPrint(&b, "ng_deneme={d} ng_kabul={d} ng_oneri={d} md_deneme={d} md_kabul={d} md_oneri={d} taslak_ms={d} uretim={d} uretim_ms={d}\n", v) catch return;
+    const t = std.fmt.bufPrint(&b, "ng_deneme={d} ng_kabul={d} ng_oneri={d} md_deneme={d} md_kabul={d} md_oneri={d} taslak_ms={d} uretim={d} uretim_ms={d} dog_ms={d} esitle_ms={d} tek_ms={d} tek_tc_ms={d}\n", v) catch return;
     const f = std.Io.Dir.cwd().createFile(io, yol, .{ .truncate = false }) catch return;
     defer f.close(io);
     const n = f.length(io) catch return;
