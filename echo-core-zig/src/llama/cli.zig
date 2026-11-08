@@ -40,12 +40,15 @@ pub const yardim =
     \\      --raw              chat şablonu yok, düz metin tamamlama
     \\      --fast             hız profili: 8 katman atlanır, yaklaşık LM head, greedy
     \\                         (TG ~1000+ tok/s, kalite düşer)
-    \\      --exact            llama.cpp ile aynı sayısal sonuç (R8 çekirdeği kapalı):
-    \\                         prompt işleme ~2x yavaş, üretim ~%5 hızlı
+    \\      --exact            llama.cpp ile token token aynı sonuç (ayrı hesap yolu):
+    \\                         prompt işleme ~3x yavaş, üretim aynı hızda
     \\      --ngram            greedy'de n-gram taslak doğrulama (tekrarlı metinde hızlı,
     \\                         doğal metinde yavaş; --fast ile otomatik açık)
     \\      --prefill-fast     prompt işleme hız profili (prefill 2000 ayarı: FFN budama +
     \\                         12 katman atlama; kalite çok düşer)
+    \\      --skip LİSTE       atlanacak katmanlar, ör. 20,7,18 (ECHO_SKIP)
+    \\      --ffn-keep N       FFN'de tutulacak nöron sayısı (ECHO_FFN_KEEP)
+    \\      --ffn-act DOSYA    FFN budama için aktivasyon dosyası (ECHO_FFN_ACT)
     \\      --print-tokens     prompt'un token id'lerini yaz ve çık (şablon doğrulama)
     \\      --no-stats         sondaki hız satırını yazma
     \\      --server           OpenAI uyumlu HTTP sunucu (/v1/chat/completions, /v1/completions)
@@ -123,6 +126,9 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         else if (eq(u8, x, "--fast")) o.fast = true
         else if (eq(u8, x, "--exact")) o.exact = true
         else if (eq(u8, x, "--prefill-fast")) o.prefill_fast = true
+        else if (eq(u8, x, "--skip")) _ = setenv("ECHO_SKIP", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
+        else if (eq(u8, x, "--ffn-keep")) _ = setenv("ECHO_FFN_KEEP", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
+        else if (eq(u8, x, "--ffn-act")) _ = setenv("ECHO_FFN_ACT", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
         else if (eq(u8, x, "--print-tokens")) o.print_tokens = true
         else if (eq(u8, x, "--no-ngram")) o.ngram = false
         else if (eq(u8, x, "--ngram")) o.ngram = true
@@ -410,6 +416,11 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
 
     var reader = try gguf.Reader.openWithAllocator(path, a);
     var bpe = try Bpe.initFromReader(&reader, a);
+    // yerleşik şablon Qwen3.5 ChatML; modelin kendi şablonu farklıysa uyar
+    if (!o.raw) if (reader.metadata.get("tokenizer.chat_template")) |v| if (v == .string) {
+        if (std.mem.indexOf(u8, v.string, "<|im_start|>") == null or std.mem.indexOf(u8, v.string, "<think>") == null)
+            std.debug.print("uyarı: modelin sohbet şablonu Qwen3.5 ChatML değil; yerleşik şablon kullanılıyor (--raw ile kapatılır)\n", .{});
+    };
     reader.deinit();
     defer bpe.deinit();
 

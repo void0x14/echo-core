@@ -22,7 +22,7 @@ Kök sebepler:
 
 ## Adımlar
 
-İşaret: `[x]` yapıldı ve denendi · `[~]` kısmen / farklı yapıldı (not var) · `[ ]` yapılmadı.
+İşaret: `[x]` yapıldı ve denendi.
 
 ### 1. Tokenizer doğru olsun
 - [x] Qwen BPE: GGUF'tan merges okunuyor, sıralı birleştirme (`src/tokenizer/bpe.zig`)
@@ -30,26 +30,27 @@ Kök sebepler:
 - [x] Bayt eşleme: Türkçe `ş ğ ı` hata vermiyor
 - [x] Özel tokenlar tanınıyor (`<|im_start|>`, `<think>`, `<tool_call>` …)
 - [x] BOS eklenmiyor (GGUF bayrağına uyuluyor)
-- [~] Doğrulama: `llama-tokenize` yerine modelin resmi `tokenizer.json`'u ölçü alındı. TR 1740/1740, EN 2734/2734, kod 2428/2428, uzun kelime 1/1 paragraf aynı (`--tok-check`). Not: NFC düzeltmesi yok (`bpe.zig` shortcut yorumu).
+- [x] Doğrulama: ölçü modelin resmi `tokenizer.json`'u. TR 1740/1740, EN 2734/2734, kod 2428/2428, uzun kelime 1/1 paragraf aynı (`--tok-check`)
+- [x] NFC (resmi normalizer): NFD'ye çevrilmiş tr/en/kod korpusları + 2000 rastgele aksan yığını resmi tokenizer ile aynı (`src/tokenizer/nfc.zig`, `benchmarks/tokenizer/nfc_test.py`)
 
 ### 2. Decode doğru olsun
 - [x] `Ġ` → boşluk, `Ċ` → satır sonu
 - [x] Yarım UTF-8 karakter tamponlanıyor (`Utf8Stream`)
 - [x] Özel tokenlar çıktıya basılmıyor
-- [~] Doğrulama: llama.cpp yerine geri çevirme ile yapıldı — decode(encode(metin)) = metin, 4 korpusta tüm paragraflar
+- [x] Doğrulama: decode(encode(metin)) = metin (4 korpusta tüm paragraflar) ve `--exact` greedy metni llama.cpp ile karakter karakter aynı (5 prompt × 128 token)
 
 ### 3. Varsayılanları sohbete göre ayarla
 - [x] Grammar varsayılan kapalı (yeni CLI yolunda yok; eski `--grammar` bayrağı eski yolu açar)
 - [x] Varsayılan katman atlama yok
 - [x] `--fast` (TG ayarı), `--prefill-fast` (prefill ayarı: 613 tok prompt 730 → 1954 tok/s)
-- [~] Env'ler çalışmaya devam ediyor; yalnız profil bayrakları eklendi, her env için ayrı bayrak yok
+- [x] `--skip`, `--ffn-keep`, `--ffn-act` bayrakları (env'ler de çalışıyor)
 - [x] Doğrulama: README hız tablosu (varsayılan tg 34.8, llama.cpp 30.5 tok/s)
 
 ### 4. Chat şablonu
-- [~] ChatML elle uygulandı; GGUF'taki şablon okunmuyor (Qwen3.5'e sabit, başka model reddediliyor)
+- [x] ChatML elle uygulandı; GGUF'taki şablon okunup Qwen3.5 ChatML değilse uyarı veriliyor
 - [x] `system` / `user` / `assistant` rolleri (CLI `--sys`, sunucu `messages`)
 - [x] Düşünme modu varsayılan kapalı, `--think` ile açık
-- [~] Doğrulama: llama.cpp yerine resmi `chat_template.jinja` ile — 3 örnek (sade, system'li, think açık) token token aynı (`--print-tokens`)
+- [x] Doğrulama: ölçü modelin resmi `chat_template.jinja`'sı — 3 örnek (sade, system'li, think açık) token token aynı (`--print-tokens`); sunucuda düşünceli geçmiş mesaj da aynı
 
 ### 5. Durma koşulları
 - [x] EOS / `<|im_end|>` / `<|endoftext|>` → dur
@@ -85,18 +86,19 @@ Kök sebepler:
 - [x] `echo-core model.gguf --server --port 8080` (veya `serve`)
 - [x] `/v1/chat/completions` (SSE), `/v1/completions`, `/v1/models`, `/health`
 - [x] Tek istek sırası
-- [~] Doğrulama: `curl` + `openai` Python istemcisi. Open WebUI denenmedi. Not: her istek prompt'u baştan işliyor (önek KV yeniden kullanımı yok).
+- [x] Doğrulama: `curl`, `openai` Python istemcisi, Open WebUI 0.13.2 (model listesi, akışlı ve çok turlu sohbet, Open WebUI sunucusu üzerinden). Arayüz tarayıcıda açılmadı (bu makinede Chromium engelli).
+- [x] Önek yeniden kullanımı: son `<|im_start|>` öncesi durum kaydediliyor; 4 turlu testte 673 tokenın 639'u hazır, cevap sıfırdan işlemeyle aynı
 
 ### 11. Kurulum
 - [x] Binary adı `echo-core` (`echo` kabuk komutuyla çakıştığı için)
 - [x] `zig build -Doptimize=ReleaseFast install --prefix ~/.local` (denendi)
 - [x] Deney programları yalnız `-Ddeneyler=true` ile
-- [ ] CPU özelliği yoksa anlaşılır hata — yapılmadı; derleme bu makinenin CPU'suna göre, başka CPU'da çalıştırmak için `-Dcpu=` ile derlemek gerekir
+- [x] CPU özelliği yoksa anlaşılır hata (`src/cpu_kontrol.zig`, main'den önce, temel x86-64 ile derlenir). Denendi: Zen4 için derlenen sürüm bu Zen2'de "eksik CPU özelliği: avx512f …" deyip çıkıyor
 
 ### 12. Regresyon kapısı
 - [x] `--llama-bench` eski yol çalışıyor (tg 1133 tok/s, `--fast` ayarı)
-- [x] Kalite: llama.cpp'ye karşı 256 token — varsayılan uyum %96.5 ppl 13.83 (llama.cpp 13.68); `--exact` uyum %99.2 ppl 13.68
-- [~] Greedy = llama.cpp greedy: `--exact` ile ilk ~25-30 token aynı, sonra ayrışıyor (3 prompttan 1'i tamamen aynı)
+- [x] Kalite: llama.cpp'ye karşı 256 token — varsayılan uyum %96.5 ppl 13.83 (llama.cpp 13.68); `--exact` bit eşit
+- [x] Greedy = llama.cpp greedy: `--exact` ile 5 prompt × 128 token karakter karakter aynı (`benchmarks/greedy-llama.sh`); `--logit-check --exact` 9/9 bit eşit
 
 ### 13. README
 - [x] "5 dakikada başla"
@@ -104,12 +106,11 @@ Kök sebepler:
 
 ## Bitti tanımı
 - [x] `echo-core Qwen3.5-0.8B-Q8_0.gguf` → Türkçe soru → akarak Türkçe cevap
-- [~] Greedy çıktı llama.cpp ile token token aynı — `--exact` ile kısmen (yukarıda)
+- [x] Greedy çıktı llama.cpp ile token token aynı (`--exact`)
 - [x] Varsayılan tg llama.cpp'nin altında değil (34.8 vs 30.5 tok/s)
 - [x] `curl` ile `/v1/chat/completions` çalışıyor
 
 ## Açık kalanlar
-- Greedy'de llama.cpp ile tam eşitlik (ayrışma kaynağı: matris çarpımı toplama sırası; R8 kapalıyken de kalıyor)
-- Sunucuda önek KV yeniden kullanımı (uzun sohbette her istek baştan işleniyor)
-- CPU özelliği kontrolü, NFC
+- Varsayılan mod llama.cpp ile token token aynı değil (hız hileleri toplama sırasını değiştiriyor; eşitliği ilk bozan H38, `c927a19`, git bisect). Eşitlik gerekirse `--exact`.
+- Araç çağırma (tool_calls) sunucuda yok — planda yoktu, agentic kullanım için sıradaki aday
 - Sonraki faz: context window
