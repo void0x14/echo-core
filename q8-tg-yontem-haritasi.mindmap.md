@@ -17,17 +17,19 @@ markmap:
   - Kullanılabilirlik ✅ — motor sohbet ediyor
     - `echo-core model.gguf` → sohbet
     - `--server` → OpenAI uyumlu API
-    - Tokenizer resmi ile 6903/6903 paragraf aynı
+    - Tokenizer resmi ile aynı (NFC dahil)
+    - `--exact` llama.cpp ile token token aynı
+    - Sunucu önceki turları yeniden işlemiyor
 - **Modlar (tg tok/s)**
   | Mod | tg | Not |
   |---|---|---|
   | llama.cpp | 30.5 | referans |
   | varsayılan | 34.8 | ppl +%1.1 |
-  | `--exact` | 36.7 | ppl aynı |
+  | `--exact` | 36.5 | llama.cpp ile aynı |
   | `--fast` | 117 | sohbette anlamsız |
 - **Açık kalanlar**
-  - Greedy llama.cpp ile tam aynı değil
-  - Sunucuda önek KV yeniden kullanımı yok
+  - Varsayılan mod llama.cpp ile birebir değil (H38'den beri)
+  - Araç çağırma (tool_calls) yok
 - **Sıradaki iş**
   - Context window
 - **İlk okunacak**
