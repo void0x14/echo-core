@@ -280,11 +280,12 @@ return struct {
         var d: ?ngram.TokenDrafter = null;
         defer if (d) |*x| x.deinit();
         if (greedy and s.o.ngram) {
-            d = try ngram.TokenDrafter.init(s.a, 3);
+            d = try ngram.TokenDrafter.init(s.a, envNum("ECHO_NG_N", 3));
             for (s.hist.items) |t| try d.?.add(t);
         }
         var pending = s.next();
         var buf: [64]u32 = undefined;
+        const ng_min = envNum("ECHO_NG_MIN", 4);
         while (r.n_gen < limit) {
             if (kesildi.load(.acquire)) {
                 r.neden = "Ctrl+C";
@@ -301,7 +302,7 @@ return struct {
             if (d) |*dr| {
                 const room = @min(buf.len, limit - r.n_gen, s.ctx.n_ctx - s.ctx.head - 1);
                 const m = dr.chain(buf[0..room]);
-                if (m >= 4 and buf[0] == pending and s.ctx.trace_k >= m) {
+                if (m >= ng_min and buf[0] == pending and s.ctx.trace_k >= m) {
                     const before = s.ctx.head;
                     s.ctx.snapshot();
                     try s.ctx.decodeVerify(buf[0..m]);
@@ -438,6 +439,8 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         // sohbet seti (~/sohbet-seti/olcum.py) taramasıyla seçildi: 18 katman atlama + FFN 1920
         _ = setenv("ECHO_SKIP", "20,7,18,11,12,8,5,13,10,9,6,17,16,3,21,1,15,4", 0);
         _ = setenv("ECHO_FFN_KEEP", "1920", 0);
+        _ = setenv("ECHO_NG_N", "2", 0);
+        _ = setenv("ECHO_NG_MIN", "3", 0);
         var buf: [4096]u8 = undefined;
         const n = std.process.executableDirPath(io, &buf) catch 0;
         const tam = std.fmt.allocPrintSentinel(a, "{s}/../../benchmarks/ffn-act-qwen35-0.8b-q8.bin", .{buf[0..n]}, 0) catch null;
@@ -595,4 +598,9 @@ fn sohbet(s: anytype) !void {
         }
         try cevapla(s, t);
     }
+}
+
+fn envNum(name: [*:0]const u8, def: usize) usize {
+    const v = std.c.getenv(name) orelse return def;
+    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch def;
 }
