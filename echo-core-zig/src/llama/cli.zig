@@ -10,6 +10,7 @@ const ngram = @import("ngram.zig");
 const sampler = @import("sampler.zig");
 
 const ArrayList = std.array_list.Managed;
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 const Alloc = std.mem.Allocator;
 
 pub const yardim =
@@ -37,6 +38,8 @@ pub const yardim =
     \\      --raw              chat şablonu yok, düz metin tamamlama
     \\      --fast             hız profili: 8 katman atlanır, yaklaşık LM head, greedy
     \\                         (TG ~1000+ tok/s, kalite düşer)
+    \\      --exact            llama.cpp ile aynı sayısal sonuç (R8 çekirdeği kapalı):
+    \\                         prompt işleme ~2x yavaş, üretim ~%5 hızlı
     \\      --no-ngram         greedy'de n-gram taslak hızlandırmasını kapat
     \\      --no-stats         sondaki hız satırını yazma
     \\  -h, --help             bu yardım
@@ -61,6 +64,7 @@ pub const Opts = struct {
     think: bool = false,
     raw: bool = false,
     fast: bool = false,
+    exact: bool = false,
     ngram: bool = true,
     stats: bool = true,
 };
@@ -102,6 +106,7 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         else if (eq(u8, x, "--think")) o.think = true
         else if (eq(u8, x, "--raw")) o.raw = true
         else if (eq(u8, x, "--fast")) o.fast = true
+        else if (eq(u8, x, "--exact")) o.exact = true
         else if (eq(u8, x, "--no-ngram")) o.ngram = false
         else if (eq(u8, x, "--no-stats")) o.stats = false
         else if (eq(u8, x, "-h") or eq(u8, x, "--help")) {
@@ -350,6 +355,7 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
     reader.deinit();
     defer bpe.deinit();
 
+    if (o.exact) _ = setenv("ECHO_NO_R8", "1", 1); // Model.load okur
     const model = try qwen35.Model.load(path, a);
     defer model.deinit();
     // varsayılan kayıpsız: katman atlama yalnız --fast ile (ECHO_SKIP elle verilmişse ona uyulur)
