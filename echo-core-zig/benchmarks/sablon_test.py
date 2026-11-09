@@ -63,7 +63,7 @@ def main():
     srv = subprocess.Popen(["zig-out/bin/echo-core", MODEL, "--server", "--port", str(PORT)], env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        for _ in range(120):
+        for _ in range(600):
             try:
                 urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=1)
                 break

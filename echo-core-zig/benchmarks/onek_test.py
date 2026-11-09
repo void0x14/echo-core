@@ -14,7 +14,7 @@ TUR = [
 def ac():
     p = subprocess.Popen(["zig-out/bin/echo-core", MODEL, "--server", "--port", str(PORT), *sys.argv[1:]],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(120):
+    for _ in range(600):
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=1)
             return p

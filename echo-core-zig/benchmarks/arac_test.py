@@ -26,7 +26,7 @@ def main():
     srv = subprocess.Popen(["zig-out/bin/echo-core", MODEL, "--server", "--port", str(PORT), *sys.argv[1:]],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        for _ in range(120):
+        for _ in range(600):
             try:
                 urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=1)
                 break
@@ -66,6 +66,10 @@ def main():
                                         temperature=0, max_tokens=32)
         assert not r3.choices[0].message.tool_calls and r3.choices[0].message.content, r3.choices[0]
         print("OK araç gerekmeyen soru: düz cevap")
+
+        r4 = cl.chat.completions.create(model=m, messages=SORU, tools=TOOLS, tool_choice="none", temperature=0, max_tokens=48)
+        assert not r4.choices[0].message.tool_calls and r4.choices[0].finish_reason != "tool_calls", r4.choices[0]
+        print("OK tool_choice=none: çağrı yok")
         print("HEPSİ GEÇTİ")
     finally:
         srv.terminate()

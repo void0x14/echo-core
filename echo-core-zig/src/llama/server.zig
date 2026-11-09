@@ -185,6 +185,10 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
         if (tools) |t| if (t != .array or t.array.items.len == 0) {
             tools = null;
         };
+        // OpenAI tool_choice "none": araçlar şablona yazılmaz, çağrı ayrıştırılmaz
+        if (pv.get("tool_choice")) |tc| if (tc == .string and std.mem.eql(u8, tc.string, "none")) {
+            tools = null;
+        };
         const metin = try sablon.kur(a, pv.get("messages").?.array.items, tools, think);
         if (std.c.getenv("ECHO_SABLON_YAZ")) |yol| std.Io.Dir.cwd().writeFile(s.io, .{ .sub_path = std.mem.span(yol), .data = metin }) catch {};
         try s.tokenize(metin, true, &ids);
