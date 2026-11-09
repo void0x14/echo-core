@@ -213,6 +213,19 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
             break;
         };
     }
+    // her asistan başlığı ayrı parça: önekli ve sıfırdan işleme aynı sınırları görür
+    var bolum = ArrayList(usize).init(a);
+    if (chat) {
+        const im_start = s.bpe.specialId("<|im_start|>") orelse 0;
+        var asis = ArrayList(u32).init(a);
+        try s.tokenize("assistant", false, &asis);
+        if (asis.items.len == 1) {
+            var j = bas + 1;
+            while (j + 1 < ids.items.len) : (j += 1) if (ids.items[j] == im_start and ids.items[j + 1] == asis.items[0]) try bolum.append(j - bas);
+        }
+    }
+    s.bolum = bolum.items;
+    defer s.bolum = &.{};
     const id = try std.fmt.allocPrint(a, "{s}-echo-{d}", .{ if (chat) "chatcmpl" else "cmpl", now });
     var ak = Akis{ .w = w, .a = a, .id = if (stream) id else "", .model = model_name, .created = now, .chat = chat, .metin = ArrayList(u8).init(a), .arac = tools != null };
     s.sink = .{ .ctx = &ak, .f = Akis.parca };

@@ -196,6 +196,9 @@ return struct {
     kayit_ids: ArrayList(u32) = undefined,
     /// runIds'te bu kadar token işlenince durum kaydedilir (0 = kaydetme)
     kayit_noktasi: usize = 0,
+    /// sunucu: prompt bu noktalarda (runIds'e göre) ayrı parçalarla işlenir; önek yeniden kullanımıyla
+    /// sıfırdan işleme aynı parçalamayı görür → aynı sayısal sonuç
+    bolum: []const usize = &.{},
     /// taslakçı (--fast ayarlı model): ana ctx ile aynı tokenları işler
     tc: ?*E.Context = null,
     taslak_k: usize = 0,
@@ -310,14 +313,27 @@ return struct {
 
         const t0 = std.Io.Timestamp.now(s.io, .awake);
         const kn = s.kayit_noktasi;
-        if (s.kayit != null and kn > 0 and kn < ids.items.len) {
-            try s.feed(ids.items[0..kn]);
+        var bas: usize = 0;
+        for (s.bolum) |b| if (b > bas and b < ids.items.len) {
+            if (kn > bas and kn < b) break; // bolum sıralı; kn araya düşerse aşağıdaki yol işler
+            try s.feed(ids.items[bas..b]);
+            bas = b;
+            if (s.kayit != null and b == kn) {
+                try s.ctx.kaydet(&s.kayit.?);
+                if (s.tc) |tc| try tc.kaydet(&s.dkayit);
+                s.kayit_ids.clearRetainingCapacity();
+                try s.kayit_ids.appendSlice(s.hist.items);
+            }
+        };
+        if (s.kayit != null and kn > bas and kn < ids.items.len) {
+            try s.feed(ids.items[bas..kn]);
             try s.ctx.kaydet(&s.kayit.?);
             if (s.tc) |tc| try tc.kaydet(&s.dkayit);
             s.kayit_ids.clearRetainingCapacity();
             try s.kayit_ids.appendSlice(s.hist.items);
-            try s.feed(ids.items[kn..]);
-        } else try s.feed(ids.items);
+            bas = kn;
+        }
+        try s.feed(ids.items[bas..]);
         r.t_prompt = @intCast(t0.untilNow(s.io, .awake).toNanoseconds());
         r.fed = true;
 
