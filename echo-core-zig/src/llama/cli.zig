@@ -356,9 +356,12 @@ return struct {
         var t_es: u64 = 0; // taslakçı eşitleme
         var t_tek: u64 = 0; // tek token: ana ctx
         var t_tek_tc: u64 = 0; // tek token: taslakçı
+        var dv_ms: [9]u64 = @splat(0); // decodeVerify süresi, taslak boyuna göre (8 = 8 ve üstü)
+        var dv_n: [9]u64 = @splat(0);
+        var t_rd: u64 = 0; // ret sonrası yeniden işleme
         const t_bas = std.Io.Timestamp.now(s.io, .awake);
         // ECHO_TASLAK_IST=dosya: yalnız sayılar eklenir (içerik yazılmaz)
-        defer if (std.c.getenv("ECHO_TASLAK_IST")) |yol| istYaz(s.io, std.mem.span(yol), .{ gc[0].deneme, gc[0].kabul, gc[0].onerilen, gc[1].deneme, gc[1].kabul, gc[1].onerilen, t_taslak / 1_000_000, r.n_gen, @as(u64, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds())) / 1_000_000, t_dog / 1_000_000, t_es / 1_000_000, t_tek / 1_000_000, t_tek_tc / 1_000_000 });
+        defer if (std.c.getenv("ECHO_TASLAK_IST")) |yol| istYaz(s.io, std.mem.span(yol), .{ gc[0].deneme, gc[0].kabul, gc[0].onerilen, gc[1].deneme, gc[1].kabul, gc[1].onerilen, t_taslak / 1_000_000, r.n_gen, @as(u64, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds())) / 1_000_000, t_dog / 1_000_000, t_es / 1_000_000, t_tek / 1_000_000, t_tek_tc / 1_000_000, t_rd / 1_000_000, dv_n[2], dv_ms[2] / 1_000_000, dv_n[3], dv_ms[3] / 1_000_000, dv_n[4], dv_ms[4] / 1_000_000, dv_n[5], dv_ms[5] / 1_000_000, dv_n[6], dv_ms[6] / 1_000_000, dv_n[7], dv_ms[7] / 1_000_000, dv_n[8], dv_ms[8] / 1_000_000 });
         while (r.n_gen < limit) {
             if (kesildi.load(.acquire)) {
                 r.neden = "Ctrl+C";
@@ -393,7 +396,10 @@ return struct {
                     const td = std.Io.Timestamp.now(s.io, .awake);
                     const before = s.ctx.head;
                     s.ctx.snapshot();
+                    const tv = std.Io.Timestamp.now(s.io, .awake);
                     try s.ctx.decodeVerify(buf[0..m]);
+                    dv_ms[@min(m, 8)] += @intCast(tv.untilNow(s.io, .awake).toNanoseconds());
+                    dv_n[@min(m, 8)] += 1;
                     var j: usize = 0;
                     while (j + 1 < m and s.ctx.verify_tokens[j] == buf[j + 1]) j += 1;
                     var acc = j + 1;
@@ -406,8 +412,10 @@ return struct {
                     if (stop_at) |q| acc = q;
                     const nxt = s.ctx.verify_tokens[acc -| 1];
                     if (acc < m or stop_at != null) {
+                        const trd = std.Io.Timestamp.now(s.io, .awake);
                         s.ctx.rollback(before);
                         if (acc > 0) try s.ctx.decode(buf[0..acc]);
+                        t_rd += @intCast(trd.untilNow(s.io, .awake).toNanoseconds());
                     }
                     t_dog += @intCast(td.untilNow(s.io, .awake).toNanoseconds());
                     const te = std.Io.Timestamp.now(s.io, .awake);
@@ -736,8 +744,8 @@ fn envNum(name: [*:0]const u8, def: usize) usize {
 }
 
 fn istYaz(io: std.Io, yol: []const u8, v: anytype) void {
-    var b: [256]u8 = undefined;
-    const t = std.fmt.bufPrint(&b, "ng_deneme={d} ng_kabul={d} ng_oneri={d} md_deneme={d} md_kabul={d} md_oneri={d} taslak_ms={d} uretim={d} uretim_ms={d} dog_ms={d} esitle_ms={d} tek_ms={d} tek_tc_ms={d}\n", v) catch return;
+    var b: [512]u8 = undefined;
+    const t = std.fmt.bufPrint(&b, "ng_deneme={d} ng_kabul={d} ng_oneri={d} md_deneme={d} md_kabul={d} md_oneri={d} taslak_ms={d} uretim={d} uretim_ms={d} dog_ms={d} esitle_ms={d} tek_ms={d} tek_tc_ms={d} rd_ms={d} n2={d} ms2={d} n3={d} ms3={d} n4={d} ms4={d} n5={d} ms5={d} n6={d} ms6={d} n7={d} ms7={d} n8={d} ms8={d}\n", v) catch return;
     const f = std.Io.Dir.cwd().createFile(io, yol, .{ .truncate = false }) catch return;
     defer f.close(io);
     const n = f.length(io) catch return;
