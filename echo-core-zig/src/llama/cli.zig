@@ -27,6 +27,7 @@ pub const yardim =
     \\  -n, --n-predict N      en çok N token üret (-1: durma tokenına kadar) [-1]
     \\  -c, --ctx-size N       context uzunluğu [4096]
     \\  -t, --threads N        iş parçacığı [fiziksel çekirdek]
+    \\  -ç N                   N çekirdek: işlem 0..N-1 çekirdeklerine bağlanır, N iş parçacığı
     \\      --temp X           sıcaklık; 0 = greedy [0.7]
     \\      --top-k N          [20]   (0 = kapalı)
     \\      --top-p X          [0.8]
@@ -103,6 +104,14 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         else if (eq(u8, x, "-n") or eq(u8, x, "--n-predict") or eq(u8, x, "--max-tokens")) o.n_predict = try std.fmt.parseInt(i64, try need(args, &i), 10)
         else if (eq(u8, x, "-c") or eq(u8, x, "--ctx-size")) o.n_ctx = try std.fmt.parseInt(usize, try need(args, &i), 10)
         else if (eq(u8, x, "-t") or eq(u8, x, "--threads")) o.threads = try std.fmt.parseInt(u32, try need(args, &i), 10)
+        else if (eq(u8, x, "-ç")) {
+            const n = try std.fmt.parseInt(u32, try need(args, &i), 10);
+            if (n == 0 or n > 1024) return error.InvalidArgs;
+            var mask: [16]u64 = @splat(0);
+            for (0..n) |c| mask[c / 64] |= @as(u64, 1) << @intCast(c % 64);
+            if (sched_setaffinity(0, @sizeOf(@TypeOf(mask)), &mask) != 0) std.debug.print("uyarı: çekirdek bağlama başarısız\n", .{});
+            o.threads = n;
+        }
         else if (eq(u8, x, "--temp")) o.sp.temp = try std.fmt.parseFloat(f32, try need(args, &i))
         else if (eq(u8, x, "--top-k")) o.sp.top_k = try std.fmt.parseInt(u32, try need(args, &i), 10)
         else if (eq(u8, x, "--top-p")) o.sp.top_p = try std.fmt.parseFloat(f32, try need(args, &i))
@@ -726,6 +735,7 @@ fn sohbet(s: anytype) !void {
     }
 }
 
+extern fn sched_setaffinity(pid: c_int, size: usize, mask: *const [16]u64) c_int;
 fn envNum(name: [*:0]const u8, def: usize) usize {
     const v = std.c.getenv(name) orelse return def;
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch def;
