@@ -189,11 +189,6 @@ pub const Model = struct {
             try self.repackLayer(l);
         }
         if (ffn_keep) |kk| self.n_ff = kk;
-        // Varsayılan (TG 1000 ayarı, yalnız Qwen3.5-0.8B: 24 katman × 1024): 8 katman atlanır.
-        // Tam model için ECHO_SKIP= (boş) verilir.
-        if (std.c.getenv("ECHO_SKIP") == null and n_layer == 24 and n_embd == 1024) {
-            for ([_]u6{ 20, 7, 18, 11, 12, 8, 5, 13 }) |il| self.skip |= @as(u64, 1) << il;
-        }
         if (std.c.getenv("ECHO_SKIP")) |x| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(x), ',');
             while (it.next()) |t| {
@@ -465,7 +460,8 @@ pub const Context = struct {
     pub fn init(model: *const Model, n_ctx_req: usize, n_threads: u32, allocator: Alloc) !*Context {
         const m = model;
         const n_ctx = pad(@max(n_ctx_req, 1), 256);
-        const n_ub: usize = @min(512, n_ctx);
+        // B taraması (pipeline-2026-11-05.md): 256 medyanda en iyi, 300,4 tok/s (1 çekirdek)
+        const n_ub: usize = @min(256, n_ctx);
         const self = try allocator.create(Context);
         errdefer allocator.destroy(self);
         const n_layer = m.layers.len;

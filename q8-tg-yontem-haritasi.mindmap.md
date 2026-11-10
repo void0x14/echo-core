@@ -692,7 +692,14 @@ markmap:
   | 128 | 290,1 |
   | **256** | **~300 (karar)** |
   | 512 | 295,7 |
-  - ⚠️ Yalnız `--llama-bench` içinde; üretim ve doğrulama yoluna **taşınmadı**
+  - [x] 10 Kas: üretim yoluna taşındı — `qwen35.zig` Context.init `n_ubatch` 512 → **256** (prefill ve doğrulama aynı yoldan geçer)
+  - [x] 10 Kas: 1 çekirdekte derleme + tok/s ölçümü (ajan) — `taskset -c 0`, `-t 1`, `ECHO_SKIP=` boş, r=5, Qwen3.5-0.8B-Q8_0
+    | n_ubatch | pp128 | pp512 | tg32 | tg128 | Kat (pp128 / pp512 / tg32 / tg128) |
+    |---|---:|---:|---:|---:|---|
+    | 512 (önce) | 144,9 | 148,9 | 57,4 | 43,6 | 1,00x |
+    | 256 (sonra) | 151,8 | 146,4 | 57,9 | 46,8 | 1,05x / 0,98x / 1,01x / 1,07x |
+    - gerçek prompt ("Türkiye'nin başkenti neresidir?"): "Türkiye'nin başkenti **Ankara**'dır." — bozuk/döngü yok, tg 37,6 tok/s (16 token, kısa koşu)
+    - sonuç: fark ölçüm gürültüsü içinde; 256 zararsız, kalır
 - **5–6 Kas — Sezaryen Modu planı** → `docs/sezaryen-modu/` (00–04)
 - **7 Kas — H01 + H06** (BENCHMARK-CPU-GPU-2026-11-04.md, 6 çekirdek)
   | Mod | tg128 (tok/s) | Kat |
