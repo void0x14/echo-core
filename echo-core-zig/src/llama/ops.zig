@@ -544,13 +544,14 @@ pub fn convConcat(p: *const Params, rows: usize, kc: usize, n_t: usize, state: [
 
 /// H35: CONCAT + SSM_CONV + SILU tek fazda (satırlar bağımsız), 8 satır vektörel. d_conv = 4 (kc = 3).
 /// state[row][kc] güncellenir; trace varsa [t][row][kc] = t'den sonraki pencere.
-pub fn convFused(p: *const Params, rows: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, cw: [*]const f32, dst: [*]f32, trace: ?[*]f32) void {
+/// H03 (ESP): state yalnız ilk `keep` tokenı yansıtır (sondaki maske tokenlar durumu bozmaz); mid varsa token 0 sonrası pencere oraya yazılır.
+pub fn convFused(p: *const Params, rows: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, cw: [*]const f32, dst: [*]f32, trace: ?[*]f32, keep: usize, mid: ?[*]f32) void {
     const r = p.range(rows);
-    convRows(rows, n_t, state, qkv, cw, dst, trace, r[0], r[1]);
+    convRows(rows, n_t, state, qkv, cw, dst, trace, keep, mid, r[0], r[1]);
 }
 
 /// convFused'un kanal aralığı [r0, r1) gövdesi (H61: GEMM parça sonundan da çağrılır).
-pub fn convRows(rows: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, cw: [*]const f32, dst: [*]f32, trace: ?[*]f32, r0: usize, r1: usize) void {
+pub fn convRows(rows: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, cw: [*]const f32, dst: [*]f32, trace: ?[*]f32, keep: usize, mid: ?[*]f32, r0: usize, r1: usize) void {
     const kc = 3;
     var row = r0;
     while (row + 8 <= r1) : (row += 8) {
@@ -572,9 +573,12 @@ pub fn convRows(rows: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, cw: [
             if (trace) |tr| inline for (0..8) |i| inline for (0..kc) |j| {
                 tr[(t * rows + row + i) * kc + j] = win[j][i];
             };
-        }
-        inline for (0..kc) |j| {
-            inline for (0..8) |i| state[(row + i) * kc + j] = win[j][i];
+            if (t == 0) if (mid) |md| inline for (0..kc) |j| {
+                inline for (0..8) |i| md[(row + i) * kc + j] = win[j][i];
+            };
+            if (t + 1 == keep) inline for (0..kc) |j| {
+                inline for (0..8) |i| state[(row + i) * kc + j] = win[j][i];
+            };
         }
     }
     while (row < r1) : (row += 1) {
@@ -588,8 +592,13 @@ pub fn convRows(rows: usize, n_t: usize, state: [*]f32, qkv: [*]const f32, cw: [
             if (trace) |tr| for (0..kc) |j| {
                 tr[(t * rows + row) * kc + j] = wn[j];
             };
+            if (t == 0) if (mid) |md| for (0..kc) |j| {
+                md[row * kc + j] = wn[j];
+            };
+            if (t + 1 == keep) for (0..kc) |j| {
+                state[row * kc + j] = wn[j];
+            };
         }
-        for (0..kc) |j| state[row * kc + j] = wn[j];
     }
 }
 
@@ -647,19 +656,41 @@ inline fn gdnRows4(s_v: usize, j0: usize, j1: usize, sr: [*]const f32, st: [*]f3
     }
 }
 
-/// H44: kalem = (başlık, 32 satır), tüm tokenlar; satırlar L1'de. Tembel bozunma: saklanan satır = gerçek / c,
+/// H03 (ESP): GDN durumu yalnız ilk `keep` tokenı yansıtır; sonrası (maske tokenlar) durumu bozmadan scr'ye gider.
+pub const GdnPlan = struct {
+    keep: usize,
+    /// token 0 sonrası durum (doğrulama turunda ilk draft reddedilirse buraya dönülür); keep >= 2 gerekir
+    mid: ?[*]f32 = null,
+    scr: ?[*]f32 = null,
+};
+
+fn gdnItem(s_v: usize, j0: usize, n_t: usize, h_n: usize, iv1: usize, q_in: [*]const f32, k_in: [*]const f32, v_in: [*]const f32, v_stride: usize, v_hs: usize, g: [*]const f32, beta: [*]const f32, src0: [*]const f32, st: [*]f32, out: [*]f32, scale: f32, gp: GdnPlan) void {
+    if (gp.keep == n_t and gp.mid == null) return gdnSpan(s_v, j0, 0, n_t, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, src0, st, out, scale);
+    const o = iv1 * s_v * s_v;
+    var src = src0;
+    var t0: usize = 0;
+    if (gp.mid) |md| {
+        gdnSpan(s_v, j0, 0, 1, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, src, md + o, out, scale);
+        src = md + o;
+        t0 = 1;
+    }
+    gdnSpan(s_v, j0, t0, gp.keep, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, src, st, out, scale);
+    if (gp.keep < n_t) gdnSpan(s_v, j0, gp.keep, n_t, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, st, gp.scr.? + o, out, scale);
+}
+
+/// H44: kalem = (başlık, 32 satır), tokenlar [t0, t1); satırlar L1'de. Tembel bozunma: saklanan satır = gerçek / c,
 /// güncelleme row += (δ/c')·k tek FMA; çıktı dot'u ve sonraki tokenın k-dot'u aynı geçişte. Sonda c ile çarpılır.
-fn gdnItem(s_v: usize, j0: usize, n_t: usize, h_n: usize, iv1: usize, q_in: [*]const f32, k_in: [*]const f32, v_in: [*]const f32, v_stride: usize, v_hs: usize, g: [*]const f32, beta: [*]const f32, src0: [*]const f32, st: [*]f32, out: [*]f32, scale: f32) void {
+fn gdnSpan(s_v: usize, j0: usize, t0: usize, t1: usize, n_t: usize, h_n: usize, iv1: usize, q_in: [*]const f32, k_in: [*]const f32, v_in: [*]const f32, v_stride: usize, v_hs: usize, g: [*]const f32, beta: [*]const f32, src0: [*]const f32, st: [*]f32, out: [*]f32, scale: f32) void {
     const R = 32;
     var d: [R]f32 = undefined;
-    const k0 = k_in + iv1 * n_t * s_v;
+    const k0 = k_in + (iv1 * n_t + t0) * s_v;
     for (0..R) |r| d[r] = vec.dotF32(s_v, src0 + (j0 + r) * s_v, k0);
     var c: f32 = 1;
     var src: [*]const f32 = src0;
-    for (0..n_t) |t| {
+    for (t0..t1) |t| {
         const q_d = q_in + (iv1 * n_t + t) * s_v;
         const k_d = k_in + (iv1 * n_t + t) * s_v;
-        const kn = if (t + 1 < n_t) k_d + s_v else k_d;
+        const kn = if (t + 1 < t1) k_d + s_v else k_d;
         const v_d = v_in + t * v_stride + iv1 * v_hs + j0;
         const bt = beta[t * h_n + iv1];
         var cp = c * avx.expf(g[t * h_n + iv1]);
@@ -712,13 +743,13 @@ fn gdnItem(s_v: usize, j0: usize, n_t: usize, h_n: usize, iv1: usize, q_in: [*]c
 
 /// H65: GDN kalemleri set 1 aralıklarından (rangeInitS(1) önceki fazda, kendi bariyeri yok). Başlığın son kalemini
 /// bitiren thread o başlık için tüm tokenlarda gated norm * z + R8 nicemleme yapar (Q8 blokları başlık yerel).
-pub fn gdnNormQ(p: *const Params, s_v: usize, h_n: usize, n_t: usize, q_in: [*]const f32, k_in: [*]const f32, v_in: [*]const f32, v_stride: usize, v_hs: usize, g: [*]const f32, beta: [*]const f32, state_in: [*]const f32, state: [*]f32, out: [*]f32, cnt: [*]std.atomic.Value(u32), z: [*]const f32, eps: f32, w: [*]const f32, rq: bool) void {
+pub fn gdnNormQ(p: *const Params, s_v: usize, h_n: usize, n_t: usize, q_in: [*]const f32, k_in: [*]const f32, v_in: [*]const f32, v_stride: usize, v_hs: usize, g: [*]const f32, beta: [*]const f32, state_in: [*]const f32, state: [*]f32, out: [*]f32, cnt: [*]std.atomic.Value(u32), z: [*]const f32, eps: f32, w: [*]const f32, rq: bool, gp: GdnPlan) void {
     const nbr = s_v / 32;
     const d = s_v * h_n;
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(s_v)));
     while (p.pool.rangeNextS(1, p.ith)) |ir| {
         const iv1 = ir / nbr;
-        gdnItem(s_v, (ir % nbr) * 32, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, state_in + iv1 * s_v * s_v, state + iv1 * s_v * s_v, out, scale);
+        gdnItem(s_v, (ir % nbr) * 32, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, state_in + iv1 * s_v * s_v, state + iv1 * s_v * s_v, out, scale, gp);
         if (cnt[iv1].fetchAdd(1, .acq_rel) + 1 != nbr) continue;
         cnt[iv1].store(0, .monotonic);
         for (0..n_t) |t| {
@@ -749,6 +780,7 @@ pub fn gatedDeltaNet(
     state: [*]f32,
     out: [*]f32,
     trace: ?[*]f32,
+    gp: GdnPlan,
 ) void {
     // H43: satırlar bağımsız → iş = (başlık, 32 satırlık blok); 16 başlık / 6 thread dengesizliği kalkar.
     const rpb: usize = if (s_v % 32 == 0 and trace == null) 32 else s_v;
@@ -770,7 +802,7 @@ pub fn gatedDeltaNet(
             const s_out = state + iv1 * s_v * s_v;
             const s_in0 = state_in + iv1 * s_v * s_v;
             if (rpb == 32) {
-                gdnItem(s_v, j0, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, s_in0, s_out, out, scale);
+                gdnItem(s_v, j0, n_t, h_n, iv1, q_in, k_in, v_in, v_stride, v_hs, g, beta, s_in0, s_out, out, scale, gp);
                 continue;
             }
             var attn_data = out + iv1 * s_v;

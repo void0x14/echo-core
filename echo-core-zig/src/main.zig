@@ -165,6 +165,12 @@ fn runLlamaBench(init: std.process.Init, args: []const []const u8) !void {
             opt.gen_batch = try std.fmt.parseInt(usize, v, 10);
         } else if (std.mem.eql(u8, a, "--ngram")) {
             opt.ngram_k = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--rest")) {
+            opt.rest_dir = v;
+        } else if (std.mem.eql(u8, a, "--rest-min")) {
+            opt.rest_min = try std.fmt.parseInt(usize, v, 10);
+        } else if (std.mem.eql(u8, a, "--esp")) {
+            opt.esp_k = try std.fmt.parseInt(usize, v, 10);
         } else if (std.mem.eql(u8, a, "--grammar")) {
             opt.grammar = !std.mem.eql(u8, v, "0");
         } else if (std.mem.eql(u8, a, "--p6")) {
@@ -222,6 +228,7 @@ pub fn main(init: std.process.Init) !void {
         defer m.deinit();
         return @import("llama/ivf.zig").eval(args.items[2], m.output, args.items[3], args.items[4], try std.fmt.parseInt(usize, args.items[5], 10), init.gpa, init.io);
     }
+    if (qwen35.supported and args.items.len > 2 and std.mem.eql(u8, args.items[1], "--esp-check")) return llama_bench.espCheck(args.items[2], init.gpa);
     if (qwen35.supported and args.items.len > 1 and std.mem.eql(u8, args.items[1], "--logit-check")) {
         if (args.items.len > 2 and std.mem.eql(u8, args.items[2], "--exact")) return @import("llama/logit_check.zig").runExact(6, init.gpa, init.io);
         const save = args.items.len > 2 and std.mem.eql(u8, args.items[2], "--save");

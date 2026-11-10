@@ -450,6 +450,14 @@ pub const Context = struct {
     lmb: ?*ivf.Batch = null,
     /// true: decodeVerify iz yazmaz (geri alma yapılmayacaksa; H11/P6).
     no_trace: bool = false,
+    /// H03 (ESP): batch'in sonundaki n_mask satır token yerine mask_emb girer; recurrent durum yalnız önceki satırları yansıtır.
+    n_mask: usize = 0,
+    esp_split: bool = false,
+    mask_emb: []f32 = &.{},
+    esp_mid_state: [][]f32 = &.{},
+    esp_mid_conv: [][]f32 = &.{},
+    esp_scr: []f32 = &.{},
+    esp_tok: [64]u32 = @splat(0),
 
     fn buf(allocator: Alloc, n: usize) ![]align(64) f32 {
         const b = try allocator.alignedAlloc(f32, .@"64", n);
@@ -544,6 +552,7 @@ pub const Context = struct {
         a.free(self.rs_conv);
         a.free(self.rs_state);
         self.freeTrace();
+        self.espFree();
         a.free(self.logits);
         a.free(self.wdata);
         a.free(self.wdata2);
@@ -582,6 +591,95 @@ pub const Context = struct {
             const np_dog: usize = if (std.c.getenv("ECHO_NPROBE_DOG")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch s.nprobe else s.nprobe;
             if (k <= ivf.Batch.MAXR) self.lmb = try ivf.Batch.init(s.ix, np_dog, self.n_threads, a);
         }
+    }
+
+    /// H03 (ESP): mask embedding, token-0 sonrası durum tamponları ve maske tokenları için atık durum alanı.
+    pub fn espInit(self: *Context) !void {
+        if (self.mask_emb.len > 0) return;
+        const a = self.allocator;
+        const m = self.model;
+        if (m.d_conv != 4 or m.d_state % 32 != 0) return error.EspUnsupported;
+        const conv_len = (m.d_conv - 1) * (m.d_inner + 2 * m.n_group * m.d_state);
+        const s_size = m.d_state * m.d_state * m.dt_rank;
+        self.mask_emb = try a.alloc(f32, m.n_embd);
+        @memset(self.mask_emb, 0);
+        self.esp_scr = try a.alloc(f32, s_size);
+        const ms = try a.alloc([]f32, m.layers.len);
+        const mc = try a.alloc([]f32, m.layers.len);
+        for (m.layers, 0..) |*l, il| {
+            ms[il] = if (l.recr) try a.alloc(f32, s_size) else &.{};
+            mc[il] = if (l.recr) try a.alloc(f32, conv_len) else &.{};
+        }
+        self.esp_mid_state = ms;
+        self.esp_mid_conv = mc;
+    }
+
+    fn espFree(self: *Context) void {
+        const a = self.allocator;
+        if (self.mask_emb.len == 0) return;
+        for (self.esp_mid_state) |b| if (b.len > 0) a.free(b);
+        for (self.esp_mid_conv) |b| if (b.len > 0) a.free(b);
+        a.free(self.esp_mid_state);
+        a.free(self.esp_mid_conv);
+        a.free(self.esp_scr);
+        a.free(self.mask_emb);
+        self.mask_emb = &.{};
+    }
+
+    /// Token embedding satırı (f32).
+    pub fn tokEmb(self: *const Context, token: u32, y: []f32) void {
+        embedRow(self.model, token, y.ptr);
+    }
+
+    /// H03 (ESP), Denklem 4: mask embedding = prompt embedding ortalaması.
+    pub fn espSeed(self: *Context, tokens: []const u32, tmp: []f32) void {
+        @memset(self.mask_emb, 0);
+        if (tokens.len == 0) return;
+        for (tokens) |t| {
+            self.tokEmb(t, tmp);
+            for (self.mask_emb, tmp[0..self.mask_emb.len]) |*d, e| d.* += e;
+        }
+        const inv = 1.0 / @as(f32, @floatFromInt(tokens.len));
+        for (self.mask_emb) |*d| d.* *= inv;
+    }
+
+    /// H03 (ESP), Denklem 5: m += lambda * (e_token - m).
+    pub fn espUpdate(self: *Context, token: u32, lam: f32, tmp: []f32) void {
+        self.tokEmb(token, tmp);
+        for (self.mask_emb, tmp[0..self.mask_emb.len]) |*d, e| d.* += lam * (e - d.*);
+    }
+
+    /// H03 (ESP): tokens (gerçek) + n_mask maske satırı tek forward'da; verify_tokens[0..tokens.len+n_mask].
+    /// Maske satırları KV'ye yazılır ama head onları saymaz; recurrent durum yalnız gerçek tokenları yansıtır.
+    /// split: batch öncesi snapshot() alınmış olmalı; token 0 sonrası durum esp_mid_* içinde kalır (espKeepFirst).
+    pub fn decodeEsp(self: *Context, tokens: []const u32, n_mask: usize, split: bool) !void {
+        const n = tokens.len + n_mask;
+        if (tokens.len == 0 or n_mask == 0 or n > self.esp_tok.len or self.trace_k < n or self.mask_emb.len == 0) return error.TraceTooSmall;
+        if (split and tokens.len < 2) return error.TraceTooSmall;
+        @memcpy(self.esp_tok[0..tokens.len], tokens);
+        @memset(self.esp_tok[tokens.len..n], 0);
+        self.n_mask = n_mask;
+        self.esp_split = split;
+        defer {
+            self.n_mask = 0;
+            self.esp_split = false;
+        }
+        self.verify_len = n;
+        self.want_all = true;
+        defer self.want_all = false;
+        try self.decode(self.esp_tok[0..n]);
+        self.head -= n_mask;
+    }
+
+    /// H03 (ESP): split turunda yalnız token 0 kabul edildi; durum token 0 sonrasına döner.
+    pub fn espKeepFirst(self: *Context, batch_start: usize) void {
+        for (self.model.layers, 0..) |*l, il| {
+            if (!l.recr) continue;
+            std.mem.swap([]f32, &self.rs_state[il], &self.esp_mid_state[il]);
+            std.mem.swap([]f32, &self.rs_conv[il], &self.esp_mid_conv[il]);
+        }
+        self.gdn_alt = false;
+        self.head = batch_start + 1;
     }
 
     fn freeTrace(self: *Context) void {
@@ -770,7 +868,10 @@ pub const Context = struct {
 
         // GET_ROWS(token_embd)
         const r = p.range(n_t);
-        for (r[0]..r[1]) |t| embedRow(m, self.tokens[t], self.b_inp.ptr + t * m.n_embd);
+        const n_real = n_t - self.n_mask;
+        for (r[0]..r[1]) |t| {
+            if (t >= n_real) @memcpy((self.b_inp.ptr + t * m.n_embd)[0..m.n_embd], self.mask_emb) else embedRow(m, self.tokens[t], self.b_inp.ptr + t * m.n_embd);
+        }
         p.barrier();
         // H58: matmul girdileri üretici fazda R8 nicemlenir (nicemleme fazı ve bariyeri yok)
         const q0 = inOk(&m.layers[0]);
@@ -910,6 +1011,14 @@ pub const Context = struct {
         const tracing = self.want_all and !self.no_trace and self.trace_k >= n_t;
         const tr_conv: ?[*]f32 = if (tracing) self.trace_conv[il].ptr else null;
         const tr_recr: ?[*]f32 = if (tracing) self.trace_recr[il].ptr else null;
+        // H03 (ESP): maske satırları durumu bozmaz; split: token 0 sonrası durum ayrı tamponda
+        const keep = n_t - self.n_mask;
+        const gp = ops.GdnPlan{
+            .keep = keep,
+            .mid = if (self.esp_split) self.esp_mid_state[il].ptr else null,
+            .scr = if (self.n_mask > 0) self.esp_scr.ptr else null,
+        };
+        const mid_conv: ?[*]f32 = if (self.esp_split) self.esp_mid_conv[il].ptr else null;
 
         // H22: qkv, alpha, beta, z aynı girdiden tek geçişte; ardından bağımsız eleman işlemleri tek fazda.
         const in4 = [_]ops.Mat{ l.wqkv, l.ssm_alpha, l.ssm_beta, l.wgate };
@@ -928,12 +1037,14 @@ pub const Context = struct {
                 conv_dim: usize,
                 h_n: usize,
                 tr: ?[*]f32,
+                keep: usize,
+                mid: ?[*]f32,
                 pub fn epi(e: @This(), mi: usize, r0: usize, r1: usize) void {
                     const c = e.c;
                     const nt = c.n_t;
                     switch (mi) {
                         0 => {
-                            ops.convRows(e.conv_dim, nt, c.rs_conv[e.il].ptr, c.b_qkv.ptr, e.l.ssm_conv1d, c.b_conv_out.ptr, e.tr, r0, r1);
+                            ops.convRows(e.conv_dim, nt, c.rs_conv[e.il].ptr, c.b_qkv.ptr, e.l.ssm_conv1d, c.b_conv_out.ptr, e.tr, e.keep, e.mid, r0, r1);
                             c.convPost(r0, r1);
                         },
                         1 => for (0..nt) |t| for (r0..r1) |h| {
@@ -949,13 +1060,13 @@ pub const Context = struct {
                     }
                 }
             };
-            ops.mulMatMultiQE(p, &in4, n_t, &out4, Epi{ .c = self, .l = l, .il = il, .conv_dim = conv_dim, .h_n = h_n, .tr = tr_conv });
+            ops.mulMatMultiQE(p, &in4, n_t, &out4, Epi{ .c = self, .l = l, .il = il, .conv_dim = conv_dim, .h_n = h_n, .tr = tr_conv, .keep = keep, .mid = mid_conv });
         } else {
             ops.mulMatMultiQ(p, &in4, self.b_norm.ptr, n_t, &out4);
             // CONCAT + CPY(conv_state_last)
             if (m.d_conv == 4) {
                 // H35: concat + conv + silu tek fazda
-                ops.convFused(p, conv_dim, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, l.ssm_conv1d, self.b_conv_out.ptr, tr_conv);
+                ops.convFused(p, conv_dim, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, l.ssm_conv1d, self.b_conv_out.ptr, tr_conv, keep, mid_conv);
             } else ops.convConcat(p, conv_dim, kc, n_t, self.rs_conv[il].ptr, self.b_qkv.ptr, self.b_conv_in.ptr, tr_conv);
             ops.gateFromAlpha(p, h_n, n_t, self.b_gate.ptr, self.b_gate.ptr, l.ssm_dt, l.ssm_a);
             ops.sigmoidInPlace(p, h_n, n_t, self.b_beta.ptr);
@@ -987,13 +1098,13 @@ pub const Context = struct {
         const qo = ops.r8Ok(&.{l.ssm_out});
         const st_in = if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr;
         if (gfast) {
-            ops.gdnNormQ(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, vh, s, n_t * s, self.b_gate.ptr, self.b_beta.ptr, st_in, self.rs_state[il].ptr, self.b_gdn.ptr, &self.gdn_cnt, self.b_z.ptr, m.eps, l.ssm_norm, qo);
+            ops.gdnNormQ(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, vh, s, n_t * s, self.b_gate.ptr, self.b_beta.ptr, st_in, self.rs_state[il].ptr, self.b_gdn.ptr, &self.gdn_cnt, self.b_z.ptr, m.eps, l.ssm_norm, qo, gp);
             if (qo) ops.r8Pre(p, &.{l.ssm_out});
             p.barrier();
             return ops.mulMatMultiQ(p, &.{l.ssm_out}, self.b_gdn.ptr, n_t, &.{self.b_attn.ptr});
         }
         // GATED_DELTA_NET (+ CPY new_state: yerinde)
-        ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, vh, s, n_t * s, self.b_gate.ptr, self.b_beta.ptr, if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr);
+        ops.gatedDeltaNet(p, s, h_n, n_t, self.b_q.ptr, self.b_k.ptr, vh, s, n_t * s, self.b_gate.ptr, self.b_beta.ptr, if (self.gdn_alt) self.rs_alt[il].ptr else self.rs_state[il].ptr, self.rs_state[il].ptr, self.b_gdn.ptr, tr_recr, gp);
         p.barrier();
         // build_norm_gated
         // + mul z + ssm_out girdisi nicemleme (H58: tek faz)

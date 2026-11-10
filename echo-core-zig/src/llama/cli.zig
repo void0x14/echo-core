@@ -7,6 +7,9 @@ const Utf8Stream = @import("../tokenizer/bpe.zig").Utf8Stream;
 const qwen35 = @import("qwen35.zig");
 const ivf = @import("ivf.zig");
 const ngram = @import("ngram.zig");
+const rest = @import("rest.zig");
+const esp_mod = @import("esp.zig");
+const gorev = @import("gorev.zig");
 const sampler = @import("sampler.zig");
 
 const ArrayList = std.array_list.Managed;
@@ -40,6 +43,11 @@ pub const yardim =
     \\      --raw              chat şablonu yok, düz metin tamamlama
     \\      --ngram            greedy'de n-gram taslak doğrulama (tekrarlı metinde hızlı,
     \\                         doğal metinde yavaş; varsayılan açık)
+    \\      --rest DİZİN       H02: DİZİN altındaki .zig/.md dosyalarından retrieval taslağı (kayıpsız doğrulama)
+    \\      --esp              H03 ESP: eğitimsiz çoklu token tahmini (maske tokenlar), n-gram yerine; greedy, kayıpsız
+    \\                         (ECHO_ESP_K maske sayısı [1], ECHO_ESP_L100 maske kayma oranı x100 [10])
+    \\      --task             H10 task modu (sunucu): araç çağrısı iskeleti şemadan blok yazılır,
+    \\                         yalnız serbest değerleri model üretir (kayıpsız değil, ölçüt çağrı geçerliliği)
     \\      --skip LİSTE       atlanacak katmanlar, ör. 20,7,18 (ECHO_SKIP)
     \\      --ffn-keep N       FFN'de tutulacak nöron sayısı (ECHO_FFN_KEEP)
     \\      --ffn-act DOSYA    FFN budama için aktivasyon dosyası (ECHO_FFN_ACT)
@@ -74,6 +82,14 @@ pub const Opts = struct {
     print_tokens: bool = false,
     /// greedy'de n-gram taslak doğrulama; tam LM head ile doğal metinde yavaşlatır (ölçüm: 37 → 23 tok/s), --fast açar
     ngram: bool = false,
+    /// --no-ngram: n-gram taslağı hiç kullanılmaz (--fast bile açmaz)
+    no_ng: bool = false,
+    /// H02: depo kökü (--rest DİZİN); .zig ve .md dosyalarından retrieval taslağı
+    rest: ?[]const u8 = null,
+    /// H03: ESP taslağı (n-gram yerine)
+    esp: bool = false,
+    /// H10: araç çağrısı iskeleti şemadan türetilir (sunucuda tools varken); kayıpsız değil
+    task: bool = false,
     stats: bool = true,
     server: bool = false,
     host: []const u8 = "127.0.0.1",
@@ -128,8 +144,13 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         else if (eq(u8, x, "--ffn-keep")) _ = setenv("ECHO_FFN_KEEP", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
         else if (eq(u8, x, "--ffn-act")) _ = setenv("ECHO_FFN_ACT", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
         else if (eq(u8, x, "--print-tokens")) o.print_tokens = true
-        else if (eq(u8, x, "--no-ngram")) o.ngram = false
+        else if (eq(u8, x, "--task")) o.task = true
+        else if (eq(u8, x, "--no-ngram")) {
+            o.ngram = false;
+            o.no_ng = true;
+        } else if (eq(u8, x, "--rest")) o.rest = try need(args, &i)
         else if (eq(u8, x, "--ngram")) o.ngram = true
+        else if (eq(u8, x, "--esp")) o.esp = true
         else if (eq(u8, x, "--no-stats")) o.stats = false
         else if (eq(u8, x, "--server") or eq(u8, x, "serve")) o.server = true
         else if (eq(u8, x, "--host")) o.host = try need(args, &i)
@@ -184,6 +205,8 @@ return struct {
     limit: i64,
     stops: []const []const u8,
     sink: ?Sink = null,
+    /// H10: istek başına araç çağrısı iskeleti (sunucu doldurur)
+    iskelet: ?*gorev.Iskelet = null,
     /// sunucu: önek kaydı (null = kapalı). kayit_ids: kaydın kapsadığı tokenlar.
     kayit: ?E.Context.Kayit = null,
     kayit_ids: ArrayList(u32) = undefined,
@@ -199,7 +222,9 @@ return struct {
     dsnap: E.Context.Kayit = .{},
     /// taslak yolları (0 n-gram, 1 model): tutmayan yol geri çekilir; oturum boyunca öğrenilir
     // model taslakçısı (sohbet setinde %1 kabul) temkinli başlar: ilk denemeden sonra 64 token bekler
-    gc: [2]TaslakYol = .{ .{}, .{ .bekle = 64 } },
+    gc: [3]TaslakYol = .{ .{}, .{ .bekle = 64 }, .{} },
+    /// H02 deposu (null = kapalı)
+    rest: ?*const rest.Store = null,
 
     pub fn temizle(s: *Self) void {
         s.ctx.clear();
@@ -279,7 +304,7 @@ return struct {
         return s.bpe.isControl(t);
     }
 
-    pub const Sonuc = struct { n_prompt: usize, n_gen: usize, t_prompt: u64, t_gen: u64, neden: []const u8, fed: bool = false };
+    pub const Sonuc = struct { n_prompt: usize, n_gen: usize, t_prompt: u64, t_gen: u64, neden: []const u8, fed: bool = false, ff_tok: usize = 0, ff_blok: usize = 0 };
 
     /// Bir tur: prompt'u işler, cevabı akıtır.
     fn respond(s: *Self, user: []const u8) !Sonuc {
@@ -343,10 +368,17 @@ return struct {
         const limit: usize = if (s.limit < 0) std.math.maxInt(usize) else @intCast(s.limit);
         var d: ?ngram.TokenDrafter = null;
         defer if (d) |*x| x.deinit();
-        if (greedy and s.o.ngram) {
+        if (greedy and (s.o.ngram or s.rest != null)) {
             d = try ngram.TokenDrafter.init(s.a, envNum("ECHO_NG_N", 2));
             for (s.hist.items) |t| try d.?.add(t);
         }
+        var esp: ?esp_mod.Esp = null;
+        defer if (esp) |*x| x.deinit();
+        if (comptime E == qwen35) if (greedy and s.o.esp and s.tc == null and s.ctx.trace_k > 0) {
+            esp = try esp_mod.Esp.init(s.a, s.ctx, @intCast(envNum("ECHO_ESP_K", 1)), @as(f32, @floatFromInt(envNum("ECHO_ESP_L100", 10))) / 100.0);
+            esp.?.seed(s.ctx, s.hist.items);
+        };
+        defer if (esp) |x| if (std.c.getenv("ECHO_ESP_IST") != null) std.debug.print("ESP tur={d} draftli_tur={d} onerilen={d} kabul={d} uretilen={d}\n", .{ x.rounds, x.rounds_draft, x.drafted, x.accepted, x.tokens });
         var pending = s.next();
         var buf: [256]u32 = undefined;
         const ng_max = @min(envNum("ECHO_NG_MAX", 128), buf.len);
@@ -367,10 +399,15 @@ return struct {
         var t_tek_tc: u64 = 0; // tek token: taslakçı
         var dv_ms: [9]u64 = @splat(0); // decodeVerify süresi, taslak boyuna göre (8 = 8 ve üstü)
         var dv_n: [9]u64 = @splat(0);
+        var t_rest: u64 = 0; // H02 sorgu süresi
+        var rest_sorgu: u64 = 0;
+        var rest_eslesme: u64 = 0;
+        defer if (s.rest != null and std.c.getenv("ECHO_REST_DEBUG") != null) std.debug.print("[H02 sorgu={d} eşleşme={d} sorgu_ms={d}]\n", .{ rest_sorgu, rest_eslesme, t_rest / 1_000_000 });
+        const rest_min = envNum("ECHO_REST_MIN", 3);
         var t_rd: u64 = 0; // ret sonrası yeniden işleme
         const t_bas = std.Io.Timestamp.now(s.io, .awake);
         // ECHO_TASLAK_IST=dosya: yalnız sayılar eklenir (içerik yazılmaz)
-        defer if (std.c.getenv("ECHO_TASLAK_IST")) |yol| istYaz(s.io, std.mem.span(yol), .{ gc[0].deneme, gc[0].kabul, gc[0].onerilen, gc[1].deneme, gc[1].kabul, gc[1].onerilen, t_taslak / 1_000_000, r.n_gen, @as(u64, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds())) / 1_000_000, t_dog / 1_000_000, t_es / 1_000_000, t_tek / 1_000_000, t_tek_tc / 1_000_000, t_rd / 1_000_000, dv_n[2], dv_ms[2] / 1_000_000, dv_n[3], dv_ms[3] / 1_000_000, dv_n[4], dv_ms[4] / 1_000_000, dv_n[5], dv_ms[5] / 1_000_000, dv_n[6], dv_ms[6] / 1_000_000, dv_n[7], dv_ms[7] / 1_000_000, dv_n[8], dv_ms[8] / 1_000_000 });
+        defer if (std.c.getenv("ECHO_TASLAK_IST")) |yol| istYaz(s.io, std.mem.span(yol), .{ gc[0].deneme, gc[0].kabul, gc[0].onerilen, gc[1].deneme, gc[1].kabul, gc[1].onerilen, gc[2].deneme, gc[2].kabul, gc[2].onerilen, (t_taslak + t_rest) / 1_000_000, r.n_gen, @as(u64, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds())) / 1_000_000, t_dog / 1_000_000, t_es / 1_000_000, t_tek / 1_000_000, t_tek_tc / 1_000_000, t_rd / 1_000_000, dv_n[2], dv_ms[2] / 1_000_000, dv_n[3], dv_ms[3] / 1_000_000, dv_n[4], dv_ms[4] / 1_000_000, dv_n[5], dv_ms[5] / 1_000_000, dv_n[6], dv_ms[6] / 1_000_000, dv_n[7], dv_ms[7] / 1_000_000, dv_n[8], dv_ms[8] / 1_000_000 });
         while (r.n_gen < limit) {
             if (kesildi.load(.acquire)) {
                 r.neden = "Ctrl+C";
@@ -383,18 +420,108 @@ return struct {
                 r.neden = "context dolu";
                 break;
             }
+            // H03 ESP: pending + draft + maske tek forward; kabul edilen tokenlar greedy ile birebir
+            if (comptime E == qwen35) if (esp) |*ep| {
+                const room = @min(limit - r.n_gen, s.ctx.n_ctx - s.ctx.head - 1);
+                const td = std.Io.Timestamp.now(s.io, .awake);
+                if (try ep.begin(s.ctx, pending, room -| 1)) {
+                    var acc = ep.matched(s.ctx);
+                    var stop_at: ?usize = null;
+                    for (ep.buf[0..acc], 0..) |t, q| if (s.isStop(t)) {
+                        stop_at = q;
+                        break;
+                    };
+                    if (stop_at) |q| acc = q;
+                    const nxt = s.ctx.verify_tokens[acc -| 1];
+                    try ep.finish(s.ctx, acc);
+                    t_dog += @intCast(td.untilNow(s.io, .awake).toNanoseconds());
+                    for (ep.buf[0..acc]) |t| {
+                        try s.hist.append(t);
+                        if (try yaz.add(t)) {
+                            r.neden = "stop metni";
+                            r.n_gen += 1;
+                            return;
+                        }
+                    }
+                    r.n_gen += acc;
+                    pending = if (stop_at) |q| ep.buf[q] else nxt;
+                    continue;
+                }
+            };
             // greedy: n-gram taslağı tek forward'da doğrulanır (kayıpsız; kabul edilen tokenlar aynı)
-            if (d) |*dr| {
+            // H10: şemadan kesin olan iskelet metni model çağrılmadan tek blok olarak yazılır
+            if (s.iskelet) |k| {
+                var blok = ArrayList(u8).init(s.a);
+                defer blok.deinit();
+                if (k.ilk_zorla and r.n_gen == 0 and !k.aktif) {
+                    k.ilk_zorla = false;
+                    k.gozle("<tool_call>");
+                    try blok.appendSlice("<tool_call>");
+                }
+                if (k.aktif) {
+                    var pt: []const u8 = s.bpe.piece(pending);
+                    while (true) switch (try k.bak(pt)) {
+                        .zorla => |t| {
+                            try blok.appendSlice(t);
+                            k.zorlandi(t);
+                            pt = ""; // zorlanan metinden sonra modelin eski tokenı geçersiz
+                        },
+                        else => break,
+                    };
+                }
+                if (blok.items.len > 0) {
+                    var fid = ArrayList(u32).init(s.a);
+                    defer fid.deinit();
+                    try s.tokenize(blok.items, false, &fid);
+                    const n = @min(fid.items.len, limit - r.n_gen, s.ctx.n_ctx - s.ctx.head - 1);
+                    for (fid.items[0..n], 0..) |t, i| if (try yaz.add(t)) {
+                        r.neden = "stop metni";
+                        r.n_gen += i + 1;
+                        try s.feed(fid.items[0 .. i + 1]);
+                        return;
+                    };
+                    try s.feed(fid.items[0..n]);
+                    if (d) |*dr| for (fid.items[0..n]) |t| try dr.add(t);
+                    r.n_gen += n;
+                    r.ff_tok += n;
+                    r.ff_blok += 1;
+                    pending = s.next();
+                    continue;
+                }
+            }
+            // H10: <tool_call> içinde n-gram kapalı (iskelet her tokenı görmeli)
+            const ng_ok = if (s.iskelet) |k| !k.aktif else true;
+            if (if (ng_ok and d != null) &d.? else null) |dr| {
                 const room = @min(ng_max, limit - r.n_gen, s.ctx.n_ctx - s.ctx.head - 1);
-                var m: usize = if (r.n_gen >= gc[0].sonraki) dr.chain(buf[0..@min(room, gc[0].boy)]) else 0;
+                var m: usize = if (s.o.ngram and r.n_gen >= gc[0].sonraki) dr.chain(buf[0..@min(room, gc[0].boy)]) else 0;
                 var model_taslak = false;
+                var yol: usize = 0;
                 if (!(m >= ng_min and buf[0] == pending and s.ctx.trace_k >= m)) {
                     m = 0;
-                    if (s.tc) |tc| if (room >= 2 and r.n_gen >= gc[1].sonraki) {
+                    // H02: depodan en uzun suffix eşleşmesinin devamı (buf[0] = pending)
+                    if (s.rest) |st| if (room >= 2 and r.n_gen >= gc[2].sonraki) {
+                        var ctxt: [rest.MAXN]u32 = undefined;
+                        const hn: usize = @min(s.hist.items.len, rest.MAXN - 1);
+                        @memcpy(ctxt[0..hn], s.hist.items[s.hist.items.len - hn ..]);
+                        ctxt[hn] = pending;
+                        var hit: rest.Store.Hit = undefined;
+                        const t_r = std.Io.Timestamp.now(s.io, .awake);
+                        const nn = st.chain(ctxt[0 .. hn + 1], rest_min, buf[1..@min(room, gc[2].boy + 1, s.ctx.trace_k)], &hit);
+                        t_rest += @intCast(t_r.untilNow(s.io, .awake).toNanoseconds());
+                        rest_sorgu += 1;
+                        if (hit.n > 0) rest_eslesme += 1;
+                        if (nn + 1 >= ng_min) {
+                            buf[0] = pending;
+                            m = nn + 1;
+                            yol = 2;
+                        }
+                    };
+                    if (m == 0) if (s.tc) |tc| if (room >= 2 and r.n_gen >= gc[1].sonraki) {
                         const tt = std.Io.Timestamp.now(s.io, .awake);
                         m = try s.taslakla(tc, pending, buf[0..@min(room, s.taslak_k + 1, s.ctx.trace_k)]);
                         t_taslak += @intCast(tt.untilNow(s.io, .awake).toNanoseconds());
                         model_taslak = true;
+                        yol = 1;
                         if (m < 2) {
                             try s.esitle(tc, buf[0..m], 0, true);
                             m = 0;
@@ -430,7 +557,7 @@ return struct {
                     const te = std.Io.Timestamp.now(s.io, .awake);
                     if (s.tc) |tc| try s.esitle(tc, buf[0..m], acc, model_taslak);
                     t_es += @intCast(te.untilNow(s.io, .awake).toNanoseconds());
-                    const g = &gc[@intFromBool(model_taslak)];
+                    const g = &gc[yol];
                     g.deneme += 1;
                     g.kabul += acc -| 1;
                     g.onerilen += m - 1;
@@ -442,6 +569,7 @@ return struct {
                     for (buf[0..acc]) |t| {
                         try s.hist.append(t);
                         try dr.add(t);
+                        if (s.iskelet) |k| k.gozle(s.bpe.piece(t));
                         if (try yaz.add(t)) {
                             r.neden = "stop metni";
                             r.n_gen += 1;
@@ -474,6 +602,7 @@ return struct {
                 try s.hist.append(pending);
             }
             if (d) |*dr| try dr.add(pending);
+            if (s.iskelet) |k| k.gozle(s.bpe.piece(pending));
             r.n_gen += 1;
             pending = s.next();
         }
@@ -610,9 +739,20 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
     defer if (dctx) |c| if (c.lm) |l| l.deinit(a);
     if (o.fast) {
         o.sp.temp = 0;
-        o.ngram = true;
+        o.ngram = !o.no_ng and !o.esp and std.c.getenv("ECHO_NO_NGRAM") == null; // ECHO_NO_NGRAM: taslaksız ölçüm tabanı
     }
-    if (o.ngram and (o.fast or o.sp.temp <= 0)) {
+    var rest_store: ?rest.Store = null;
+    defer if (rest_store) |*st| st.deinit();
+    if (o.rest) |dizin| {
+        const tb = std.Io.Timestamp.now(io, .awake);
+        rest_store = try rest.Store.build(a, io, dizin, &bpe);
+        std.debug.print("[H02 depo: {d} dosya, {d} token, kuruluş {d} ms]\n", .{ rest_store.?.n_files, rest_store.?.ds.len, @divTrunc(tb.untilNow(io, .awake).toNanoseconds(), 1_000_000) });
+    }
+    if (o.esp) {
+        if (E != qwen35) return error.InvalidArgs;
+        try ctx.enableTrace(16);
+        ctx.no_trace = true; // geri alma snapshot ile
+    } else if ((o.ngram or o.rest != null) and (o.fast or o.sp.temp <= 0)) {
         try ctx.enableTrace(@intCast(@min(envNum("ECHO_NG_MAX", 128), 256)));
         ctx.no_trace = true; // geri alma snapshot ile (H13)
     }
@@ -635,6 +775,7 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         .stops = o.stops.items,
         .tc = dctx,
         .taslak_k = taslak_k,
+        .rest = if (rest_store) |*st| st else null,
     };
     defer s.hist.deinit();
     defer s.dkayit.deinit(a);
@@ -742,8 +883,8 @@ fn envNum(name: [*:0]const u8, def: usize) usize {
 }
 
 fn istYaz(io: std.Io, yol: []const u8, v: anytype) void {
-    var b: [512]u8 = undefined;
-    const t = std.fmt.bufPrint(&b, "ng_deneme={d} ng_kabul={d} ng_oneri={d} md_deneme={d} md_kabul={d} md_oneri={d} taslak_ms={d} uretim={d} uretim_ms={d} dog_ms={d} esitle_ms={d} tek_ms={d} tek_tc_ms={d} rd_ms={d} n2={d} ms2={d} n3={d} ms3={d} n4={d} ms4={d} n5={d} ms5={d} n6={d} ms6={d} n7={d} ms7={d} n8={d} ms8={d}\n", v) catch return;
+    var b: [640]u8 = undefined;
+    const t = std.fmt.bufPrint(&b, "ng_deneme={d} ng_kabul={d} ng_oneri={d} md_deneme={d} md_kabul={d} md_oneri={d} rs_deneme={d} rs_kabul={d} rs_oneri={d} taslak_ms={d} uretim={d} uretim_ms={d} dog_ms={d} esitle_ms={d} tek_ms={d} tek_tc_ms={d} rd_ms={d} n2={d} ms2={d} n3={d} ms3={d} n4={d} ms4={d} n5={d} ms5={d} n6={d} ms6={d} n7={d} ms7={d} n8={d} ms8={d}\n", v) catch return;
     const f = std.Io.Dir.cwd().createFile(io, yol, .{ .truncate = false }) catch return;
     defer f.close(io);
     const n = f.length(io) catch return;

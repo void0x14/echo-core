@@ -4,6 +4,7 @@ const std = @import("std");
 const cli = @import("cli.zig");
 const sampler = @import("sampler.zig");
 const sablon = @import("sablon.zig");
+const gorev = @import("gorev.zig");
 
 const ArrayList = std.array_list.Managed;
 const Value = std.json.Value;
@@ -172,6 +173,8 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
     // prompt → token
     var ids = ArrayList(u32).init(a);
     var tools: ?Value = null;
+    var isk: gorev.Iskelet = undefined;
+    var isk_ok = false;
     if (chat) {
         const msgs = o.get("messages") orelse return hata(w, "400 Bad Request", "messages yok", a);
         if (msgs != .array) return hata(w, "400 Bad Request", "messages dizi olmalı", a);
@@ -188,6 +191,20 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
         // OpenAI tool_choice "none": araçlar şablona yazılmaz, çağrı ayrıştırılmaz
         if (pv.get("tool_choice")) |tc| if (tc == .string and std.mem.eql(u8, tc.string, "none")) {
             tools = null;
+        };
+        // H10 task modu: tool_choice "required" ya da {"function":{"name":..}} ise ilk token <tool_call> zorlanır
+        if (s.o.task) if (tools) |t| {
+            var sadece: ?[]const u8 = null;
+            var zorla = false;
+            if (pv.get("tool_choice")) |tc| {
+                if (tc == .string and std.mem.eql(u8, tc.string, "required")) zorla = true;
+                if (tc == .object) if (tc.object.get("function")) |f| if (f == .object) if (f.object.get("name")) |n| if (n == .string) {
+                    sadece = n.string;
+                    zorla = true;
+                };
+            }
+            isk = try gorev.Iskelet.init(a, t, sadece, zorla);
+            isk_ok = isk.araclar.len > 0;
         };
         const metin = try sablon.kur(a, pv.get("messages").?.array.items, tools, think);
         if (std.c.getenv("ECHO_SABLON_YAZ")) |yol| std.Io.Dir.cwd().writeFile(s.io, .{ .sub_path = std.mem.span(yol), .data = metin }) catch {};
@@ -234,12 +251,15 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
     var ak = Akis{ .w = w, .a = a, .id = if (stream) id else "", .model = model_name, .created = now, .chat = chat, .metin = ArrayList(u8).init(a), .arac = tools != null };
     s.sink = .{ .ctx = &ak, .f = Akis.parca };
     defer s.sink = null;
+    s.iskelet = if (isk_ok) &isk else null;
+    defer s.iskelet = null;
     if (stream) try w.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n");
     if (stream and chat) try ak.gonder("", null); // ilk chunk: rol
     var r = try s.runIds(ids.items[bas..]);
     r.n_prompt = ids.items.len;
     var finish: []const u8 = if (std.mem.eql(u8, r.neden, "-n sınırı") or std.mem.eql(u8, r.neden, "context dolu")) "length" else "stop";
-    std.debug.print("[{s} {s}: prompt {d} tok ({d} hazır), üretim {d} tok, {d:.1} tok/s, {s}]\n", .{ req.method, req.path, r.n_prompt, bas, r.n_gen, @as(f64, @floatFromInt(r.n_gen)) / (@as(f64, @floatFromInt(@max(r.t_gen, 1))) / 1e9), r.neden });
+    std.debug.print("[{s} {s}: prompt {d} tok ({d} hazır), üretim {d} tok, {d:.1} tok/s, {s}; üretim {d:.3} s, H10 blokla {d} tok / {d} blok, modelden {d} tok]\n", .{ req.method, req.path, r.n_prompt, bas, r.n_gen, @as(f64, @floatFromInt(r.n_gen)) / (@as(f64, @floatFromInt(@max(r.t_gen, 1))) / 1e9), r.neden, @as(f64, @floatFromInt(r.t_gen)) / 1e9, r.ff_tok, r.ff_blok, r.n_gen - r.ff_tok });
+    if (std.c.getenv("ECHO_HAM_YAZ") != null) std.debug.print("HAM: {f}\n", .{std.json.fmt(ak.metin.items, .{})});
     const ay = if (tools != null) try sablon.ayir(a, ak.metin.items, tools) else sablon.Ayrik{ .content = ak.metin.items, .calls = &.{} };
     const Tc = struct { index: usize, id: []const u8, type: []const u8 = "function", function: sablon.Cagri };
     const tcs = try a.alloc(Tc, ay.calls.len);
