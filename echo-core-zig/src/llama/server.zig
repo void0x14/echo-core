@@ -192,8 +192,8 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
         if (pv.get("tool_choice")) |tc| if (tc == .string and std.mem.eql(u8, tc.string, "none")) {
             tools = null;
         };
-        // H10 task modu: tool_choice "required" ya da {"function":{"name":..}} ise ilk token <tool_call> zorlanır
-        if (s.o.task) if (tools) |t| {
+        // H10 (varsayılan): araç çağrısı iskeleti şemadan blok yazılır; tool_choice "required" ya da {"function":{"name":..}} ise ilk token <tool_call> zorlanır
+        if (tools) |t| {
             var sadece: ?[]const u8 = null;
             var zorla = false;
             if (pv.get("tool_choice")) |tc| {
@@ -205,7 +205,7 @@ fn handle(s: anytype, conn: std.Io.net.Stream, model_name: []const u8) !void {
             }
             isk = try gorev.Iskelet.init(a, t, sadece, zorla);
             isk_ok = isk.araclar.len > 0;
-        };
+        }
         const metin = try sablon.kur(a, pv.get("messages").?.array.items, tools, think);
         if (std.c.getenv("ECHO_SABLON_YAZ")) |yol| std.Io.Dir.cwd().writeFile(s.io, .{ .sub_path = std.mem.span(yol), .data = metin }) catch {};
         try s.tokenize(metin, true, &ids);

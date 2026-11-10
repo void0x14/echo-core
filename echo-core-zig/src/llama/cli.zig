@@ -46,8 +46,6 @@ pub const yardim =
     \\      --rest DİZİN       H02: DİZİN altındaki .zig/.md dosyalarından retrieval taslağı (kayıpsız doğrulama)
     \\      --esp              H03 ESP: eğitimsiz çoklu token tahmini (maske tokenlar), n-gram yerine; greedy, kayıpsız
     \\                         (ECHO_ESP_K maske sayısı [1], ECHO_ESP_L100 maske kayma oranı x100 [10])
-    \\      --task             H10 task modu (sunucu): araç çağrısı iskeleti şemadan blok yazılır,
-    \\                         yalnız serbest değerleri model üretir (kayıpsız değil, ölçüt çağrı geçerliliği)
     \\      --skip LİSTE       atlanacak katmanlar, ör. 20,7,18 (ECHO_SKIP)
     \\      --ffn-keep N       FFN'de tutulacak nöron sayısı (ECHO_FFN_KEEP)
     \\      --ffn-act DOSYA    FFN budama için aktivasyon dosyası (ECHO_FFN_ACT)
@@ -88,8 +86,6 @@ pub const Opts = struct {
     rest: ?[]const u8 = null,
     /// H03: ESP taslağı (n-gram yerine)
     esp: bool = false,
-    /// H10: araç çağrısı iskeleti şemadan türetilir (sunucuda tools varken); kayıpsız değil
-    task: bool = false,
     stats: bool = true,
     server: bool = false,
     host: []const u8 = "127.0.0.1",
@@ -144,7 +140,6 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         else if (eq(u8, x, "--ffn-keep")) _ = setenv("ECHO_FFN_KEEP", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
         else if (eq(u8, x, "--ffn-act")) _ = setenv("ECHO_FFN_ACT", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
         else if (eq(u8, x, "--print-tokens")) o.print_tokens = true
-        else if (eq(u8, x, "--task")) o.task = true
         else if (eq(u8, x, "--no-ngram")) {
             o.ngram = false;
             o.no_ng = true;

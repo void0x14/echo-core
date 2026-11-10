@@ -748,6 +748,12 @@ markmap:
   - [x] H03 ESP — çalışıyor, yavaş (`--esp K`, varsayılan kapalı)
   - [-] H04 Lyanna — atlandı: eğitim gerekiyor, eğitim istenmedi
   - [x] H10 task modu — sunucuda araç çağrısı geçerli, ~2,9x (`--task`, sohbet CLI'de etkisiz)
+  - [x] 10 Kas: **H10 varsayılan** — `--task` bayrağı silindi; sunucuda `tools` varsa iskelet her zaman açık (1 çekirdek, aynı araç isteği, 3 tekrar)
+    | Mod | tok/s | Kat | Çağrı |
+    |---|---:|---:|---|
+    | H10 kapalı (eski) | 35,2 | 1,00x | 0/3, düz metin |
+    | **H10 varsayılan** | **93,4** | **2,65x** | 3/3 geçerli |
+    - Araçsız istek: H10 devreye girmiyor (0 blok), "Ankara" cevabı aynı, 39,9 tok/s
 - **10 Kas — Sezaryen hileleri, tarihli ölçüm** (1 çekirdek, 1 thread: `taskset -c 0`, `ECHO_THREADS=1`, `ECHO_SKIP=` boş, greedy, 128 token, Qwen3.5-0.8B-Q8_0)
   | Satır | tg32 (tok/s) ⚠️ | tg128 (tok/s) ⚠️ | gerçek prompt tg, genel (tok/s) | gerçek prompt tg, depo (tok/s) | Kat (genel / depo) | çıktı doğru mu |
   |---|---:|---:|---:|---:|---|---|
