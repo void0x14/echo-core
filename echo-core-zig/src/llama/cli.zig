@@ -146,10 +146,6 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
             return error.InvalidArgs;
         }
     }
-    if (o.model == null) {
-        std.debug.print("hata: model verilmedi (-m MODEL.gguf)\n\n{s}", .{yardim});
-        return error.InvalidArgs;
-    }
     if (o.n_ctx < 64) return error.InvalidArgs;
     return o;
 }
@@ -538,7 +534,17 @@ const Yazici = struct {
 pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
     var o = parse(args, a) catch std.process.exit(2);
     defer o.stops.deinit();
-    const path = o.model.?;
+    // model verilmezse programın yanındaki depodaki model kullanılır (zig-out/bin → ../../../ArastirmaModelleri)
+    const path = o.model orelse blk: {
+        var buf: [4096]u8 = undefined;
+        const n = std.process.executableDirPath(io, &buf) catch 0;
+        const yol = try std.fmt.allocPrint(a, "{s}/../../../ArastirmaModelleri/Qwen3.5-0.8B-Q8_0.gguf", .{buf[0..n]});
+        std.Io.Dir.cwd().access(io, yol, .{}) catch {
+            std.debug.print("hata: model bulunamadı ({s}); -m MODEL.gguf ile verin\n\n{s}", .{ yol, yardim });
+            std.process.exit(2);
+        };
+        break :blk yol;
+    };
     if (!qwen35.supported) {
         std.debug.print("hata: bu CPU desteklenmiyor (AVX2 + FMA gerekli)\n", .{});
         std.process.exit(1);
