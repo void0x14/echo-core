@@ -39,12 +39,10 @@ pub const yardim =
     \\      --stop METİN       bu metin gelince dur (birden çok verilebilir)
     \\      --think            düşünme modu (<think> ... </think>)
     \\      --raw              chat şablonu yok, düz metin tamamlama
-    \\      --fast             hız profili: 8 katman atlanır, yaklaşık LM head, greedy
-    \\                         (TG ~1000+ tok/s, kalite düşer)
     \\      --exact            llama.cpp ile token token aynı sonuç (ayrı hesap yolu):
     \\                         prompt işleme ~3x yavaş, üretim aynı hızda
     \\      --ngram            greedy'de n-gram taslak doğrulama (tekrarlı metinde hızlı,
-    \\                         doğal metinde yavaş; --fast ile otomatik açık)
+    \\                         doğal metinde yavaş; varsayılan açık)
     \\      --prefill-fast     prompt işleme hız profili (prefill 2000 ayarı: FFN budama +
     \\                         12 katman atlama; kalite çok düşer)
     \\      --skip LİSTE       atlanacak katmanlar, ör. 20,7,18 (ECHO_SKIP)
@@ -76,7 +74,8 @@ pub const Opts = struct {
     stops: ArrayList([]const u8),
     think: bool = false,
     raw: bool = false,
-    fast: bool = false,
+    /// tek çalışma düzeni: 18 katman atlama + FFN 1920 + yaklaşık LM head + n-gram (--exact kapatır)
+    fast: bool = true,
     exact: bool = false,
     prefill_fast: bool = false,
     print_tokens: bool = false,
@@ -124,7 +123,6 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         } else if (eq(u8, x, "--stop")) try o.stops.append(try need(args, &i))
         else if (eq(u8, x, "--think")) o.think = true
         else if (eq(u8, x, "--raw")) o.raw = true
-        else if (eq(u8, x, "--fast")) o.fast = true
         else if (eq(u8, x, "--exact")) o.exact = true
         else if (eq(u8, x, "--prefill-fast")) o.prefill_fast = true
         else if (eq(u8, x, "--skip")) _ = setenv("ECHO_SKIP", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
@@ -565,8 +563,9 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
     reader.deinit();
     defer bpe.deinit();
 
-    if (o.exact and (o.fast or o.prefill_fast)) {
-        std.debug.print("hata: --exact, --fast / --prefill-fast ile birlikte kullanılamaz\n", .{});
+    if (o.exact) o.fast = false;
+    if (o.exact and o.prefill_fast) {
+        std.debug.print("hata: --exact, --prefill-fast ile birlikte kullanılamaz\n", .{});
         std.process.exit(2);
     }
     if (o.exact) return runWith(exact_motor, &o, path, bpe, a, io);
