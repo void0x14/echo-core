@@ -743,10 +743,28 @@ markmap:
   - `echo-core` her klasörden açılır; `-ç N` = N çekirdek
   - **Gerçek tg: ~35–38 tok/s, 1 çekirdek**, çıktı doğru (EN + TR)
   - Açık sorun: Türkçede 2. mesajdan sonra döngü
-- **10 Kas — hile ajanları** (Sonnet, ayrı worktree, 1 çekirdek)
-  - [ ] H02 retrieval/REST
-  - [ ] H03 ESP
-  - [ ] H04 Lyanna
-  - [ ] H10 task modu
+- **10 Kas — hile ajanları** (Sonnet, ayrı worktree, 1 çekirdek) — ana dala birleştirildi `73c934c`
+  - [x] H02 retrieval/REST — çalışıyor, kazanç yok (`--rest DİZİN`, varsayılan kapalı)
+  - [x] H03 ESP — çalışıyor, yavaş (`--esp K`, varsayılan kapalı)
+  - [-] H04 Lyanna — atlandı: eğitim gerekiyor, eğitim istenmedi
+  - [x] H10 task modu — sunucuda araç çağrısı geçerli, ~2,9x (`--task`, sohbet CLI'de etkisiz)
+- **10 Kas — Sezaryen hileleri, tarihli ölçüm** (1 çekirdek, 1 thread: `taskset -c 0`, `ECHO_THREADS=1`, `ECHO_SKIP=` boş, greedy, 128 token, Qwen3.5-0.8B-Q8_0)
+  | Satır | tg32 (tok/s) ⚠️ | tg128 (tok/s) ⚠️ | gerçek prompt tg, genel (tok/s) | gerçek prompt tg, depo (tok/s) | Kat (genel / depo) | çıktı doğru mu |
+  |---|---:|---:|---:|---:|---|---|
+  | Baseline (D düzeni) | 117,1 | 114,9 | 60,3 | 54,7 | 1,00x / 1,00x | ilk 2 satır doğru; sonda döngü (baseline'da da var) |
+  | H02 retrieval (`--rest`) | 31,5 | 39,1 | 56,3 | 52,7 | 0,93x / 0,96x | genel: baseline ile bit aynı; depo: ilk satırlar aynı, sonra sayısal ayrışma |
+  | H03 ESP (`--esp 1`) | 23,8 | 30,6 | 27,4 | 27,3 | 0,45x / 0,50x | genel: baseline ile bit aynı; depo: sayısal ayrışma |
+  | H04 Lyanna | atlandı | atlandı | atlandı | atlandı | — | eğitim istenmedi |
+  | H10 görev modu (CLI, `--task`) | — | — | 59,8 | — | 0,99x | baseline ile bit aynı (CLI'de etkisiz) |
+  | Baseline sunucu, araç isteği | — | — | 35,1 | — | 1,00x | 3 istekte 0/3 geçerli çağrı (düz metin) |
+  | H10 sunucu, araç isteği (`--task`) | — | — | 101,6 | — | 2,90x | 3 istekte 3/3 geçerli çağrı (`hava_durumu`) |
+  - ⚠️ tg32/tg128 `--llama-bench` boş prompt ile ölçüldü; baseline'da n-gram döngüyü kopyalıyor (kabul 89/92), sahte. Gerçek sonuç için gerçek prompt sütunu geçerli.
+  - Genel: 60,3 ve depo: 54,7, 5 tekrarın medyanı (baseline ile dönüşümlü). H03 ayrı koşuldu (3 tekrar); aradaki fark 2 kattan büyük.
+  - Araç isteğinde H10 43 token'ın 40'ını şemadan zorlayıp yalnız 3 token üretti; baseline düz metin üretti, yani kıyas aynı işi yapmıyor.
+  - Özet:
+    - H02: depoda eşleşme var (kabul 23/24), ama her taslakta ~1 token kazanılıyor; depo dışı metinde eşleşme yok. Net kayıp -4% ile -7%. REST_MIN 2 ve 1 denendi: 35 ve 31 tok/s.
+    - H03: maske tokenlar her turda ek yük, kabul %16 (10/63). K=1..4, kayma 0,1 ve 0,3 denendi (8 koşu); en iyisi K=1 (27 tok/s), baseline'ın yarısı.
+    - H10: araç çağrısında hızlandırıyor ve çağrıyı geçerli kılıyor. Sohbet ve araçsız istek değişmiyor. Kayıpsız değil, yalnız çağrı iskeleti zorlanıyor. Açık: tek şema ile ölçüldü.
+    - `--no-ngram` artık n-gram'ı kapatıyor; önceden `--fast` bunu geçersiz kılıyordu.
 - **Kayıtlar**
   - `docs/oturum-dokumu/` → 8–10 Kas döküm + analiz
