@@ -593,7 +593,7 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         } else |_| std.debug.print("uyarı: {s} yok (echo-core-zig dizininden çalıştırın)\n", .{act});
     }
     // --fast: ayar (atlama + FFN budama) taslakçı modelde; çıktıyı tam model doğrular (ECHO_TASLAK=0 eski tek model)
-    const taslak_k = envNum("ECHO_TASLAK", 6);
+    const taslak_k = envNum("ECHO_TASLAK", 0);
     const taslak_ac = E == qwen35 and o.fast and !o.prefill_fast and taslak_k > 0;
     const dmodel: ?*E.Model = if (taslak_ac) try E.Model.load(path, a) else null;
     defer if (dmodel) |m| m.deinit();
