@@ -5,8 +5,6 @@ const gguf = @import("../gguf/reader.zig");
 const Bpe = @import("../tokenizer/bpe.zig").Bpe;
 const Utf8Stream = @import("../tokenizer/bpe.zig").Utf8Stream;
 const qwen35 = @import("qwen35.zig");
-/// --exact: bit eşitliği korunmuş eski hesap yolu (src/llama/exact)
-const exact_motor = @import("exact/qwen35.zig");
 const ivf = @import("ivf.zig");
 const ngram = @import("ngram.zig");
 const sampler = @import("sampler.zig");
@@ -39,12 +37,8 @@ pub const yardim =
     \\      --stop METİN       bu metin gelince dur (birden çok verilebilir)
     \\      --think            düşünme modu (<think> ... </think>)
     \\      --raw              chat şablonu yok, düz metin tamamlama
-    \\      --exact            llama.cpp ile token token aynı sonuç (ayrı hesap yolu):
-    \\                         prompt işleme ~3x yavaş, üretim aynı hızda
     \\      --ngram            greedy'de n-gram taslak doğrulama (tekrarlı metinde hızlı,
     \\                         doğal metinde yavaş; varsayılan açık)
-    \\      --prefill-fast     prompt işleme hız profili (prefill 2000 ayarı: FFN budama +
-    \\                         12 katman atlama; kalite çok düşer)
     \\      --skip LİSTE       atlanacak katmanlar, ör. 20,7,18 (ECHO_SKIP)
     \\      --ffn-keep N       FFN'de tutulacak nöron sayısı (ECHO_FFN_KEEP)
     \\      --ffn-act DOSYA    FFN budama için aktivasyon dosyası (ECHO_FFN_ACT)
@@ -74,10 +68,8 @@ pub const Opts = struct {
     stops: ArrayList([]const u8),
     think: bool = false,
     raw: bool = false,
-    /// tek çalışma düzeni: 18 katman atlama + FFN 1920 + yaklaşık LM head + n-gram (--exact kapatır)
+    /// tek çalışma düzeni: tam model (atlama yok, FFN tam) + yaklaşık LM head + n-gram, greedy
     fast: bool = true,
-    exact: bool = false,
-    prefill_fast: bool = false,
     print_tokens: bool = false,
     /// greedy'de n-gram taslak doğrulama; tam LM head ile doğal metinde yavaşlatır (ölçüm: 37 → 23 tok/s), --fast açar
     ngram: bool = false,
@@ -123,8 +115,6 @@ pub fn parse(args: []const []const u8, a: Alloc) !Opts {
         } else if (eq(u8, x, "--stop")) try o.stops.append(try need(args, &i))
         else if (eq(u8, x, "--think")) o.think = true
         else if (eq(u8, x, "--raw")) o.raw = true
-        else if (eq(u8, x, "--exact")) o.exact = true
-        else if (eq(u8, x, "--prefill-fast")) o.prefill_fast = true
         else if (eq(u8, x, "--skip")) _ = setenv("ECHO_SKIP", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
         else if (eq(u8, x, "--ffn-keep")) _ = setenv("ECHO_FFN_KEEP", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
         else if (eq(u8, x, "--ffn-act")) _ = setenv("ECHO_FFN_ACT", try a.dupeSentinel(u8, try need(args, &i), 0), 1)
@@ -158,7 +148,7 @@ fn sigint(_: std.posix.SIG) callconv(.c) void {
 /// Metin parçası alıcısı (sunucu SSE için); null ise `out`a yazılır.
 pub const Sink = struct { ctx: *anyopaque, f: *const fn (*anyopaque, []const u8) anyerror!void };
 
-/// Varsayılan motorla oturum; --exact için SessionT(exact_motor).
+/// Motorla oturum.
 pub const Session = SessionT(qwen35);
 
 const TaslakYol = struct { sonraki: usize = 0, bekle: usize = 1, boy: usize = 8, deneme: usize = 0, kabul: usize = 0, onerilen: usize = 0 };
@@ -563,43 +553,20 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
     reader.deinit();
     defer bpe.deinit();
 
-    if (o.exact) o.fast = false;
-    if (o.exact and o.prefill_fast) {
-        std.debug.print("hata: --exact, --prefill-fast ile birlikte kullanılamaz\n", .{});
-        std.process.exit(2);
-    }
-    if (o.exact) return runWith(exact_motor, &o, path, bpe, a, io);
     return runWith(qwen35, &o, path, bpe, a, io);
 }
 
 fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io: std.Io) !void {
     const o = o_;
-    if (o.fast and !o.prefill_fast) {
-        // sohbet seti (~/sohbet-seti/olcum.py) taramasıyla seçildi: 18 katman atlama + FFN 1920 + n-gram 2/3/128
-        _ = setenv("ECHO_SKIP", "20,7,18,11,12,8,5,13,10,9,6,17,16,3,21,1,15,4", 0);
-        _ = setenv("ECHO_FFN_KEEP", "1920", 0);
+    if (o.fast) {
+        // tek düzen (10 Kas, "D"): katman atlama ve FFN budama yok; 18 atlama "0 0 0", FFN 1920 döngü üretiyordu
         _ = setenv("ECHO_NG_N", "2", 0);
         _ = setenv("ECHO_NG_MIN", "3", 0);
         _ = setenv("ECHO_NG_MAX", "128", 0);
-        var buf: [4096]u8 = undefined;
-        const n = std.process.executableDirPath(io, &buf) catch 0;
-        const tam = std.fmt.allocPrintSentinel(a, "{s}/../../benchmarks/ffn-act-qwen35-0.8b-q8.bin", .{buf[0..n]}, 0) catch null;
-        if (tam) |t| if (std.Io.Dir.cwd().access(io, t, .{})) |_| {
-            _ = setenv("ECHO_FFN_ACT", t, 0);
-        } else |_| std.debug.print("uyarı: {s} yok\n", .{t});
-    }
-    if (o.prefill_fast) {
-        // README "Prefill 2000 ayarı"; aktivasyon dosyası yoksa ağırlık normuyla budanır
-        _ = setenv("ECHO_FFN_KEEP", "1920", 0);
-        _ = setenv("ECHO_SKIP", "20,7,18,11,12,8,5,13,10,9,6,17", 0);
-        const act = "benchmarks/ffn-act-qwen35-0.8b-q8.bin";
-        if (std.Io.Dir.cwd().access(io, act, .{})) |_| {
-            _ = setenv("ECHO_FFN_ACT", act, 0);
-        } else |_| std.debug.print("uyarı: {s} yok (echo-core-zig dizininden çalıştırın)\n", .{act});
     }
     // --fast: ayar (atlama + FFN budama) taslakçı modelde; çıktıyı tam model doğrular (ECHO_TASLAK=0 eski tek model)
     const taslak_k = envNum("ECHO_TASLAK", 0);
-    const taslak_ac = E == qwen35 and o.fast and !o.prefill_fast and taslak_k > 0;
+    const taslak_ac = E == qwen35 and o.fast and taslak_k > 0;
     const dmodel: ?*E.Model = if (taslak_ac) try E.Model.load(path, a) else null;
     defer if (dmodel) |m| m.deinit();
     if (taslak_ac) {
@@ -610,7 +577,7 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
     const model = try E.Model.load(path, a);
     defer model.deinit();
     // varsayılan kayıpsız: katman atlama yalnız --fast ile (ECHO_SKIP elle verilmişse ona uyulur)
-    if (@hasField(E.Model, "skip")) if (!o.fast and std.c.getenv("ECHO_SKIP") == null) {
+    if (@hasField(E.Model, "skip")) if (std.c.getenv("ECHO_SKIP") == null) {
         model.skip = 0;
     };
     const cpus = std.Thread.getCpuCount() catch 2;
