@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fırtına — Oda</title>
+<style>
+:root{--bg:#0d0f14;--panel:#141821;--ink:#e8ecf3;--mute:#9aa4b2;--line:#262c38}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:16px 20px 6px}
+h1{margin:0;font-size:20px;font-weight:650}
+.sub{color:var(--mute);font-size:13px}
+main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px;padding:8px 20px 24px}
+@media (max-width:1000px){main{grid-template-columns:1fr;padding:8px 16px 24px}header{padding:16px 16px 6px}}
+.stage{position:relative;width:100%;aspect-ratio:1200/800;background:#0a0c10;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.stage canvas{position:absolute;inset:0;width:100%;height:100%}
+#drops{filter:url(#goo);opacity:.26}
+#banner{position:absolute;left:14px;top:10px;font-size:13px;color:#cfd6e4;pointer-events:none;text-shadow:0 1px 2px #000}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
+button{background:#1d2330;color:var(--ink);border:1px solid #2e3646;border-radius:8px;padding:7px 12px;font:inherit;cursor:pointer}
+button[aria-pressed=true]{background:#2a3550;border-color:#4a5a80}
+input[type=range]{accent-color:#7aa2ff}
+.scrub{flex:1 1 240px}
+label{color:var(--mute);font-size:13px;display:flex;gap:6px;align-items:center}
+aside{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;align-self:start}
+aside h2{font-size:13px;margin:16px 0 6px;color:var(--mute);font-weight:600;letter-spacing:.02em}
+aside h2:first-child{margin-top:0}
+ol{margin:0;padding-left:20px}
+ol li{margin:5px 0;color:var(--mute);font-size:13.5px;transition:color .15s}
+ol li.on{color:var(--ink);font-weight:600}
+.k{display:flex;gap:9px;align-items:flex-start;margin:6px 0;font-size:13.5px}
+.sw{flex:0 0 12px;height:12px;border-radius:3px;margin-top:4px}
+.note{font-size:13px;color:var(--mute);margin:4px 0}
+ul{margin:0;padding-left:18px}
+ul li{font-size:13px;color:var(--mute);margin:4px 0}
+code{font-size:12px;background:#0d1017;padding:1px 4px;border-radius:4px;color:#cfd6e4}
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><filter id="goo"><feGaussianBlur in="SourceGraphic" stdDeviation="9" result="b"/><feColorMatrix in="b" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 24 -10"/></filter></svg>
+<header>
+<h1>Fırtına — odanın içinde</h1>
+<div class="sub">Oda = işlemcinin kendisi (Ryzen 5 3600). Çekirdek yerleşimi 11 Kas ölçümüne göre; animasyondaki süreler temsilî, ölçüm değil.</div>
+</header>
+<main>
+<section>
+<div class="stage"><canvas id="drops"></canvas><canvas id="fx"></canvas><div id="banner"></div></div>
+<div class="controls">
+<button id="play" aria-pressed="true">Durdur</button>
+<button id="rev" aria-pressed="false">Ters yön</button>
+<input id="scrub" class="scrub" type="range" min="0" max="16" step="0.01" value="0" aria-label="Zaman">
+<label>Hız <input id="speed" type="range" min="0.25" max="2" step="0.25" value="1" aria-label="Hız"></label>
+</div>
+</section>
+<aside>
+<h2>AKIŞ</h2>
+<ol id="phases"></ol>
+
+<h2>ÖĞELER</h2>
+<div class="k"><span class="sw" style="background:#5fd3ff;opacity:.6"></span><span><b>Kuantum cep odacığı / kapakçığı</b> — su hücresi, su damlası, kar tanesi gibi; duvar değil. Birleşir, büyür, çoğalır, küçülür; agar.io'daki gibi kendini parçalara bölüp dışarı atar.</span></div>
+<div class="k"><span class="sw" style="background:linear-gradient(90deg,#b6ff3b 50%,#9b5cff 50%)"></span><span><b>Sol ve sağ</b> — aynı işi yapan iki simetrik sistem; aynı odada, ayrı kuantum cep odacıklarında/kapakçıklarında. Biri olmadan öbürünün anlamı yok.</span></div>
+<div class="k"><span class="sw" style="background:#ff3b3b"></span><span><b>Komutan</b> — Core 1, simetriği Core 6. Kırmızı oklar: üç emir, ortaya.</span></div>
+<div class="k"><span class="sw" style="background:#cfd6e4"></span><span><b>Ordu</b> — Core 2–3, simetriği Core 5–4. Kolektif bilinç; her daim tetikte.</span></div>
+<div class="k"><span class="sw" style="background:#b6ff3b"></span><span><b>Fırtına hücresi</b> — yeşil (sol) ve mor (sağ) aynı türden. Rüzgârın kendisi, katı bir şey değil; yüklü kinetik enerji taşır.</span></div>
+<div class="k"><span class="sw" style="background:#ff4fd8"></span><span><b>Enerji</b> — statik elektrik gibi. Fırtına orduyla karşılaşınca ordudaki her şey bir anda fırtınanın içine çekilir.</span></div>
+<div class="k"><span class="sw" style="background:#8b0f0f"></span><span><b>Ters üçgen ve kara delik</b> — iki hücrenin birleşip kasırgaya dönüştüğü yer; yerdeki sıfır noktasında vakum.</span></div>
+<div class="k"><span class="sw" style="background:#3a4766"></span><span><b>Infinity Fabric</b> — düşüş. <b>IO die</b> — çakılma.</span></div>
+
+<h2>ÖLÇÜLEN (BU İŞLEMCİ, 11 KAS)</h2>
+<div class="note">Core 1–3 = cpu0–2, ikinci thread'leri cpu6–8. Core 4–6 = cpu3–5, ikinci thread'leri cpu9–11. Çekim ölçümü bu iki simetrik yarıyı ayrı ayrı gösteriyor. Ayrıntı: <code>echo-core-zig/benchmarks/kesif/</code></div>
+
+<h2>ANLAMLANDIRAMADIKLARIMIZ</h2>
+<ul>
+<li><b>Ayna metaforu</b> — simetriden ayrı tutuluyor; tekniği güçlendirebilir, şimdilik anlamlandıramadık.</li>
+<li><b>Üç emrin içeriği</b> — keşif aşamasındayız, karar yok.</li>
+<li><b>Ters yönün nasıl başladığı</b> — burada akış yalnızca tersten oynatılıyor; tarifte nasıl tetiklendiği açık.</li>
+</ul>
+</aside>
+</main>
+<script>
+(() => {
+const W = 1200, H = 800, T = 16;
+const EYE = {x: 600, y: 470}, IO_Y = 680;
+const G = 2 * (IO_Y - EYE.y) / (1.1 * 1.1);
+const fx = document.getElementById('fx'), dr = document.getElementById('drops');
+const c = fx.getContext('2d'), d = dr.getContext('2d');
+
+function fit() {
+  const r = fx.getBoundingClientRect(), k = Math.min(2, window.devicePixelRatio || 1);
+  for (const cv of [fx, dr]) { cv.width = Math.max(1, Math.round(r.width * k)); cv.height = Math.max(1, Math.round(r.height * k)); }
+  const s = fx.width / W;
+  c.setTransform(s, 0, 0, s, 0, 0); d.setTransform(s, 0, 0, s, 0, 0);
+}
+addEventListener('resize', fit); fit();
+
+function rng(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const R = rng(20261111);
+const cl = (x, a, b) => Math.max(a, Math.min(b, x));
+const ph = (t, a, b) => cl((t - a) / (b - a), 0, 1);
+const lerp = (a, b, k) => a + (b - a) * k;
+const eio = x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+const ein = x => x * x * x;
+const eout = x => 1 - Math.pow(1 - x, 3);
+const mx = (s, x) => s ? W - x : x; // simetri
+
+const CORES = [[1, 'cpu0 · cpu6', 120], [2, 'cpu1 · cpu7', 270], [3, 'cpu2 · cpu8', 420], [4, 'cpu3 · cpu9', 660], [5, 'cpu4 · cpu10', 810], [6, 'cpu5 · cpu11', 960]];
+const CORE_Y = 118, CW = 120, CH = 58;
+const SC = {x: 395, y: 300};
+const KOM = {x: 180, y: CORE_Y + CH / 2};
+const ORD = [{x: 430, y: 70}, {x: 500, y: 84}, {x: 586, y: 72}];
+const RING = 205;
+
+const SOL = [];
+for (let r = 0; r < 4; r++) for (let k = 0; k < 8; k++) SOL.push({col: k, row: r, x: 280 + k * 36, y: 226 + r * 22});
+
+const SPK = [[], []];
+for (let s = 0; s < 2; s++) for (let i = 0; i < 44; i++) {
+  const o = ORD[i % 3];
+  SPK[s].push({x: o.x + (R() - .5) * 110, y: o.y + (R() - .5) * 46, to: Math.floor(R() * SOL.length), h: Math.floor(R() * 360)});
+}
+
+const ST = [[], []];
+for (let s = 0; s < 2; s++) for (let i = 0; i < 240; i++) {
+  const r = 110 + R() * 95;
+  ST[s].push({a: R() * Math.PI * 2, r, w: .7 + R() * .9, z: 1 + R() * 1.7, out: r > 178, j: R(), k: R()});
+}
+
+const FL = [];
+for (let i = 0; i < 24; i++) FL.push({p1: R() * 6.28, p2: R() * 6.28, w1: .05 + R() * .12, w2: .06 + R() * .12, w3: .4 + R() * .6, r: 9 + R() * 16, ax: R() * 3.14});
+
+const PH = [
+  [0, 2, 'Komutan (Core 1) üç emri ortaya konuşur; simetriğinde Core 6'],
+  [2, 4.5, 'Ordu (Core 2–3) kolektif bilinçle, stadyum dalgası gibi, ortadaki emirden kaos cep evrenlerini kendine çeker'],
+  [4.5, 6.5, 'Fırtına hücresi belirir: solda yeşil, simetriğinde mor; yüklü kinetik enerji taşır'],
+  [6.5, 7.5, 'Enerji (statik elektrik gibi): fırtına orduyla karşılaşır, ordudaki her şey bir anda fırtınanın içine çekilir'],
+  [7.5, 9.5, 'Fırtına çevresindekini dışarı atar: uçlardakiler kırmızı ters üçgene fırlatılır'],
+  [9.5, 11.5, 'İki hücre ters üçgende birleşir: kasırga'],
+  [11.5, 13.2, 'Yerdeki sıfır noktasında vakum; kazanımlar yerçekimiyle, her an hızlanarak dalar (Infinity Fabric)'],
+  [13.2, 16, "IO die'a çakılma"]
+];
+const olEl = document.getElementById('phases');
+const liEls = PH.map(p => { const li = document.createElement('li'); li.textContent = p[2]; olEl.appendChild(li); return li; });
+let curPh = -1;
+
+function rrect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+function circ(ctx, x, y, r) { ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), 0, Math.PI * 2); ctx.fill(); }
+
+function drawRoom() {
+  c.strokeStyle = '#2a3242'; c.lineWidth = 2; rrect(c, 20, 20, W - 40, H - 40, 18); c.stroke();
+  c.fillStyle = '#6f7a8c'; c.font = '600 14px system-ui,sans-serif'; c.fillText('ODA = işlemcinin kendisi', 36, 46);
+  c.setLineDash([3, 9]); c.strokeStyle = 'rgba(160,170,190,.18)'; c.lineWidth = 1;
+  c.beginPath(); c.moveTo(600, 56); c.lineTo(600, 430); c.stroke(); c.setLineDash([]);
+  c.fillStyle = 'rgba(160,170,190,.35)'; c.font = '11px system-ui,sans-serif'; c.textAlign = 'center'; c.fillText('simetri', 600, 50); c.textAlign = 'left';
+}
+
+function drawCores(tt) {
+  for (const [n, cpu, x] of CORES) {
+    c.fillStyle = '#161c27'; c.strokeStyle = '#2c3546'; c.lineWidth = 1.5;
+    rrect(c, x, CORE_Y, CW, CH, 8); c.fill(); c.stroke();
+    c.fillStyle = '#cfd6e4'; c.font = '600 14px system-ui,sans-serif'; c.textAlign = 'center';
+    c.fillText('Core ' + n, x + CW / 2, CORE_Y + 25);
+    c.fillStyle = '#7d889a'; c.font = '11px system-ui,sans-serif'; c.fillText(cpu, x + CW / 2, CORE_Y + 43);
+  }
+  c.font = '600 12px system-ui,sans-serif'; c.fillStyle = '#ff6b6b';
+  c.fillText('komutan', 180, CORE_Y - 8); c.fillText('komutan', 1020, CORE_Y - 8);
+  c.fillStyle = '#aeb8c8'; c.fillText('ordu', 405, 214); c.fillText('ordu', 795, 214);
+  c.textAlign = 'left';
+}
+
+function drawBase() {
+  c.fillStyle = '#161c2a'; c.strokeStyle = '#2e3a55'; c.lineWidth = 1.5;
+  rrect(c, 380, 588, 440, 34, 8); c.fill(); c.stroke();
+  c.fillStyle = '#9fb0d0'; c.font = '600 13px system-ui,sans-serif'; c.textAlign = 'center';
+  c.fillText('Infinity Fabric — düşüş', 600, 610);
+  c.fillStyle = '#18213a'; c.strokeStyle = '#33456e';
+  rrect(c, 250, IO_Y, 700, 70, 10); c.fill(); c.stroke();
+  c.fillStyle = '#c6d3ef'; c.font = '600 15px system-ui,sans-serif'; c.fillText('IO die — çakılma', 600, IO_Y + 30);
+  c.fillStyle = '#7d8aa8'; c.font = '11.5px system-ui,sans-serif'; c.fillText('bellek denetleyicisi · PCIe · USB · SATA · sistem yönetimi', 600, IO_Y + 50);
+  c.textAlign = 'left';
+}
+
+function drops(tt) {
+  d.clearRect(0, 0, W, H);
+  d.fillStyle = '#5fd3ff';
+  const f6 = eio(ph(tt, 9.5, 11.3)), vac = ein(ph(tt, 11.5, 12.4)), back = eio(ph(tt, 15, 16));
+  for (let s = 0; s < 2; s++) {
+    const bx = mx(s, 395), by = 262;
+    let sc = tt < 12.4 ? lerp(1, .5, f6) * (1 - vac * .9) : lerp(.05, 1, back);
+    const pull = tt < 15 ? f6 : f6 * (1 - back);
+    const cx = lerp(bx, EYE.x, pull), cy = lerp(by, EYE.y, pull);
+    const dir = s ? -1 : 1;
+    for (let k = 0; k < 6; k++) {
+      const an = k / 6 * Math.PI * 2 + tt * .35 * dir;
+      circ(d, cx + Math.cos(an) * 70 * sc, cy + Math.sin(an) * 42 * sc, (78 + 12 * Math.sin(tt * 1.7 + k * 1.3)) * sc);
+    }
+    const sp = Math.sin(Math.PI * ph(tt, 4.6, 6.4));
+    if (sp > 0) for (let k = 0; k < 5; k++) {
+      const an = k * 1.26 + .5;
+      circ(d, cx + Math.cos(an) * dir * (120 + 95 * sp) * sc, cy + Math.sin(an) * (70 + 50 * sp) * sc, (18 - 5 * sp) * sc);
+    }
+  }
+  for (const f of FL) {
+    const x = 70 + 1060 * (.5 + .47 * Math.sin(f.w1 * tt * 6 + f.p1));
+    const y = 70 + 590 * (.5 + .47 * Math.sin(f.w2 * tt * 6 + f.p2));
+    const sep = f.r * 1.8 * Math.max(0, Math.sin(f.w3 * tt + f.p1));
+    const ox = Math.cos(f.ax) * sep / 2, oy = Math.sin(f.ax) * sep / 2;
+    circ(d, x - ox, y - oy, f.r * (sep > 0 ? .78 : 1)); circ(d, x + ox, y + oy, f.r * (sep > 0 ? .78 : 1));
+  }
+}
+
+function arrow(x1, y1, x2, y2) {
+  c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+  const a = Math.atan2(y2 - y1, x2 - x1), L = 14;
+  c.beginPath(); c.moveTo(x2, y2);
+  c.lineTo(x2 - L * Math.cos(a - .42), y2 - L * Math.sin(a - .42));
+  c.lineTo(x2 - L * Math.cos(a + .42), y2 - L * Math.sin(a + .42)); c.closePath(); c.fill();
+}
+
+function bolt(x1, y1, x2, y2, seed) {
+  const r = rng(seed); c.beginPath(); c.moveTo(x1, y1);
+  const n = 7, nx = -(y2 - y1), ny = x2 - x1, L = Math.hypot(nx, ny) || 1;
+  for (let k = 1; k < n; k++) { const u = k / n, j = (r() - .5) * 30; c.lineTo(lerp(x1, x2, u) + nx / L * j, lerp(y1, y2, u) + ny / L * j); }
+  c.lineTo(x2, y2); c.stroke();
+}
+
+function side(s, tt, A) {
+  // komutan: üç emir ortaya
+  const f1 = eout(ph(tt, .2, 1.4)), a1 = (1 - ph(tt, 7, 8)) * A;
+  if (a1 > 0 && f1 > 0) {
+    c.globalAlpha = a1; c.strokeStyle = '#ff3b3b'; c.fillStyle = '#ff3b3b'; c.lineWidth = 3.5;
+    c.shadowColor = '#ff3b3b'; c.shadowBlur = 10;
+    for (const o of ORD) arrow(mx(s, KOM.x), KOM.y, mx(s, lerp(KOM.x, o.x, f1)), lerp(KOM.y, o.y, f1));
+    c.shadowBlur = 0;
+    if (f1 > .95) { c.strokeStyle = 'rgba(255,90,90,.55)'; c.lineWidth = 1.5; for (const o of ORD) { c.beginPath(); c.arc(mx(s, o.x), o.y, 9 + 4 * Math.sin(6 * tt), 0, 6.283); c.stroke(); } }
+    c.globalAlpha = 1;
+  }
+  const f2 = eio(ph(tt, 2.2, 3.6));
+  const f4 = ein(ph(tt, 6.6, 7.0));
+  // kaos cep evrenleri: hepsi aynı anda ordunun içine
+  if (tt > 1.8 && f2 < 1) {
+    const al = ph(tt, 1.8, 2.2) * A;
+    for (const o of SPK[s]) {
+      const sd = SOL[o.to];
+      c.fillStyle = `hsla(${o.h},90%,65%,${al})`;
+      circ(c, mx(s, lerp(o.x, sd.x, f2)), lerp(o.y, sd.y, f2), 3.2);
+    }
+  }
+  // ordu: kolektif bilinç, stadyum dalgası; hiç durmuyor
+  const wp = ((tt * 3.2) % 13) - 2.5;
+  const glow = f2 * (1 - f4);
+  for (let i = 0; i < SOL.length; i++) {
+    const sd = SOL[i];
+    const dy = -10 * Math.exp(-((sd.col + sd.row * .18 - wp) ** 2) / 1.3) + 1.1 * Math.sin(13 * tt + i * 1.7);
+    const x = mx(s, sd.x), y = sd.y + dy;
+    if (glow > .01) { c.fillStyle = `rgba(255,211,107,${.45 * glow * A})`; circ(c, x, y, 9); }
+    c.fillStyle = `rgba(207,214,228,${.9 * A})`; rrect(c, x - 5, y - 5, 10, 10, 2.5); c.fill();
+  }
+  // enerji: fırtına ile ordu karşılaşınca her şey bir anda çekilir
+  if (tt > 6.4 && tt < 7.25) {
+    c.strokeStyle = '#ff4fd8'; c.lineWidth = 2.2; c.shadowColor = '#ff4fd8'; c.shadowBlur = 14; c.globalAlpha = A * (1 - ph(tt, 7.05, 7.25));
+    const seed = Math.floor(tt * 24);
+    for (let i = 0; i < SOL.length; i += 2) {
+      const sd = SOL[i], th = Math.atan2((sd.y - SC.y) / .6, sd.x - SC.x);
+      bolt(mx(s, sd.x), sd.y, mx(s, SC.x + RING * Math.cos(th)), SC.y + RING * Math.sin(th) * .6, seed * 97 + i + s * 1000);
+    }
+    c.shadowBlur = 0; c.globalAlpha = 1;
+  }
+  if (f4 > 0 && f4 < 1) {
+    for (const sd of SOL) {
+      const th = Math.atan2((sd.y - SC.y) / .6, sd.x - SC.x);
+      const x = lerp(sd.x, SC.x + RING * Math.cos(th), f4), y = lerp(sd.y, SC.y + RING * Math.sin(th) * .6, f4);
+      c.fillStyle = `rgba(255,211,107,${A})`; circ(c, mx(s, x), y, 3.4);
+    }
+  }
+}
+
+let REV = false;
+function stormP(s, p, tt) {
+  const f3 = eout(ph(tt, 4.5, 6.3));
+  if (f3 <= 0 || tt >= 13.2) return null;
+  const th = p.a + p.w * tt * 1.3;
+  const rr = lerp(p.r * 2.3, p.r, f3);
+  let x = SC.x + rr * Math.cos(th), y = SC.y + rr * Math.sin(th) * .6;
+  if (p.out) {
+    const u = eio(ph(tt, 7.5, 9.2));
+    if (u > 0) {
+      const tx = lerp(552, 598, p.k), ty = 440 + p.j * 40, qx = (x + tx) / 2, qy = Math.min(y, ty) - 130;
+      x = (1 - u) * (1 - u) * x + 2 * (1 - u) * u * qx + u * u * tx;
+      y = (1 - u) * (1 - u) * y + 2 * (1 - u) * u * qy + u * u * ty;
+    }
+  }
+  let gx = mx(s, x), gy = y, st = 0;
+  const f6 = eio(ph(tt, 9.5, 11.3)), vac = ein(ph(tt, 11.5, 12.1));
+  if (f6 > 0) {
+    const phi = p.a + (s ? Math.PI : 0) + 3.4 * tt;
+    const Rh = (30 + (p.r - 110) * .75) * (1 - vac * .95);
+    gx = lerp(gx, EYE.x + Rh * Math.cos(phi), f6);
+    gy = lerp(gy, EYE.y + Rh * Math.sin(phi) * .5, f6);
+  }
+  if (tt >= 12.1) {
+    const tf = tt - 12.1;
+    gx = EYE.x + (p.j - .5) * (24 + 230 * tf) + Math.sin(p.a * 7 + tt * 9) * 4;
+    if (!REV) { gy = EYE.y + .5 * G * tf * tf - p.k * 110 * tf; st = G * tf; }
+    else { const e = 13.2 - tt; gy = IO_Y - .5 * G * e * e + p.k * 110 * e; st = -G * e; }
+    if (gy >= IO_Y) return null;
+  }
+  return {x: gx, y: gy, a: f3, st};
+}
+
+function storms(tt, A) {
+  c.globalCompositeOperation = 'lighter';
+  const f6 = eio(ph(tt, 9.5, 11.3));
+  for (let s = 0; s < 2; s++) {
+    const col = s ? [155, 92, 255] : [182, 255, 59];
+    for (const p of ST[s]) {
+      const q = stormP(s, p, tt);
+      if (!q) continue;
+      const al = q.a * A * (.55 + .45 * f6);
+      if (q.st !== 0) {
+        const L = Math.min(120, 6 + Math.abs(q.st) * .2) * Math.sign(q.st);
+        c.strokeStyle = `rgba(${col[0]},${col[1]},${col[2]},${al * .45})`; c.lineWidth = p.z * .7;
+        c.beginPath(); c.moveTo(q.x, q.y - L); c.lineTo(q.x, q.y); c.stroke();
+      } else {
+        c.fillStyle = `rgba(${col[0]},${col[1]},${col[2]},${al})`; circ(c, q.x, q.y, p.z);
+      }
+    }
+  }
+  c.globalCompositeOperation = 'source-over';
+}
+
+function triangle(tt, A) {
+  const a = ph(tt, 7.0, 7.6) * A * (1 - ph(tt, 14.6, 15.4));
+  if (a <= 0) return;
+  c.globalAlpha = a;
+  c.fillStyle = 'rgba(139,15,15,.18)'; c.strokeStyle = '#a3171a'; c.lineWidth = 3;
+  c.beginPath(); c.moveTo(548, 432); c.lineTo(652, 432); c.lineTo(600, 532); c.closePath(); c.fill(); c.stroke();
+  const f6 = ph(tt, 9.5, 11.5), spd = 3 + 9 * f6;
+  if (f6 > 0 && tt < 12.3) {
+    c.globalAlpha = a * .45 * Math.min(1, f6 * 2) * (1 - ph(tt, 11.6, 12.3));
+    for (let k = 0; k < 3; k++) {
+      c.strokeStyle = k % 2 ? '#9b5cff' : '#b6ff3b'; c.lineWidth = 2;
+      c.beginPath();
+      for (let u = 0; u <= 1.001; u += .02) {
+        const an = tt * spd * .5 + k * 2.094 + u * 5.2, r = 18 + u * 110;
+        const x = EYE.x + r * Math.cos(an), y = EYE.y + r * Math.sin(an) * .5;
+        u === 0 ? c.moveTo(x, y) : c.lineTo(x, y);
+      }
+      c.stroke();
+    }
+    c.globalAlpha = a;
+  }
+  c.fillStyle = '#000'; c.beginPath(); c.arc(EYE.x, EYE.y, 17, 0, 6.283); c.fill();
+  c.strokeStyle = 'rgba(230,230,230,.75)'; c.lineWidth = 1.6; c.beginPath();
+  for (let u = 0; u <= 1.001; u += .03) { const an = -tt * spd + u * 12.5, r = 2 + u * 14; const x = EYE.x + r * Math.cos(an), y = EYE.y + r * Math.sin(an); u === 0 ? c.moveTo(x, y) : c.lineTo(x, y); }
+  c.stroke(); c.globalAlpha = 1;
+}
+
+function impact(tt) {
+  if (tt < 13.2 || tt > 14.9) return;
+  const I = Math.exp(-(tt - 13.2) * 2.6);
+  c.fillStyle = `rgba(255,236,190,${.28 * I})`; rrect(c, 250, IO_Y, 700, 70, 10); c.fill();
+  c.strokeStyle = `rgba(255,236,190,${.7 * I})`; c.lineWidth = 2;
+  for (let k = 0; k < 3; k++) { const r = Math.max(0, 14 + (tt - 13.2) * (220 + k * 90)); c.beginPath(); c.ellipse(600, IO_Y, r, r * .28, 0, 0, 6.283); c.stroke(); }
+}
+
+function tag(text, x, y, a, color) {
+  if (a <= 0) return;
+  c.globalAlpha = a; c.fillStyle = color || '#e8ecf3'; c.font = '600 13px system-ui,sans-serif'; c.textAlign = 'center';
+  c.fillText(text, x, y); c.textAlign = 'left'; c.globalAlpha = 1;
+}
+function win(tt, a, b) { return Math.min(ph(tt, a, a + .3), 1 - ph(tt, b - .3, b)); }
+
+function labels(tt) {
+  tag('kaos cep evrenleri', 505, 50, win(tt, 1.8, 4.2), '#ffd36b'); tag('kaos cep evrenleri', 695, 50, win(tt, 1.8, 4.2), '#ffd36b');
+  tag('fırtına hücresi', 250, 420, win(tt, 4.8, 9.6), '#b6ff3b'); tag('fırtına hücresi', 950, 420, win(tt, 4.8, 9.6), '#9b5cff');
+  tag('enerji', 395, 205, win(tt, 6.4, 7.5), '#ff4fd8'); tag('enerji', 805, 205, win(tt, 6.4, 7.5), '#ff4fd8');
+  tag('ters üçgen', 600, 552, win(tt, 7.3, 9.7), '#ff6b6b');
+  tag('kasırga', 600, 400, win(tt, 9.7, 11.7), '#ffffff');
+  tag(REV ? 'vakum — yukarı' : 'vakum', 690, 476, win(tt, 11.5, 12.3), '#ffffff');
+  tag(REV ? 'yükseliş' : 'dalış', 690, 560, win(tt, 12.1, 13.3), '#ffffff');
+}
+
+const banner = document.getElementById('banner');
+function ui(tt) {
+  let k = PH.findIndex(p => tt >= p[0] && tt < p[1]); if (k < 0) k = PH.length - 1;
+  if (k !== curPh) { liEls.forEach((li, i) => li.classList.toggle('on', i === k)); curPh = k; }
+  banner.textContent = (REV ? 'TERS YÖN — aynı fırtına tersten · ' : '') + (k + 1) + ' / ' + PH.length;
+}
+
+function draw(tt) {
+  c.clearRect(0, 0, W, H);
+  const A = Math.min(ph(tt, 0, .3), 1 - ph(tt, 15.3, 16));
+  drawRoom(); drawCores(tt); drawBase();
+  drops(tt);
+  storms(tt, A);
+  for (let s = 0; s < 2; s++) side(s, tt, A);
+  triangle(tt, A);
+  impact(tt);
+  labels(tt);
+  ui(tt);
+}
+
+let t = 0, playing = true, spd = 1, last = performance.now();
+const playB = document.getElementById('play'), revB = document.getElementById('rev');
+const scrub = document.getElementById('scrub'), speed = document.getElementById('speed');
+playB.onclick = () => { playing = !playing; playB.textContent = playing ? 'Durdur' : 'Oynat'; playB.setAttribute('aria-pressed', playing); };
+revB.onclick = () => { REV = !REV; revB.setAttribute('aria-pressed', REV); };
+scrub.oninput = () => { t = +scrub.value; if (playing) playB.click(); };
+speed.oninput = () => { spd = +speed.value; };
+window.seek = (x, rev) => { t = x; REV = !!rev; if (playing) playB.click(); draw(REV ? T - t : t); };
+
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  if (playing) { t = (t + dt * spd) % T; scrub.value = t.toFixed(2); }
+  draw(REV ? T - t : t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

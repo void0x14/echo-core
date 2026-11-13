@@ -199,7 +199,7 @@ pub fn mulMat(p: *const Params, a: Mat, x: [*]const f32, n: usize, y: [*]f32) vo
         },
         .q8_0 => {
             if (a.rep != null) {
-                const g = sgemm.GemmR8{ .pool = p.pool, .nb = a.k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith, .r16 = a.r16 };
+                const g = sgemm.GemmR8{ .pool = p.pool, .nb = a.k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith, .r16 = a.r16, .nt = true };
                 g.matmul(a.m, n);
                 return;
             }
@@ -306,8 +306,8 @@ pub fn ffnGateUp(p: *const Params, gate: Mat, up: Mat, down: Mat, n: usize, yg: 
     const nff = gate.m;
     const drs = dotRowSize(.q8_0, nff);
     const b: [*]const q.BlockQ80 = @ptrCast(@alignCast(p.wdata));
-    const gg = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = gate.rep.?, .b = b, .ldb = rs / 34, .c = yg, .ldc = nff, .ith = p.ith, .r16 = gate.r16 };
-    const gu = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = up.rep.?, .b = b, .ldb = rs / 34, .c = yu, .ldc = nff, .ith = p.ith, .r16 = up.r16 };
+    const gg = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = gate.rep.?, .b = b, .ldb = rs / 34, .c = yg, .ldc = nff, .ith = p.ith, .r16 = gate.r16, .nt = true };
+    const gu = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = up.rep.?, .b = b, .ldb = rs / 34, .c = yu, .ldc = nff, .ith = p.ith, .r16 = up.r16, .nt = true };
     while (p.pool.rangeNext(p.ith)) |u| {
         const c = u / SPLIT;
         const cols = partCols(n, u % SPLIT);
@@ -350,7 +350,7 @@ fn r8Run(p: *const Params, mats: []const Mat, n: usize, ys: []const [*]f32, ctx:
         for (mats, ys, 0..) |a, y, mi| {
             const nc = sgemm.GemmR8.chunks(a.m);
             if (c < nc) {
-                const g = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith, .r16 = a.r16 };
+                const g = sgemm.GemmR8{ .pool = p.pool, .nb = k / 32, .a = a.rep.?, .b = @ptrCast(@alignCast(wdata)), .ldb = row_size / 34, .c = y, .ldc = a.m, .ith = p.ith, .r16 = a.r16, .nt = true };
                 const j0 = if (@TypeOf(ctx) == Last0 and mi == 0) @max(cols[0], n - 1) else cols[0];
                 if (j0 < cols[1]) g.chunkCols(c, a.m, j0, cols[1]);
                 if (@TypeOf(ctx) != void and @TypeOf(ctx) != Last0) {

@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ryzen 5 3600 — Senin Çipin</title>
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#121823; --line:#223049; --ink:#e8eef7; --dim:#8aa0bd;
+    --sol:#4ecdc4; --sag:#ff9ff3; --l3sol:#17514d; --l3sag:#6b2d63;
+    --fab:#feca57; --ram:#5f6b7a; --hot:#ff6b6b; --ok:#1dd1a1;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
+  a{color:var(--sol)}
+  header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:baseline;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0;letter-spacing:.3px}
+  header .sub{color:var(--dim);font-size:13px}
+  .wrap{display:grid;grid-template-columns:1fr 360px;gap:0;min-height:calc(100vh - 54px)}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr}}
+  .stage{position:relative;padding:12px}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+  button,.chip{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:7px 11px;cursor:pointer;font-size:13px}
+  button:hover,.chip:hover{border-color:var(--sol)}
+  button.on{border-color:var(--ok);color:var(--ok)}
+  button.off{border-color:var(--hot);color:var(--hot)}
+  .side{border-left:1px solid var(--line);background:#0c1119;min-width:0}
+  @media(max-width:900px){.side{border-left:none;border-top:1px solid var(--line)}}
+  .tabs{display:flex;border-bottom:1px solid var(--line)}
+  .tabs .t{flex:1;text-align:center;padding:10px;cursor:pointer;color:var(--dim);font-size:13px}
+  .tabs .t.act{color:var(--ink);box-shadow:inset 0 -2px 0 var(--sol)}
+  .tabpane{padding:14px;display:none}
+  .tabpane.act{display:block}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600}
+  td.n{text-align:right;font-variant-numeric:tabular-nums}
+  .kv{color:var(--dim)}
+  .bad{color:var(--hot)} .good{color:var(--ok)} .warn{color:var(--fab)}
+  svg{width:100%;height:auto;display:block;background:radial-gradient(1200px 600px at 50% 30%,#0e1420,#0a0e14)}
+  .lab{font:600 13px system-ui;fill:var(--ink)}
+  .lab.s{font:11px system-ui;fill:var(--dim)}
+  .coreBox{cursor:pointer}
+  .coreBox:hover rect.core{stroke:var(--ink)}
+  textarea{width:100%;min-height:160px;background:#0a0e14;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px;font:14px/1.5 ui-monospace,Menlo,monospace;resize:vertical}
+  .note{color:var(--dim);font-size:12px;margin-top:6px}
+  .pill{display:inline-block;padding:2px 8px;border:1px solid var(--line);border-radius:999px;font-size:12px;margin:2px}
+  .pill.on{border-color:var(--ok);color:var(--ok)}
+  details{border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;background:var(--panel)}
+  summary{cursor:pointer;font-weight:600}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:8px}
+  .sw{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Ryzen 5 3600 — Senin Çipin</h1>
+  <span class="sub">6 çekirdek · 12 iş parçacığı · 2 yarı (CCX) · tek yonga (CCD) + IO die · ölçümler: 11–14 Kas 2026, bu makine</span>
+</header>
+
+<div class="wrap">
+  <!-- SAHNE -->
+  <div class="stage">
+    <div class="controls">
+      <button id="play" class="on">⏸ Duraklat</button>
+      <button id="dir">⇄ Yön: sol→sağ</button>
+      <button id="pfL1" class="on">L1 ön-getirici: AÇIK</button>
+      <button id="pfL2" class="on">L2 ön-getirici: AÇIK</button>
+      <button id="bridge" class="on">İki yarı arası akış: AÇIK</button>
+      <label class="chip">Hız <input id="speed" type="range" min="0.2" max="3" step="0.1" value="1" style="vertical-align:-3px"></label>
+      <button id="reset">↺ Sıfırla</button>
+    </div>
+
+    <svg id="cpu" viewBox="0 0 980 620" role="img" aria-label="Ryzen 5 3600 şeması">
+      <defs>
+        <linearGradient id="gSol" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#1b3b39"/><stop offset="1" stop-color="#0f2423"/>
+        </linearGradient>
+        <linearGradient id="gSag" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#3b1b37" stop-opacity="1"/><stop offset="1" stop-color="#241020"/>
+        </linearGradient>
+        <filter id="glow"><feGaussianBlur stdDeviation="2.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+
+      <!-- CCD cercevesi -->
+      <rect x="40" y="30" width="900" height="360" rx="14" fill="none" stroke="#2b3b58" stroke-dasharray="4 4"/>
+      <text class="lab s" x="52" y="50">CCD (yonga) — 6 çekirdek, iki yarı</text>
+
+      <!-- SOL YARI CCX0 -->
+      <rect x="60" y="64" width="400" height="300" rx="12" fill="url(#gSol)" stroke="#2e6b65"/>
+      <text class="lab" x="78" y="88" fill="#4ecdc4">SOL YARI — CCX0</text>
+      <text class="lab s" x="78" y="104">çekirdek 0,1,2 (+SMT 6,7,8)</text>
+
+      <!-- SAG YARI CCX1 -->
+      <rect x="520" y="64" width="400" height="300" rx="12" fill="url(#gSag)" stroke="#8a3f80"/>
+      <text class="lab" x="538" y="88" fill="#ff9ff3">SAĞ YARI — CCX1</text>
+      <text class="lab s" x="538" y="104">çekirdek 3,4,5 (+SMT 9,10,11)</text>
+
+      <!-- cekirdekler + L3 bloklari JS ile basilacak -->
+      <g id="coresSol"></g>
+      <g id="coresSag"></g>
+
+      <!-- L3 SOL -->
+      <rect x="78" y="300" width="364" height="48" rx="8" fill="#123f3b" stroke="#2e6b65"/>
+      <text class="lab" x="90" y="329" fill="#7fe9e0">L3 — 16 MB (sol 3 çekirdek ortak)</text>
+      <!-- L3 SAG -->
+      <rect x="538" y="300" width="364" height="48" rx="8" fill="#301029" stroke="#8a3f80"/>
+      <text class="lab" x="550" y="329" fill="#ffc6f6">L3 — 16 MB (sağ 3 çekirdek ortak)</text>
+
+      <!-- IO DIE -->
+      <rect x="300" y="470" width="380" height="90" rx="12" fill="#141a26" stroke="#394a66"/>
+      <text class="lab" x="320" y="498" fill="#cfe0f7">IO die (cIOD)</text>
+      <text class="lab s" x="320" y="516">bellek denetleyici · Infinity Fabric kavşağı</text>
+      <text class="lab s" x="320" y="534">2× DDR4 kanalı</text>
+
+      <!-- RAM -->
+      <rect x="60" y="486" width="190" height="58" rx="10" fill="#1a2130" stroke="#3a4558"/>
+      <text class="lab" x="78" y="512" fill="#9fb2cc">RAM (dışarısı)</text>
+      <text class="lab s" x="78" y="530">en yavaş: ~15 GB/s</text>
+
+      <!-- Infinity Fabric yollari -->
+      <path id="pSolIod" d="M260,364 L260,440 L420,440 L420,470" fill="none" stroke="var(--fab)" stroke-width="2" opacity="0.5"/>
+      <path id="pSagIod" d="M720,364 L720,440 L560,440 L560,470" fill="none" stroke="var(--fab)" stroke-width="2" opacity="0.5"/>
+      <path id="pIodRam" d="M300,515 L155,515 L155,486" fill="none" stroke="var(--ram)" stroke-width="2" opacity="0.6"/>
+      <text class="lab s" x="430" y="458" fill="var(--fab)">Infinity Fabric (iki yarının ortası — köprü)</text>
+
+      <!-- partikul katmani -->
+      <g id="dots"></g>
+    </svg>
+
+    <div class="legend">
+      <span><span class="sw" style="background:var(--sol)"></span>sol yarı</span>
+      <span><span class="sw" style="background:var(--sag)"></span>sağ yarı</span>
+      <span><span class="sw" style="background:var(--fab)"></span>Infinity Fabric köprüsü</span>
+      <span><span class="sw" style="background:var(--ram)"></span>RAM yolu</span>
+      <span>Bir çekirdeğe tıkla → sağda ayrıntı</span>
+    </div>
+  </div>
+
+  <!-- YAN PANEL -->
+  <div class="side">
+    <div class="tabs">
+      <div class="t act" data-p="olcu">Ölçülenler</div>
+      <div class="t" data-p="kiril">Kırılan varsayımlar</div>
+      <div class="t" data-p="dugme">Düğmeler</div>
+      <div class="t" data-p="tarif">Tarifim</div>
+    </div>
+
+    <div class="tabpane act" id="p-olcu">
+      <div id="coreInfo" class="note">Bir çekirdeğe tıkla: önbellekleri ve komşuya uzaklığı burada.</div>
+      <h3 style="margin:14px 0 6px">Veri derinleştikçe hızı (tek çekirdek, ölçüldü)</h3>
+      <table>
+        <tr><th>Nerede</th><th class="n">Hız</th></tr>
+        <tr><td>16 KB (en iç)</td><td class="n good">109 GB/s</td></tr>
+        <tr><td>128 KB</td><td class="n">60 GB/s</td></tr>
+        <tr><td>1 MB</td><td class="n">46 GB/s</td></tr>
+        <tr><td>8 MB</td><td class="n">16 GB/s</td></tr>
+        <tr><td>256 MB (RAM)</td><td class="n bad">15 GB/s</td></tr>
+      </table>
+      <h3 style="margin:14px 0 6px">Çekirdekler arası uzaklık (1 satır gidiş-dönüş, çevrim)</h3>
+      <table>
+        <tr><th>Yol</th><th class="n">Çevrim</th></tr>
+        <tr><td>SMT kardeş (0↔6)</td><td class="n good">216</td></tr>
+        <tr><td>Aynı yarı (0↔1)</td><td class="n">~504</td></tr>
+        <tr><td>Karşı yarı (0↔3)</td><td class="n warn">~1300</td></tr>
+      </table>
+      <h3 style="margin:14px 0 6px">İki yarı arası (perf c2c, canlı)</h3>
+      <table>
+        <tr><td>Aynı anda birçok çekirdekte duran veri</td><td class="n">24 satır</td></tr>
+        <tr><td>Yarıdan yarıya <b>doğrudan</b> aktarım</td><td class="n good">%53,3</td></tr>
+        <tr><td>Yakın bellekten</td><td class="n">%46,7</td></tr>
+        <tr><td>Köprü akışı (20 sn)</td><td class="n good">hiç 0 olmadı</td></tr>
+      </table>
+      <h3 style="margin:14px 0 6px">Saat</h3>
+      <table>
+        <tr><td>Taban</td><td class="n">3,6 GHz</td></tr>
+        <tr><td>Yük altında (0,5 sn'de)</td><td class="n">4,1 GHz</td></tr>
+      </table>
+      <details><summary>Ortam & kurallar</summary>
+        <div class="note">Ölçümler bu makinede, root açıkken (kafesten laya köprüsüyle). Araçlar: doğrudan rdmsr/wrmsr, amd_df/amd_l3/IBS, perf c2c, perf bench. echo-core koduna dokunulmadı; iş <code>.yerel/</code> altında.</div>
+      </details>
+    </div>
+
+    <div class="tabpane" id="p-kiril">
+      <p class="note">Bu çipte ölçerek çürüyen eski AI varsayımları:</p>
+      <details open><summary class="bad">"İki yarı arasında veri duramaz / geçemez, RAM'e iner"</summary>
+        <div class="note">ÇÜRÜDÜ. perf c2c: yarıdan yarıya doğrudan önbellek aktarımı %53,3; köprü sayacı (doğrudan rdmsr) sürekli dolu, 20 sn boyunca hiç sıfır olmadı.</div></details>
+      <details><summary class="bad">"30 MB'ı L3'e park et, orada yaşasın"</summary>
+        <div class="note">Reddedildi + ölçüldü: veri park etmeden akarken bile en içte 7× hızlı (109 vs 15 GB/s). Park gereksiz; akış sürüyor.</div></details>
+      <details><summary class="bad">"Kafesin içinden root alınamaz"</summary>
+        <div class="note">ÇÜRÜDÜ. laya onaylı root köprüsü kuruldu (<code>laledevri/kok/laya-yetki</code> + <code>laya-sudo</code>); kafesten rdmsr/wrmsr/modprobe çalışıyor.</div></details>
+      <details><summary class="warn">"Dolandıkça sonsuza hızlanır (TB/s, takyon)"</summary>
+        <div class="note">Bu çipte <b>ölçtüğümde</b> hız bir anda tavana çıkıp düz kaldı (46 GB/s, 4,1 GHz). HEDEF olarak TB/s+ hâlâ açık — register/L1 seviyesinde toplam bant teorik olarak TB/s'ye yakın; bunu kullanıcı tezi olarak işaretliyorum, kapanmadı.</div></details>
+    </div>
+
+    <div class="tabpane" id="p-dugme">
+      <p class="note">Çipin iç akış anahtarları (doğrudan MSR, bu makinede okundu). Burada görsel aç/kapa; gerçek donanımda karşılığı:</p>
+      <table>
+        <tr><th>Düğme</th><th>MSR</th><th>Ölçülen</th></tr>
+        <tr><td>L1 ön-getirici</td><td class="kv">0xC0011022 bit13</td><td>kapatınca L1 dolum 17,5M/s→<b class="bad">0</b>, geri açınca döndü</td></tr>
+        <tr><td>L2 ön-getirici</td><td class="kv">0xC001102B</td><td>ayrı kayıt; L1 kapansa da L2 akmaya devam etti</td></tr>
+        <tr><td>Load-Store</td><td class="kv">0xC0011020</td><td>okundu: 0006404000000000</td></tr>
+        <tr><td>Decode</td><td class="kv">0xC0011029</td><td>okundu: 0003000310e08002</td></tr>
+        <tr><td>İki yarı köprüsü sayacı</td><td class="kv">0xC0010241</td><td class="good">canlı sayıyor (doğrudan rdmsr)</td></tr>
+      </table>
+      <p class="note">Soldaki düğmeler animasyonu bu anahtarlara göre değiştirir (L1/L2 ön-getirici, köprü akışı).</p>
+    </div>
+
+    <div class="tabpane" id="p-tarif">
+      <p class="note">Tarifinin öğeleri — aç/kapa (tarayıcıda saklanır, 2 hafta sonra da burada olur):</p>
+      <div id="recipeChips"></div>
+      <h3 style="margin:14px 0 6px">Notların</h3>
+      <textarea id="notes" placeholder="Tarifini, bir sonraki adımı, aklına geleni buraya yaz. Otomatik kaydedilir."></textarea>
+      <div class="note">Bu makinede, bu tarayıcıda saklanır. Dosyayı başka yere taşırsan notlar gelmez.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+(()=>{
+  const SVGNS="http://www.w3.org/2000/svg";
+  const el=id=>document.getElementById(id);
+  // ---- cekirdek kutulari ----
+  const coresSol=[0,1,2], coresSag=[3,4,5];
+  const coreMeta={
+    0:{x:78,cx:0},1:{x:200,cx:0},2:{x:322,cx:0},
+    3:{x:538,cx:1},4:{x:660,cx:1},5:{x:782,cx:1}
+  };
+  function coreBox(n,x,yarim){
+    const g=document.createElementNS(SVGNS,"g"); g.setAttribute("class","coreBox"); g.dataset.core=n;
+    const col=yarim==0?"#2e6b65":"#8a3f80", ink=yarim==0?"#9ff0e8":"#ffc6f6";
+    g.innerHTML=`
+      <rect class="core" x="${x}" y="130" width="104" height="150" rx="9" fill="#0d1a1f" stroke="${col}"/>
+      <text class="lab" x="${x+12}" y="152" fill="${ink}">Çekirdek ${n}</text>
+      <rect x="${x+10}" y="162" width="84" height="22" rx="5" fill="#0a2420" stroke="${col}"/>
+      <text class="lab s" x="${x+16}" y="177">L1D 32K · L1I 32K</text>
+      <rect x="${x+10}" y="190" width="84" height="22" rx="5" fill="#0a2420" stroke="${col}"/>
+      <text class="lab s" x="${x+16}" y="205">L2 512 KB</text>
+      <rect x="${x+10}" y="220" width="84" height="50" rx="5" fill="#081518" stroke="${col}"/>
+      <text class="lab s" x="${x+16}" y="240">SMT: ${n} & ${n+6}</text>
+      <text class="lab s" x="${x+16}" y="258">4,1 GHz</text>`;
+    return g;
+  }
+  coresSol.forEach(n=>el("coresSol").appendChild(coreBox(n,coreMeta[n].x,0)));
+  coresSag.forEach(n=>el("coresSag").appendChild(coreBox(n,coreMeta[n].x,1)));
+
+  const coreInfo={
+    0:"Çekirdek 0 — sol yarı. L1D/L1I 32K, L2 512K, L3'ü (16MB) 1 ve 2 ile paylaşır. SMT ikizi: 6 (uzaklık 216 çevrim). Komşusu 1'e ~504, karşı yarıya (3) ~1300.",
+    1:"Çekirdek 1 — sol yarı. L3'ü 0,2 ile paylaşır. SMT ikizi 7.",
+    2:"Çekirdek 2 — sol yarı. L3'ü 0,1 ile paylaşır. SMT ikizi 8.",
+    3:"Çekirdek 3 — sağ yarı. L3'ü (ayrı 16MB) 4,5 ile paylaşır. SMT ikizi 9. Sol yarıya ~1300 çevrim (köprüden).",
+    4:"Çekirdek 4 — sağ yarı. SMT ikizi 10.",
+    5:"Çekirdek 5 — sağ yarı. SMT ikizi 11."
+  };
+  el("cpu").addEventListener("click",e=>{
+    const g=e.target.closest(".coreBox"); if(!g)return;
+    el("coreInfo").innerHTML="<b>"+("Çekirdek "+g.dataset.core)+"</b><br>"+coreInfo[g.dataset.core];
+    document.querySelector('.t[data-p="olcu"]').click();
+  });
+
+  // ---- partikuller ----
+  const paths={
+    solCore:[[128,130],[128,300]], // sol cekirdek <-> L3 (temsili)
+    sagCore:[[590,130],[590,300]],
+    solIod:[[260,364],[260,440],[420,440],[420,470]],
+    sagIod:[[720,364],[720,440],[560,440],[560,470]],
+    iodRam:[[300,515],[155,515],[155,486]],
+    bridge:[[260,348],[260,420],[720,420],[720,348]] // sol L3 -> sag L3 (iki yari arasi)
+  };
+  function lerpPath(pts,t){
+    // toplam uzunluk uzerinden t(0..1)
+    let segs=[],tot=0;
+    for(let i=0;i<pts.length-1;i++){const dx=pts[i+1][0]-pts[i][0],dy=pts[i+1][1]-pts[i][1];const L=Math.hypot(dx,dy);segs.push([pts[i],pts[i+1],L]);tot+=L;}
+    let d=t*tot;
+    for(const [a,b,L] of segs){ if(d<=L){const k=L?d/L:0;return [a[0]+(b[0]-a[0])*k,a[1]+(b[1]-a[1])*k];} d-=L;}
+    const last=pts[pts.length-1];return [last[0],last[1]];
+  }
+  const dotsG=el("dots");
+  const state={play:true,dir:1,pfL1:true,pfL2:true,bridge:true,speed:1};
+  // partikul havuzu
+  const parts=[];
+  function spawn(kind,color,r){
+    const c=document.createElementNS(SVGNS,"circle");
+    c.setAttribute("r",r||3.2);c.setAttribute("fill",color);c.setAttribute("filter","url(#glow)");
+    dotsG.appendChild(c);
+    return {el:c,kind,t:Math.random(),v:0.15+Math.random()*0.15,color};
+  }
+  function build(){
+    dotsG.innerHTML="";parts.length=0;
+    // sol yari ic akis
+    for(let i=0;i<10;i++)parts.push(spawn("solCore","#4ecdc4"));
+    for(let i=0;i<10;i++)parts.push(spawn("sagCore","#ff9ff3"));
+    // iki yari arasi (kopru)
+    for(let i=0;i<8;i++)parts.push(spawn("bridge","#feca57"));
+    // iod/ram
+    for(let i=0;i<5;i++)parts.push(spawn("solIod","#feca57",2.6));
+    for(let i=0;i<5;i++)parts.push(spawn("sagIod","#feca57",2.6));
+    for(let i=0;i<4;i++)parts.push(spawn("iodRam","#6b7a8c",2.6));
+  }
+  build();
+
+  let last=performance.now();
+  function frame(now){
+    const dt=Math.min(50,now-last);last=now;
+    if(state.play){
+      for(const p of parts){
+        let speed=p.v*state.speed*(dt/16);
+        // on-getirici hizi artirir (ic akis)
+        if((p.kind==="solCore"||p.kind==="sagCore")){
+          if(state.pfL1) speed*=1.8; if(state.pfL2) speed*=1.3;
+        }
+        if(p.kind==="bridge" && !state.bridge){ p.el.setAttribute("opacity","0.06"); continue; }
+        p.el.setAttribute("opacity","1");
+        p.t+= state.dir*speed*0.02;
+        if(p.t>1)p.t-=1; if(p.t<0)p.t+=1;
+        const pt=lerpPath(paths[p.kind],p.t);
+        p.el.setAttribute("cx",pt[0]);p.el.setAttribute("cy",pt[1]);
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---- kontroller ----
+  el("play").onclick=function(){state.play=!state.play;this.textContent=state.play?"⏸ Duraklat":"▶ Oynat";this.classList.toggle("on",state.play);};
+  el("dir").onclick=function(){state.dir*=-1;this.textContent=state.dir>0?"⇄ Yön: sol→sağ":"⇄ Yön: sağ→sol";};
+  function tgl(id,key,onTxt,offTxt){el(id).onclick=function(){state[key]=!state[key];this.textContent=(state[key]?onTxt:offTxt);this.classList.toggle("on",state[key]);this.classList.toggle("off",!state[key]);};}
+  tgl("pfL1","pfL1","L1 ön-getirici: AÇIK","L1 ön-getirici: KAPALI");
+  tgl("pfL2","pfL2","L2 ön-getirici: AÇIK","L2 ön-getirici: KAPALI");
+  tgl("bridge","bridge","İki yarı arası akış: AÇIK","İki yarı arası akış: KAPALI");
+  el("speed").oninput=function(){state.speed=+this.value;};
+  el("reset").onclick=function(){state={play:true,dir:1,pfL1:true,pfL2:true,bridge:true,speed:1};
+    el("speed").value=1;el("play").textContent="⏸ Duraklat";el("play").className="on";
+    ["pfL1","pfL2","bridge"].forEach(k=>{const b=el(k);b.className="on";});
+    el("pfL1").textContent="L1 ön-getirici: AÇIK";el("pfL2").textContent="L2 ön-getirici: AÇIK";el("bridge").textContent="İki yarı arası akış: AÇIK";
+    el("dir").textContent="⇄ Yön: sol→sağ";build();};
+
+  // ---- tablar ----
+  document.querySelectorAll(".t").forEach(t=>t.onclick=()=>{
+    document.querySelectorAll(".t").forEach(x=>x.classList.remove("act"));
+    document.querySelectorAll(".tabpane").forEach(x=>x.classList.remove("act"));
+    t.classList.add("act");el("p-"+t.dataset.p).classList.add("act");
+  });
+
+  // ---- tarif chip + notlar (localStorage) ----
+  const KEY="r5-3600-tarif-v1";
+  const chips=["veri hiç durmaz","veri her yerde aynı anda","park yok","iki yarı doğrudan geçer","dolaştıkça hızlanır","TB/s hedefi","determinizm yok","sezgi"];
+  const store=JSON.parse(localStorage.getItem(KEY)||"{}");
+  const rc=el("recipeChips");
+  chips.forEach(c=>{
+    const s=document.createElement("span");s.className="pill"+(store.chips&&store.chips[c]?" on":"");s.textContent=c;
+    s.onclick=()=>{store.chips=store.chips||{};store.chips[c]=!store.chips[c];s.classList.toggle("on");save();};
+    rc.appendChild(s);
+  });
+  const ta=el("notes");ta.value=store.notes||"";
+  ta.oninput=()=>{store.notes=ta.value;save();};
+  function save(){try{localStorage.setItem(KEY,JSON.stringify(store));}catch(e){}}
+})();
+</script>
+</body>
+</html>

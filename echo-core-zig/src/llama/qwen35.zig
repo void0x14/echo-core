@@ -10,6 +10,9 @@ const ops = @import("ops.zig");
 const repack = @import("repack.zig");
 const sgemm = @import("sgemm.zig");
 const ivf = @import("ivf.zig");
+const oda_mod = @import("oda.zig");
+const olc = @import("olc.zig");
+const canli = @import("canli.zig");
 const pool_mod = @import("pool.zig");
 const Pool = pool_mod.Pool;
 const Params = pool_mod.Params;
@@ -70,6 +73,10 @@ pub const Model = struct {
     dt_rank: usize,
     /// N2: atlanan katmanlar bit maskesi (ECHO_SKIP="a,b,..."), sayısal sonucu değiştirir
     skip: u64 = 0,
+    /// ECHO_ODA_CIKIS=1: çıkış yalnız TR/EN/kod satırlarının bloğunda (oda.zig)
+    oda: ?*oda_mod.Oda = null,
+    /// ECHO_ODA_SATIR=dosya: kullanıma göre seçilmiş satır bloğu; blok içi en iyi token ≥ 0,5 olasılıkla öndeyse IVF atlanır
+    blok: ?*oda_mod.Oda = null,
 
     fn metaU(reader: *const gguf.Reader, comptime key: []const u8) !usize {
         const v = reader.metadata.get("qwen35." ++ key) orelse return error.MissingMetadata;
@@ -119,6 +126,7 @@ pub const Model = struct {
 
         const tok_embd = try ctx.mat("token_embd.weight");
         const output = ctx.mat("output.weight") catch tok_embd;
+        olc.kaydet(.model_embd, tok_embd.data, tok_embd.m * tok_embd.nb1);
 
         self.* = .{
             .allocator = allocator,
@@ -197,6 +205,11 @@ pub const Model = struct {
                 self.skip |= @as(u64, 1) << il;
             }
         }
+        if (std.c.getenv("ECHO_ODA_CIKIS")) |x| if (x[0] == '1') {
+            self.oda = try oda_mod.Oda.kur(&reader, output, allocator);
+        };
+        if (std.c.getenv("ECHO_NT")) |x| sgemm.nt_yol = x[0] -% '0';
+        if (std.c.getenv("ECHO_ODA_SATIR")) |x| self.blok = try oda_mod.Oda.kurListe(output, x, allocator);
         return self;
     }
 
@@ -313,6 +326,8 @@ pub const Model = struct {
             act_stats = null;
         }
         allocator.free(self.layers);
+        if (self.oda) |o| o.deinit(allocator);
+        if (self.blok) |o| o.deinit(allocator);
         for (self.repacked.items) |b| allocator.free(b);
         self.repacked.deinit(allocator);
         for (self.repacked8.items) |b| allocator.free(b);
@@ -398,6 +413,12 @@ pub const Context = struct {
     gdn_alt: bool = false,
 
     logits: []f32,
+    /// ECHO_ODA_CIKIS: blok satırlarının logitleri (logits'e gerçek kimlikle dağıtılır, diğerleri -inf)
+    oda_l: []f32 = &.{},
+    /// ECHO_ODA_SATIR: blok logitleri (konum başına ids.len), konum başına emin token (maxInt = değil)
+    blok_l: []f32 = &.{},
+    blok_tok: [ivf.Batch.MAXR]u32 = @splat(std.math.maxInt(u32)),
+    blok_hepsi: bool = false,
     /// null: tam LM head (varsayılan)
     lm: ?*ivf.Search = null,
 
@@ -534,6 +555,11 @@ pub const Context = struct {
             .b_kk = try buf(allocator, n_ub * kv_row),
             .b_vv = try buf(allocator, n_ub * kv_row),
         };
+        if (m.oda) |o| {
+            @memset(self.logits, -std.math.inf(f32));
+            self.oda_l = try allocator.alloc(f32, o.ids.len);
+        }
+        if (m.blok) |o| self.blok_l = try allocator.alloc(f32, o.ids.len * ivf.Batch.MAXR);
         self.clear();
         return self;
     }
@@ -554,6 +580,8 @@ pub const Context = struct {
         self.freeTrace();
         self.espFree();
         a.free(self.logits);
+        if (self.oda_l.len > 0) a.free(self.oda_l);
+        if (self.blok_l.len > 0) a.free(self.blok_l);
         a.free(self.wdata);
         a.free(self.wdata2);
         a.free(self.fdata);
@@ -796,6 +824,11 @@ pub const Context = struct {
     /// llama_decode: yalnız son token için logit üretir (llama_batch_get_one).
     pub fn decode(self: *Context, tokens: []const u32) !void {
         if (self.head + tokens.len > self.n_ctx) return error.ContextFull;
+        // ECHO_ODA_CIKIS + IVF (D düzeni): arama yalnız blok satırlarında; Search/Batch yerinde yönlendirilir
+        if (self.model.oda) |o| {
+            if (self.lm) |s| s.ix = try o.ivfAlt(s.ix, self.allocator);
+            if (self.lmb) |b| b.ix = try o.ivfAlt(b.ix, self.allocator);
+        }
         for (tokens) |t| if (t >= self.model.n_vocab) return error.InvalidToken;
         var off: usize = 0;
         while (off < tokens.len) {
@@ -826,6 +859,7 @@ pub const Context = struct {
 
     fn embedRow(m: *const Model, token: u32, y: [*]f32) void {
         const row = m.tok_embd.data + @as(usize, token) * m.tok_embd.nb1;
+        olc.giris(row, m.tok_embd.nb1);
         const k = m.n_embd;
         switch (m.tok_embd.type) {
             .f32 => @memcpy(y[0..k], @as([*]const f32, @ptrCast(@alignCast(row)))[0..k]),
@@ -862,10 +896,59 @@ pub const Context = struct {
         p.barrier();
     }
 
+    /// ECHO_ODA_SATIR: b_norm'daki n konumun blok logitleri. Konum emin ise blok_tok'a gerçek kimlik, değilse maxInt.
+    /// Hepsi eminse true: çağıran IVF'yi (RAM yolu) atlar.
+    fn blokDene(self: *Context, p: *const Params, n: usize) bool {
+        const o = self.model.blok orelse return false;
+        if (self.lm == null) return false; // shortcut: yalnız IVF düzeni (motorun varsayılanı); tam LM head yolu bloğu kullanmaz
+        olc.pmuBit(1);
+        ops.mulMat(p, o.mat, self.b_norm.ptr, n, self.blok_l.ptr);
+        p.barrier();
+        olc.pmuBit(4);
+        if (p.ith == 0) {
+            var hepsi = true;
+            for (0..n) |t| {
+                const e = o.eminMi(self.blok_l[t * o.ids.len ..][0..o.ids.len]);
+                self.blok_tok[t] = e orelse std.math.maxInt(u32);
+                hepsi = hepsi and e != null;
+                olc.say(.blok_ok, @intFromBool(e != null));
+            }
+            olc.say(.blok_n, n);
+            olc.say(.blok_cagri, 1);
+            olc.say(.blok_atla, @intFromBool(hepsi));
+            self.blok_hepsi = hepsi;
+            if (canli.ac) {
+                canli.blok_satir = @intCast(std.mem.indexOfMax(f32, self.blok_l[(n - 1) * o.ids.len ..][0..o.ids.len]));
+                canli.blok_emin = self.blok_tok[n - 1] != std.math.maxInt(u32);
+            }
+        }
+        p.barrier();
+        return self.blok_hepsi;
+    }
+
+    /// Tam LM head. ECHO_ODA_CIKIS: yalnız blok satırları; sonuç gerçek token kimliğine dağıtılır.
+    fn lmHead(self: *Context, p: *const Params) void {
+        const m = self.model;
+        const o = m.oda orelse {
+            if (p.ith == 0) olc.cikis(m.output.data, m.output.m * m.output.nb1);
+            ops.mulMat(p, m.output, self.b_norm.ptr, 1, self.logits.ptr);
+            p.barrier();
+            return;
+        };
+        if (p.ith == 0) olc.cikis(o.mat.data, o.mat.m * o.mat.nb1);
+        ops.mulMat(p, o.mat, self.b_norm.ptr, 1, self.oda_l.ptr);
+        p.barrier();
+        const r = p.range(o.ids.len);
+        for (o.ids[r[0]..r[1]], self.oda_l[r[0]..r[1]]) |t, v| self.logits[t] = v;
+        p.barrier();
+    }
+
     fn graph(self: *Context, p: *const Params) void {
         const m = self.model;
         const n_t = self.n_t;
 
+        olc.basla(p.ith);
+        olc.pmuBas();
         // GET_ROWS(token_embd)
         const r = p.range(n_t);
         const n_real = n_t - self.n_mask;
@@ -878,6 +961,7 @@ pub const Context = struct {
         ops.addRmsNorm(p, m.n_embd, n_t, self.b_inp.ptr, null, self.b_inp.ptr, self.b_norm.ptr, m.eps, m.layers[0].attn_norm, q0);
         if (q0) inPre(p, &m.layers[0]);
         p.barrier();
+        olc.isaret(p.ith, .emb);
 
         for (m.layers, 0..) |*l, il| {
             if (m.skip >> @intCast(il) & 1 != 0) {
@@ -906,6 +990,7 @@ pub const Context = struct {
             ops.addRmsNorm(p, m.n_embd, nf, self.b_resid.ptr + o, self.b_attn.ptr + o, self.b_inp.ptr + o, self.b_norm.ptr, m.eps, l.post_norm, qf);
             if (fast) ops.ffnPre(p, l.ffn_gate) else if (qf) ops.r8Pre(p, &ffn_in);
             p.barrier();
+            olc.isaret(p.ith, if (l.recr) .gdn_mix else .attn_mix);
             // build_ffn(LLM_FFN_SILU, LLM_FFN_PAR)
             if (fast) {
                 // H62: gate+up parça başına, swiglu + down nicemleme parça sonunda
@@ -929,12 +1014,16 @@ pub const Context = struct {
                 if (qn) inPre(p, nl);
             } else ops.add(p, m.n_embd, nf, self.b_inp.ptr + o, self.b_attn.ptr, self.b_resid.ptr + o);
             p.barrier();
+            olc.isaret(p.ith, if (l.recr) .gdn_ffn else .attn_ffn);
+            if (canli.ac and olc.aktif and p.ith == 0) canli.ffn(il, self.b_ffn_g.ptr, self.b_ffn_u.ptr, nf, fast);
         }
+        olc.pmuBit(0);
 
         if (self.want_all and self.trace_k > 0 and self.lmb != null) {
             const b = self.lmb.?;
             ops.rmsNorm(p, self.b_inp.ptr, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, n_t, 1, m.eps, m.output_norm, 1.0);
             p.barrier();
+            if (!self.blokDene(p, n_t)) {
             const xq: [*]q.BlockQ80 = @ptrCast(@alignCast(p.wdata));
             const rb = m.n_embd / 32;
             const rr = p.range(n_t);
@@ -967,6 +1056,10 @@ pub const Context = struct {
                 @memcpy(self.verify_tokens[0..n_t], b.tokens[0..n_t]);
             }
             p.barrier();
+            }
+            if (p.ith == 0 and m.blok != null) for (self.verify_tokens[0..n_t], self.blok_tok[0..n_t]) |*v, t| {
+                if (t != std.math.maxInt(u32)) v.* = t;
+            };
         } else if (self.want_all and self.trace_k > 0) {
             var vt: usize = 0;
             while (vt < n_t) : (vt += 1) {
@@ -974,11 +1067,12 @@ pub const Context = struct {
                 ops.rmsNorm(p, row, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, 1, 1, m.eps, m.output_norm, 1.0);
                 p.barrier();
                 if (self.lm) |s| {
-                    lmSearch(p, s, self.b_norm.ptr, m.n_embd);
+                    if (!self.blokDene(p, 1)) lmSearch(p, s, self.b_norm.ptr, m.n_embd) else if (p.ith == 0) {
+                        s.token = self.blok_tok[0];
+                    }
                     if (p.ith == 0) self.verify_tokens[vt] = s.token;
                 } else {
-                    ops.mulMat(p, m.output, self.b_norm.ptr, 1, self.logits.ptr);
-                    p.barrier();
+                    self.lmHead(p);
                     if (p.ith == 0) self.verify_tokens[vt] = @intCast(std.mem.indexOfMax(f32, self.logits));
                 }
             }
@@ -987,14 +1081,18 @@ pub const Context = struct {
             ops.rmsNorm(p, last, m.n_embd, 0, self.b_norm.ptr, m.n_embd, 0, m.n_embd, 1, 1, m.eps, m.output_norm, 1.0);
             p.barrier();
             if (self.lm) |s| {
-                lmSearch(p, s, self.b_norm.ptr, m.n_embd);
+                if (!self.blokDene(p, 1)) lmSearch(p, s, self.b_norm.ptr, m.n_embd) else if (p.ith == 0) {
+                    s.token = self.blok_tok[0];
+                }
             } else {
-                ops.mulMat(p, m.output, self.b_norm.ptr, 1, self.logits.ptr);
-                p.barrier();
+                self.lmHead(p);
             }
         }
         // ggml_graph_compute_thread: son barrier
         p.barrier();
+        olc.isaret(p.ith, if (self.want_all and self.trace_k > 0) .out_dog else if (self.want_logits) .out_tek else .out_yok);
+        olc.pmuBit(1);
+        if (p.ith == 0) olc.say(.n_graph, 1);
     }
 
     /// llama_model_qwen35::graph::build_layer_attn_linear

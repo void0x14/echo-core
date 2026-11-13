@@ -439,6 +439,9 @@ pub const TinyBlasQ0 = struct {
 /// maddubs(a_u8, w) + vpaddw. Düzeltme 64·Σw her i16 şeridi için önceden hesaplanır (mod 2^16).
 /// Çift (2p, 2p+1) = [16B ölçek][16B ölçek][32B düz.][32B düz.][256B quant][256B quant] → blok 304 bayt.
 pub const R8_BLOCK = 304;
+/// ECHO_NT (yalnız deney): katman ağırlığı okumalarında önbelleği kirletmeme yolu (GemmR8.nt olanlar).
+/// 0 kapalı, 1 prefetchnta, 2 okuduktan sonra clflushopt, 3 vmovntdqa (yalnız R16 nicem baytları)
+pub var nt_yol: u8 = 0;
 const R8_NC = 4;
 const R8_ASM = true;
 
@@ -655,7 +658,7 @@ fn r16End(comptime nc: usize) []const []const u8 {
     return e;
 }
 
-fn r16Inner(comptime nc: usize, comptime with_end: bool) []const u8 {
+fn r16Inner(comptime nc: usize, comptime with_end: bool, comptime nt: bool) []const u8 {
     const E = if (with_end) r16End(nc) else &[_][]const u8{};
     var t: []const u8 = "";
     var ei: usize = 0;
@@ -665,7 +668,12 @@ fn r16Inner(comptime nc: usize, comptime with_end: bool) []const u8 {
             for (0..2) |h| {
                 const w = 96 + 64 * j + 32 * h;
                 const acc = (if (h == 0) 8 else 12) + c;
-                t = t ++ if (j == 0)
+                if (nt) t = t ++ std.fmt.comptimePrint("vmovntdqa {d}(%[w]), %%ymm0\n", .{w});
+                t = t ++ if (nt and j == 0)
+                    std.fmt.comptimePrint("vpmaddubsw %%ymm0, %%ymm1, %%ymm0\nvpsubw {d}(%[w]), %%ymm0, %%ymm{d}\n", .{ 32 + 32 * h, acc })
+                else if (nt)
+                    std.fmt.comptimePrint("vpmaddubsw %%ymm0, %%ymm1, %%ymm0\nvpaddw %%ymm0, %%ymm{0d}, %%ymm{0d}\n", .{acc})
+                else if (j == 0)
                     std.fmt.comptimePrint("vpmaddubsw {d}(%[w]), %%ymm1, %%ymm0\nvpsubw {d}(%[w]), %%ymm0, %%ymm{d}\n", .{ w, 32 + 32 * h, acc })
                 else
                     std.fmt.comptimePrint("vpmaddubsw {0d}(%[w]), %%ymm1, %%ymm0\nvpaddw %%ymm0, %%ymm{1d}, %%ymm{1d}\n", .{ w, acc });
@@ -683,22 +691,22 @@ fn r16Inner(comptime nc: usize, comptime with_end: bool) []const u8 {
     return t;
 }
 
-fn r16Asm(comptime nc: usize) []const u8 {
+fn r16Asm(comptime nc: usize, comptime nt: bool) []const u8 {
     @setEvalBranchQuota(800000);
     var t: []const u8 = "vxorps %%ymm2, %%ymm2, %%ymm2\n";
     for (0..nc) |c| t = t ++ std.fmt.comptimePrint("vmovaps %%ymm2, {d}(%[cv])\nvmovaps %%ymm2, {d}(%[cv])\n", .{ 64 * c, 64 * c + 32 });
-    t = t ++ r16Inner(nc, false);
+    t = t ++ r16Inner(nc, false, nt);
     t = t ++ "dec %[cnt]\njz 2f\n.p2align 4\n1:\n";
     var adv: []const u8 = "add $608, %[w]\n";
     for (0..nc) |c| adv = adv ++ std.fmt.comptimePrint("add $34, {s}\n", .{r8_bn[c]});
-    t = t ++ adv ++ r16Inner(nc, true);
+    t = t ++ adv ++ r16Inner(nc, true, nt);
     t = t ++ "dec %[cnt]\njnz 1b\n2:\n" ++ adv;
     for (r16End(nc)) |x| t = t ++ x;
     return t;
 }
 
 /// 16 satırlık R16 grubu × ilk nc sütun → cv[c] (16 f32).
-pub fn r16xN(comptime nc: usize, w0: [*]const u8, b: [4][*]const q.BlockQ80, nb: usize, cv: *align(32) [4][16]f32) void {
+pub fn r16xN(comptime nc: usize, comptime nt: bool, w0: [*]const u8, b: [4][*]const q.BlockQ80, nb: usize, cv: *align(32) [4][16]f32) void {
     var st: [4][32]i16 align(32) = undefined; // sütun başına A, B (2 × 32 B)
     var w = w0;
     var b0 = b[0];
@@ -706,7 +714,7 @@ pub fn r16xN(comptime nc: usize, w0: [*]const u8, b: [4][*]const q.BlockQ80, nb:
     var b2 = b[2];
     var b3 = b[3];
     var cnt = nb;
-    asm volatile (r16Asm(nc)
+    asm volatile (r16Asm(nc, nt)
         : [w] "+r" (w),
           [b0] "+r" (b0),
           [b1] "+r" (b1),
@@ -730,6 +738,26 @@ pub const GemmR8 = struct {
     ith: usize,
     /// H56: a R16 düzeninde (m % 16 == 0)
     r16: bool = false,
+    /// katman ağırlığı (ECHO_NT yolları yalnız bunlarda)
+    nt: bool = false,
+
+    inline fn ntOnce(self: *const GemmR8, g: usize, g0: usize, groups: usize, glen: usize) void {
+        if (!self.nt or nt_yol != 1) return;
+        if (g == g0) ntPf(self.a + g * glen, glen);
+        if (g + 1 < groups) ntPf(self.a + (g + 1) * glen, glen);
+    }
+    inline fn ntSonra(self: *const GemmR8, g: usize, glen: usize) void {
+        if (!self.nt or nt_yol != 2) return;
+        var i: usize = 0;
+        while (i < glen) : (i += 64) asm volatile ("clflushopt (%[p])"
+            :
+            : [p] "r" (self.a + g * glen + i),
+            : .{ .memory = true });
+    }
+    fn ntPf(p: [*]const u8, n: usize) void {
+        var i: usize = 0;
+        while (i < n) : (i += 64) @prefetch(p + i, .{ .locality = 0 });
+    }
 
     pub const GB = 4; // 32 satır / iş parçası
 
@@ -756,6 +784,8 @@ pub const GemmR8 = struct {
         const glen = self.nb * R8_BLOCK;
         const per = (glen / 64 + (n - j0) / 4) / @max((n - j0) / 4, 1) + 1;
         for (g0..g1) |g| {
+            defer self.ntSonra(g, glen);
+            self.ntOnce(g, g0, groups, glen);
             var j: usize = j0;
             var pf: usize = 0;
             const nxt = self.a + (g + 1) * glen;
@@ -788,6 +818,8 @@ pub const GemmR8 = struct {
         const glen = self.nb * R16_BLOCK;
         const per = (glen / 64 + (n - j0) / 4) / @max((n - j0) / 4, 1) + 1;
         for (g0..g1) |g| {
+            defer self.ntSonra(g, glen);
+            self.ntOnce(g, g0, groups, glen);
             var j: usize = j0;
             var pf: usize = 0;
             const nxt = self.a + (g + 1) * glen;
@@ -812,7 +844,7 @@ pub const GemmR8 = struct {
         const b0 = self.b + self.ldb * j0;
         var bs: [4][*]const q.BlockQ80 = @splat(b0);
         inline for (1..nc) |c| bs[c] = b0 + c * self.ldb;
-        r16xN(nc, self.a + g * self.nb * R16_BLOCK, bs, self.nb, &cv);
+        if (self.nt and nt_yol == 3) r16xN(nc, true, self.a + g * self.nb * R16_BLOCK, bs, self.nb, &cv) else r16xN(nc, false, self.a + g * self.nb * R16_BLOCK, bs, self.nb, &cv);
         inline for (0..nc) |c| @memcpy(self.c[self.ldc * (j0 + c) + g * 16 ..][0..16], &cv[c]);
     }
 

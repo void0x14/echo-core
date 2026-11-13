@@ -772,5 +772,138 @@ markmap:
     - H03: maske tokenlar her turda ek yük, kabul %16 (10/63). K=1..4, kayma 0,1 ve 0,3 denendi (8 koşu); en iyisi K=1 (27 tok/s), baseline'ın yarısı.
     - H10: araç çağrısında hızlandırıyor ve çağrıyı geçerli kılıyor. Sohbet ve araçsız istek değişmiyor. Kayıpsız değil, yalnız çağrı iskeleti zorlanıyor. Açık: tek şema ile ölçüldü.
     - `--no-ngram` artık n-gram'ı kapatıyor; önceden `--fast` bunu geçersiz kılıyordu.
+- **10 Kas — B tek geçiş bedeli** (1 çekirdek, 1 thread: `taskset -c 0`, `ECHO_THREADS=1`, `ECHO_SKIP=` boş, `-t 1`; IVF ve n-gram/grammar kapalı; 2 ısınma, 7 tekrarın medyanı; Qwen3.5-0.8B-Q8_0; derleme HEAD `776c9a2`)
+  | B | işlenen tok/s | geçiş/s | bedel |
+  |---:|---:|---:|---:|
+  | 1 | 23,98 | 23,98 | 1,00 |
+  | 2 | 43,70 | 21,85 | 1,10 |
+  | 4 | 69,29 | 17,32 | 1,38 |
+  | 8 | 97,31 | 12,16 | 1,97 |
+  | 16 | 122,58 | 7,66 | 3,13 |
+  | 32 | 142,01 | 4,44 | 5,40 |
+  - Bedel = B tokenlık geçişin süresi / 1 tokenlık geçişin süresi (1,00 = bedava). Hesap: B × tok/s(1) / tok/s(B).
+  - Taban (aynı koşul, tek token üretimi): tg32 = 24,26 tok/s, tg128 = 24,17 tok/s. Haritadaki tg32 = 57,9 (1 çekirdek) IVF ve n-gram açıkken ölçülmüştü, bu tabanla karşılaştırılamaz.
+  - Geçişin ~%86'sı sabit yük (ağırlık okuma, LM head), token başına ~%14. B=16'dan 32'ye 16 ek token tok/s'yi yalnız %16 artırıyor.
+  - Durum katmanları (`qwen35.zig`): 24 ana katmanın 18'i durum katmanı, 6'sı dikkat katmanı (satır 114–115, 161). Durum katmanı başına 1.122.304 bayt (conv 73.728 + SSM 1.048.576, f32); 18 katman ~19,3 MiB, token sayısıyla büyümez. Dikkat katmanlarının KV'si büyür.
+  - Geri sarma var: `restore` (satır 712–721, batch içi j. token), `snapshot` / `rollback` (725–749), `kaydet` / `yukle` (767–787), `clear` (789).
+  - ⚠️ `echo-core-zig/src/llama/sampler.zig:36` derlenmiyor (çalışma ağacında, commit edilmemiş, dosya sonu hatası). Çalışma ağacı `zig build` ile derlenmiyor; ölçüm temiz HEAD derlemesiyle yapıldı.
+  - Komut: `env ECHO_THREADS=1 ECHO_SKIP= taskset -c 0 <bin> --llama-bench -m <model> -t 1 --lm-ivf 0,0 --ngram 0 --grammar 0 --p6 0 --snap 0 --memory 0 -p B -n 0 -r 7`
+- **10 Kas — Sezaryen fikir alışverişi**
+  - [ ] **Denenecek — Hızlı ağırlık yazma** (Claude'un kozu; kullanıcı reddetti: tarif değil, ama ayrıca denenecek)
+    - Qwen3.5'in 18 DeltaNet katmanında her token ile yeniden yazılan durum matrisi var: 16×128×128 (rs_state, `qwen35.zig:478`, `:487`; `gatedDeltaNet` `:1107`). `ssm_alpha` ve `ssm_beta` bu matris değil, 1024×16 ağırlıklar (`ArastirmaModelleri/Qwen3.5-0.8B-Q8_0_tensor_analysis.txt:56-66`).
+    - Fikir: partikülü token olarak değil, bu matrise doğrudan anahtar→değer yazımı olarak emdirmek.
+    - Kaynak: Schlag/Irie/Schmidhuber, ICML 2021; Yang/Kautz/Hatamizadeh, ICLR 2025 (Gated Delta Networks).
+    - Ölçülmedi.
+  - **Kullanıcı tarifi — ultra birleşik oda**: prefill ve üretim tek odada; a→b hattı, köprü, transfer yok; partikül yaratıldığı anda mıknatısla çekilir.
+    - Sorun tanımı: her token için CPU → önbellekler → RAM → geri döngüsü (7 babayiğit: yazmaç, L1, L2, L3, bellek denetleyici, bellek yolu, RAM).
+    - Geçişin ~%86'sı sabit yük (B tablosu).
+  - **Doğrulama / lossless şartı** (Leviathan 2023, DeepMind Chen 2023): kullanıcı tarafından geçersiz sayıldı.
+  - **Kaynak taraması 10 Kas**
+    - (a) Kullanıcı terimleriyle ~110 kaynak, 31 tam metin: tarifin bütünü literatürde yok.
+    - (b) Sektör terimleriyle 45 kaynak, 33 tam metin: eğitimsiz ve katman atlamasız en yakınlar ESP, Jacobi/Lookahead, PTD. Hiçbirinde 1 çekirdek ölçümü yok.
+    - Yan bulgu: GGUF'ta motorun kullanmadığı eğitilmiş MTP bloğu var. `blk.24` tam katman (attn, ffn) artı `nextn.eh_proj / enorm / hnorm / shared_head_norm`; `nextn_predict_layers=1`. Motor 0–23'ü yükler (`qwen35.zig:113–114`).
 - **Kayıtlar**
   - `docs/oturum-dokumu/` → 8–10 Kas döküm + analiz
+
+## 🌀 11 Kas — Tarif (kullanıcının kendi terimleriyle)
+- **1. İşlemci bir tarif makinesi**
+  - Her hücre, her nokta %100 kullanılabilir; çekirdek bizi seçmez, biz onu seçeriz
+  - İşlemci tahmin edemez; tarif uzayında senin istediğini yapar, o tahmin ettiğini sanır
+  - Black box hacking gibi: istek at, gelen cevaba bak, ona göre işini yap; "mümkün değil" ayakları geç
+  - Hiçbir şeyi tasarlandığı gibi kullanmam, her zaman kendi çıkarım için; "ya öyle değilse?"
+- **2. Fırtına**
+  - Komutan (Core 1): 3 emir, ortaya konuşur, koordine eder
+  - Ordu (Core 2–3): kendi kimlikleri; kaos cep evrenlerini ortadaki emirden kendine çeker
+  - Yeşil bulut / mikro tarif: atlı, takım taklavatı kontrol eder, buluta gönderir; kararana kadar içine alır, süblimleşir
+  - Kara delik = fırtınanın gözü = dinginlik; mor = çevre, rüzgâr hızlanır, hava soğur, tam kaos
+  - Bitince yerçekimiyle çakılma → düşüş **Infinity Fabric** → **IO die** (CCD→cIOD, şemayla doğrulandı)
+- **3. Verim yalan, efficiency gerçek**
+  - Ortak yok; devir daim, takım taklavat var; uyursan ölürsün; fırıncı gibi sürekli üretim
+  - "L1 L2 L3'te çalışmazsak hızlı olamayız" yanlış; her nokta tasarım harikası
+- **4. CPU'yu depolama birimi olarak kullanma**
+  - Veri her daim CPU'da dolaşır, kan hücreleri / alyuvar gibi; sabit yerde durmaz, duramaz
+  - İhtiyaç olunca ters kara delik açar, içine patlama yapar, bir anda veri gelir (bum)
+  - RAM brute force; GPU daha zalim brute force; tembellerin işi
+  - Ne reuse ne recompute: "önceden hesaplananı saklamak, her token için baştan hesaplamaktan verimli" varsayımına 180° karşı; tarifim buna bin basar
+  - İlk ham hâli (Gemini'ye giden birleşik prompt): veri dondurulup saklanmaz, işlem hâlinde tutulur; sürekli matematik işlemden geçer; gönderim başarılı → sonlandıran sinyal; başarısız → ters işlem, orijinal veri geri
+- **5. Veri hiçbir hücreye ait değil**
+  - İşlemci bizzat Satürn, veriler halkası; işlemci kara delik, veriler içinde kara delik
+  - CRT monitör gibi: içe vakumlayıp bomba etkisiyle tükürür; sonsuza kadar işlem
+- **6. Dalga = kolektif bilinç = paralellik**
+  - Dalga sistematikleştikçe paralel performans parabolik artar; 6–8 haneli kazanım
+  - Sıradan paralelliğe karşı: çeyrek çekirdek, hatta çeyreğin çeyreği çekirdekle bu iş yapılır; paralellik gerçekten 100000 kat getirmiyorsa paralellik yapma
+- **7. Zero security**
+  - Bellek zaten güvenli değil; güvenli yapma takıntısı finansal korkudan; bende yok
+  - Her şey ortada; patlatmak isteyen gelsin; gerekirse sıfırdan tuğla tuğla kurarız
+  - "Mümkün mü" sormayız; "nasıl hile yaparım, hileli zarı kendi hileli zarımla oynarım" sorarız
+- **8. Sinyal zayıflamaz; zayıflarsa kendi kendini şarj**
+  - CPU küçük, mesafe kısa; uzun yol katetmiyoruz
+  - Redstone yenileyici gibi, CPU'nun kendi parçalarından; 0.85 ise risk-getiri yapıp en yakın birime gider, charge olur
+  - Reverse'e gerek yok: birimler 7/24 elektrik alır, geçerken çalar
+  - Parçacık hızlandırıcı: veri kaos, her saniye hızlanır, kendi enerji koridorunu yaratır, speedforce, sonsuz döngü
+  - Racetrack / manyetik bellek iş yaş: parazit var (kuantum düzeyinde bile hattın temiz olduğunu bilemezsin), uzun teller CPU'ya sığmaz, yan yana manyetizma birbirini etkiler; biz sıfırdan tasarlamayız, var olan CPU'da yaparız
+  - "Bayrak eskiyince" diye kitabın ortasından konuşulmaz: önce ortam (pist güneş alıyor mu, ne kadar süre, bayrağın boyu, nasıl taşınıyor); değiştirme pit stop değil, cebinde yedek taşır (hakemin yedek kartı gibi)
+- **9. Her daim operasyonel**
+  - Kusursuzluk istemiyorum; her ne olursa olsun operasyonel kalmalı
+  - Gerekirse 12 milyon tarifi içinde dondursun ama kararı kendi versin; özel durum seti yazmam (yazarsam forensic gerekir)
+  - Bugünkü motorların derdi: sorun çıkınca PR/issue/tek tek destek ekleme
+- **10. Determinizmden nefret — sezai yöntemi**
+  - Çalışıyorsa formülüze etme, bırak çalışsın; sezgisel = aralıksız kaynak tüketip sezgiyi yakalamak
+  - "Sat koy amına koy" = sezai yöntemi
+  - X katmanı: israf et (keşif olabil); Y katmanı: israf etme (throughput düşmesin)
+- **11. Ne statik ne dinamik — RDSM**
+  - a/b/c/d değiliz; yeri gelir doğrusal, yeri gelir parabolik, yeri gelir asenkron (biri 10k biri 10)
+  - Sonsuz senaryo odaklı; promptu gireni görev neyi gerektiriyorsa ona hizmet; boşa brute force yok
+- **12. Hacker, araştırmacı değil**
+  - Zero security çıkarım motoru; gerekirse zero day patlatır, 20 zafiyeti zincirler
+  - Mikrocode/BIOS zafiyetleri dahil; kendinde + nday/rapor/exploit sömürür; amaç başarmak, paramız yok
+- **13. Sabit başarı kuralı yok**
+  - "Başarılı şu sayılır" diyemezsin; iterasyon lazım; doğru/yanlış yok; israf da değerli; bilinmeze gidiyoruz
+- **14. Prefill / decode**
+  - Prefill = kas gücü; decode = bant genişliği / iletişim hızı / veriye ulaşılabilirlik
+  - Decode'u başaracağından emin; prefill için ayrı hileler var
+- **15. Ölçek**
+  - 800M'de çalışıyorum, sonra 3T'ye ölçekleyeceğim; model agnostik, parametre sayısı fark etmez
+  - 3T modelin %1'ini kullanıp tam performans; işlem gücünün de %1'i
+  - Quantization'a da karşıyım; o ayrı proje, şimdilik quantize modelle ilerliyorum
+- **16. Çalışma biçimi**
+  - Bana 10 yaşındakine anlatır gibi anlat; ben oradan karşı argüman üretirim, kendi tarifimi yaratırım
+  - Hızlandırıcıda dönen şeyler yalnız veriden oluşmaz; kendini kısıtlama, "bu mu şu mu" deme, "neden bu olmaz" diye sor; herkesin en saçma bulduğu şey asıl çözüm olabilir
+  - Konu basit, overengineering yok
+  - Checkpoint al, kazanımları md'ye yaz, bir alan seç, dalı genişlet, bitir, sonra diğerine geç
+  - Mindmap bir dizi değil; skill ve MCP
+  - Kafamda 1000'den fazla tarif, 12 zincir (chain exploit gibi birbirini tetikler); fırtına, listemin 2. katının 12. maddesi
+- **Not**
+  - ChatGPT tarifin hiçbir parçasını 1:1 tekniğe çeviremedi; sürekli bildiği şeye (ring buffer, thread pool, akademi) çevirip yüzey değiştirdi
+  - Kaynaklar baştan sona okundu: 1905 (329 s.; 1904 aynı konuşmanın dikey baskısı), 1207 (299 s.), `ryzen-5-3600-cpu-only-execution-checkpoint-2026-11-03.md` (ChatGPT Work çıktısı: tarifi ring buffer + checksum'a ve "kullanıcı alanından mümkün değil"e indirdi, kendi "Deney A"sını önerdi; tarif değil)
+  - Bu dal tarifin kaydı; teknik karşılık ve ölçüm ayrı aşama
+
+## 🌩 11 Kas — Fırtına keşfi ve token üreten yer
+- **Tarif kaydı ve görsel**
+  - Çizimin doğru okunuşu, anlamlandıramadıklarımız ve reddedilen eşleştirmeler: `docs/firtina/FIRTINA.md`
+  - Hareketli görsel: `docs/firtina/firtina-teknik.html` (oda = CPU; iki simetrik fırtına hücresi; enerji; ters üçgen → kasırga → vakum → dalış; ters yön)
+- **Odanın ölçülen haritası (belgesiz, bu işlemci)**
+  - İki simetrik yarı: {cpu0,1,2,6,7,8} ve {cpu3,4,5,9,10,11}; a ile a+6 aynı yer
+  - Ayrıntı: `echo-core-zig/benchmarks/kesif/c2c-2026-11-11.md`, `firtina-2026-11-11.md`
+- **Eski yolun duvarı: modelin tamamının bir kez düşme tavanı** (`benchmarks/kesif/dusus-2026-11-11.md`)
+  - | Düzen | tok/s tavanı | Kat Artışı |
+  - | 1 çekirdek, motorun bugünkü yerleşimi (4 KB sayfa) | 28,2 | 1,00x |
+  - | 1 çekirdek, 2 MB sayfa, vmovntdqa | 43,1 | 1,53x |
+  - | Sol yarı (3 çekirdek) | 49,2 | 1,74x |
+  - | Bütün oda (12 thread) | 44,7 | 1,59x |
+  - Sonuç: her token bütün modeli taşıdıkça duvar ~49 tok/s; 4 hane taşımayı yok etmekle gelir
+- **Token üreten yer: token_embd'den TR/EN/kod satırları CPU tarafında tek blok** (`ECHO_ODA_CIKIS=1`, varsayılan kapalı; `src/llama/oda.zig`; `benchmarks/kesif/oda-cikis-2026-11-11.md`)
+  - Seçilen: 248.320 satırdan 140.330; 270,2 MB → 152,7 MB
+  - | Çekirdek | Düzen | tg32 (tok/s) | tg128 (tok/s) | Kat Artışı |
+  - | 1 | ham kapalı | 21,7 | 22,2 | 1,00x |
+  - | 1 | ham açık | 29,6 | 28,1 | 1,36x / 1,27x |
+  - | 1 | D kapalı | 37,1 | 39,4 | 1,00x |
+  - | 1 | D açık | 37,1 | 39,1 | 1,00x / 0,99x |
+  - | 2 | ham kapalı | 32,4 | 32,4 | 1,00x |
+  - | 2 | ham açık | 40,2 | 38,7 | 1,24x / 1,19x |
+  - | 2 | D kapalı | 52,2 | 50,4 | 1,00x |
+  - | 2 | D açık | 53,0 | 54,4 | 1,02x / 1,08x (oynama içinde) |
+  - Normal kullanımda (D) kazanç yok: IVF zaten çıkış tablosunun küçük bir kısmını okuyor
+  - Doğruluk: D'de çıktı birebir; ham yolda 6 prompttan 1'i emojide ayrıştı; kalite ppl 17,72 → 17,63
+  - Blokta emoji, €, ₺, oklar yok
+- **Sıradaki**: duvar artık katmanlarda (~560 MB/token); 3. yol (model odada yaşar) için tarifin tekniği

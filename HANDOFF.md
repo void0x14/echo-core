@@ -350,3 +350,14 @@ llama-bench -m ../ArastirmaModelleri/<model>.gguf
   `src/kernels/qwen_linear.zig` (conv_dim + recurrent + forwardCore),
   `src/gguf/reader.zig` (nextn çıkarımı; ayrıca test bloklarının silinmesi diff'i büyütüyor).
 - Repoda test yoktur; CI/bench doğrulaması Bölüm 10'daki komutlarla elle yapılır.
+---
+
+## 13. Yeni yön: Sezaryen Modu
+
+- Amaç: autoregressive zinciri kırmak; dışarıda üretilen token/özellikleri modelin içine püskürtmek; motor seviyesinde model-agnostik tarif.
+- Belgeler: docs/sezaryen-modu/00-MANIFESTO.md, 01-ARASTIRMA.md, 02-FORMUL-VE-HACK.md, 03-DENEY-VE-MIMARI.md, 04-KAYNAKLAR.md.
+- Mindmap (tek dosya): q8-tg-yontem-haritasi.mindmap.html; "Sezaryen Modu — Tam Harita" dalı ana haritanın içinde, 11 alt dal (30 saniyelik özet, duvar, A/B, kanıt, hile, karar ağacı, deney, ilk adım, risk, sözlük, kaynaklar).
+- Duvar: MLSys 2026 hızlanma denklemi E = (1-alfa^(k+1))/((1-alfa)(k c+1)).
+- Kanıt bandı: PLD 2.4x, Lyanna 3.3x, ANPD 3.67x, MLSys adaptif 4.9x, DFlash 6.1x, CopyLoop 10.7x (özel model).
+- İlk somut adım: KV rollback/truncate + tek zincir doğrulama + n-gram drafter; sonra ESP embedding injection, sonra hidden-state reuse.
+- Kırmızı çizgi: model dosyası ve quantizasyon değişmez; adaptör motorun içinde; lossless ve task ayrı etiketlenir.

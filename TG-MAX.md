@@ -9,6 +9,12 @@ Kapsam: **yalnız CPU-only inference.** GPU/Vulkan yolu kapsam dışıdır; onun
 
 Sayaç modeli: `Qwen3.5-0.8B-Q8_0.gguf`. Ölçüm: `--llama-bench` (rastgele token, her tokende logit).
 
+## GEÇERSİZ: Bu belgedeki bütün yöntemler (2026-11-05)
+
+176 dakikada hiçbir baraj geçilmedi. Aşağıdaki **bütün yöntemler ve bütün "BİTTİ / KANIT / AÇIK" etiketleri geçersizdir**; kazanım sayılmaz, yön göstermez. Sayılar yalnız ölçüm kaydıdır. Prefill ile TG arasında atlamak yasaktır: tek yol seçilir, o yolda ilerlenir.
+
+Araştırma kapsamı: yalnız denenen yöntemler, yöntem başına tam 10 kaynak, çapraz karşılaştırma. Kayıt: `YONTEM-ARASTIRMA.md`.
+
 ## Durum
 
 | Yol | tg32 / tg128 | Not |

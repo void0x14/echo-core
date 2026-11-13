@@ -11,6 +11,9 @@ const rest = @import("rest.zig");
 const esp_mod = @import("esp.zig");
 const gorev = @import("gorev.zig");
 const sampler = @import("sampler.zig");
+const olc = @import("olc.zig");
+const canli = @import("canli.zig");
+var olc_maliyet: f64 = 0;
 
 const ArrayList = std.array_list.Managed;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -401,6 +404,20 @@ return struct {
         const rest_min = envNum("ECHO_REST_MIN", 3);
         var t_rd: u64 = 0; // ret sonrası yeniden işleme
         const t_bas = std.Io.Timestamp.now(s.io, .awake);
+        const olc_ac = std.c.getenv("ECHO_OLC") != null;
+        olc.sifirla();
+        olc.aktif = olc_ac or canli.ac;
+        if (canli.ac) canli.sifirla();
+        defer if (canli.ac and !olc_ac) {
+            olc.aktif = false;
+        };
+        const olc_g0 = olc.tsc();
+        defer if (olc_ac) {
+            olc.ekle(.gen, olc_g0);
+            olc.c[@intFromEnum(olc.C.n_gen)] = r.n_gen;
+            olc.aktif = false;
+            olc.yaz(@intCast(t_bas.untilNow(s.io, .awake).toNanoseconds()), olc_maliyet);
+        };
         // ECHO_TASLAK_IST=dosya: yalnız sayılar eklenir (içerik yazılmaz)
         defer if (std.c.getenv("ECHO_TASLAK_IST")) |yol| istYaz(s.io, std.mem.span(yol), .{ gc[0].deneme, gc[0].kabul, gc[0].onerilen, gc[1].deneme, gc[1].kabul, gc[1].onerilen, gc[2].deneme, gc[2].kabul, gc[2].onerilen, (t_taslak + t_rest) / 1_000_000, r.n_gen, @as(u64, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds())) / 1_000_000, t_dog / 1_000_000, t_es / 1_000_000, t_tek / 1_000_000, t_tek_tc / 1_000_000, t_rd / 1_000_000, dv_n[2], dv_ms[2] / 1_000_000, dv_n[3], dv_ms[3] / 1_000_000, dv_n[4], dv_ms[4] / 1_000_000, dv_n[5], dv_ms[5] / 1_000_000, dv_n[6], dv_ms[6] / 1_000_000, dv_n[7], dv_ms[7] / 1_000_000, dv_n[8], dv_ms[8] / 1_000_000 });
         while (r.n_gen < limit) {
@@ -488,7 +505,9 @@ return struct {
             const ng_ok = if (s.iskelet) |k| !k.aktif else true;
             if (if (ng_ok and d != null) &d.? else null) |dr| {
                 const room = @min(ng_max, limit - r.n_gen, s.ctx.n_ctx - s.ctx.head - 1);
+                const o_c0 = olc.tsc();
                 var m: usize = if (s.o.ngram and r.n_gen >= gc[0].sonraki) dr.chain(buf[0..@min(room, gc[0].boy)]) else 0;
+                olc.ekle(.ng_chain, o_c0);
                 var model_taslak = false;
                 var yol: usize = 0;
                 if (!(m >= ng_min and buf[0] == pending and s.ctx.trace_k >= m)) {
@@ -526,9 +545,15 @@ return struct {
                 if (m > 0) {
                     const td = std.Io.Timestamp.now(s.io, .awake);
                     const before = s.ctx.head;
+                    const o_s0 = olc.tsc();
                     s.ctx.snapshot();
+                    olc.ekle(.ng_snap, o_s0);
                     const tv = std.Io.Timestamp.now(s.io, .awake);
+                    const o_v0 = olc.tsc();
                     try s.ctx.decodeVerify(buf[0..m]);
+                    olc.ekle(.dec_dog, o_v0);
+                    olc.say(.n_dog, 1);
+                    olc.say(.pos_dog, m);
                     dv_ms[@min(m, 8)] += @intCast(tv.untilNow(s.io, .awake).toNanoseconds());
                     dv_n[@min(m, 8)] += 1;
                     var j: usize = 0;
@@ -544,8 +569,14 @@ return struct {
                     const nxt = s.ctx.verify_tokens[acc -| 1];
                     if (acc < m or stop_at != null) {
                         const trd = std.Io.Timestamp.now(s.io, .awake);
+                        const o_r0 = olc.tsc();
                         s.ctx.rollback(before);
+                        olc.ekle(.ng_roll, o_r0);
+                        const o_d0 = olc.tsc();
                         if (acc > 0) try s.ctx.decode(buf[0..acc]);
+                        olc.ekle(.dec_rd, o_d0);
+                        if (acc > 0) olc.say(.n_rd, 1);
+                        olc.say(.pos_rd, acc);
                         t_rd += @intCast(trd.untilNow(s.io, .awake).toNanoseconds());
                     }
                     t_dog += @intCast(td.untilNow(s.io, .awake).toNanoseconds());
@@ -561,11 +592,17 @@ return struct {
                         g.bekle = @min(g.bekle * 2, 512);
                     } else g.bekle = 1;
                     g.boy = if (acc == m) @min(g.boy * 2, ng_max) else std.math.clamp(acc * 2, ng_min, ng_max);
+                    if (canli.ac and acc > 0) canli.olay(&s.bpe, buf[0..acc], r.n_gen + acc, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds()));
                     for (buf[0..acc]) |t| {
                         try s.hist.append(t);
+                        const o_a0 = olc.tsc();
                         try dr.add(t);
+                        olc.ekle(.ng_add, o_a0);
                         if (s.iskelet) |k| k.gozle(s.bpe.piece(t));
-                        if (try yaz.add(t)) {
+                        const o_y0 = olc.tsc();
+                        const o_ys = try yaz.add(t);
+                        olc.ekle(.yaz, o_y0);
+                        if (o_ys) {
                             r.neden = "stop metni";
                             r.n_gen += 1;
                             return;
@@ -580,7 +617,11 @@ return struct {
                     continue;
                 }
             }
-            if (try yaz.add(pending)) {
+            if (canli.ac) canli.olay(&s.bpe, &.{pending}, r.n_gen + 1, @intCast(t_bas.untilNow(s.io, .awake).toNanoseconds()));
+            const o_y1 = olc.tsc();
+            const o_ys1 = try yaz.add(pending);
+            olc.ekle(.yaz, o_y1);
+            if (o_ys1) {
                 r.neden = "stop metni";
                 r.n_gen += 1;
                 try s.feed(&.{pending});
@@ -589,17 +630,24 @@ return struct {
             {
                 if (s.ctx.head + 1 > s.ctx.n_ctx) return error.ContextFull;
                 const t1 = std.Io.Timestamp.now(s.io, .awake);
+                const o_t0 = olc.tsc();
                 try s.ctx.decode(&.{pending});
+                olc.ekle(.dec_tek, o_t0);
+                olc.say(.n_tek, 1);
                 t_tek += @intCast(t1.untilNow(s.io, .awake).toNanoseconds());
                 const t2 = std.Io.Timestamp.now(s.io, .awake);
                 if (s.tc) |tc| try tc.decode(&.{pending});
                 t_tek_tc += @intCast(t2.untilNow(s.io, .awake).toNanoseconds());
                 try s.hist.append(pending);
             }
+            const o_a1 = olc.tsc();
             if (d) |*dr| try dr.add(pending);
+            olc.ekle(.ng_add, o_a1);
             if (s.iskelet) |k| k.gozle(s.bpe.piece(pending));
             r.n_gen += 1;
+            const o_n0 = olc.tsc();
             pending = s.next();
+            olc.ekle(.ornek, o_n0);
         }
         if (r.n_gen >= limit) r.neden = "-n sınırı";
     }
@@ -691,6 +739,7 @@ pub fn run(args: []const []const u8, a: Alloc, io: std.Io) !void {
 
 fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io: std.Io) !void {
     const o = o_;
+    canli.ac = std.c.getenv("ECHO_CANLI") != null;
     if (o.fast) {
         // tek düzen (10 Kas, "D"): katman atlama ve FFN budama yok; 18 atlama "0 0 0", FFN 1920 döngü üretiyordu
         _ = setenv("ECHO_NG_N", "2", 0);
@@ -752,6 +801,15 @@ fn runWith(comptime E: type, o_: *Opts, path: []const u8, bpe: Bpe, a: Alloc, io
         ctx.no_trace = true; // geri alma snapshot ile (H13)
     }
 
+    if (canli.ac) {
+        olc.pmu_ac = true;
+        try canli.kur(model, a);
+    }
+    if (std.c.getenv("ECHO_OLC") != null) {
+        olc_maliyet = olc.tscMaliyet();
+        olc.pmu_ac = std.c.getenv("ECHO_OLC_PMU") != null;
+        if (olc.pmu_ac) try olc.kalib(a);
+    }
     var obuf: [4096]u8 = undefined;
     var ow = std.Io.File.stdout().writer(io, &obuf);
     var s = SessionT(E){
@@ -821,6 +879,7 @@ fn cevapla(s: anytype, q: []const u8) !void {
     try s.out.flush();
     if (std.mem.eql(u8, r.neden, "context dolu"))
         std.debug.print("[context doldu ({d}/{d} token). /reset ile temizle ya da -c ile büyüt]\n", .{ s.ctx.head, s.ctx.n_ctx });
+    if (canli.ac) canli.son(r.n_prompt, r.n_gen, @as(f64, @floatFromInt(r.n_gen)) / (@as(f64, @floatFromInt(@max(r.t_gen, 1))) / 1e9), r.neden);
     if (s.o.stats) {
         const tp = @as(f64, @floatFromInt(r.n_prompt)) / (@as(f64, @floatFromInt(@max(r.t_prompt, 1))) / 1e9);
         const tg = @as(f64, @floatFromInt(r.n_gen)) / (@as(f64, @floatFromInt(@max(r.t_gen, 1))) / 1e9);

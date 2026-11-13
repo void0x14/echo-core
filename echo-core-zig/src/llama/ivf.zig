@@ -5,6 +5,8 @@ const q = @import("quants.zig");
 const vec = @import("vec.zig");
 const ops = @import("ops.zig");
 const sgemm = @import("sgemm.zig");
+const olc = @import("olc.zig");
+const canli = @import("canli.zig");
 const F8 = @Vector(8, f32);
 const Alloc = std.mem.Allocator;
 /// Varsayılan LM head yolu: IVF (yaklaşık, yalnız top-1). 4096 küme, nprobe 128 (TG 1000 ayarı; eski 512).
@@ -213,6 +215,10 @@ fn makeRuntime(w: ops.Mat, l: usize, cq: []align(64) u8, assign: []const u32, a:
     sgemm.repackQ80x8(@ptrCast(@alignCast(cq.ptr)), cr8.ptr, l, nb);
     const r = try a.create(Runtime);
     r.* = .{ .l = l, .k = w.k, .nb1 = w.nb1, .cq = cq, .start = start, .order = order, .rows = rows, .g8 = g8, .pos8 = pos8, .r8 = r8, .cr8 = cr8 };
+    olc.kaydet(.ivf_rows, rows.ptr, rows.len);
+    olc.kaydet(.ivf_r8, r8.ptr, r8.len);
+    olc.kaydet(.ivf_cq, cq.ptr, cq.len);
+    olc.kaydet(.ivf_cr8, cr8.ptr, cr8.len);
     return r;
 }
 
@@ -351,6 +357,9 @@ pub const Batch = struct {
     /// Tek thread, scoreRange'den önce.
     pub fn begin(s: *Batch, n: usize) void {
         s.n = n;
+        olc.cikis(s.ix.cr8.ptr, s.ix.cr8.len);
+        olc.say(.b_n, 1);
+        olc.say(.b_pos, n);
         @memset(s.mask, 0);
     }
 
@@ -371,6 +380,7 @@ pub const Batch = struct {
             var any: u64 = 0;
             for (s.mask[c * MW ..][0..MW]) |w| any |= w;
             if (any == 0) continue;
+            if (canli.ac and olc.aktif) canli.ramOku(s.ix.start[c], s.ix.start[c + 1], s.ix.order.len);
             var a = s.ix.g8[c];
             const e = s.ix.g8[c + 1];
             while (a < e) {
@@ -400,6 +410,13 @@ pub const Batch = struct {
         const n4 = (nc + 3) / 4 * 4;
         for (nc..n4) |i| cols[i] = cols[nc - 1];
         var cv: [4]F8 align(32) = undefined;
+        olc.cikis(ix.r8.ptr + p.first * rb * sgemm.R8_BLOCK, (p.last - p.first) * rb * sgemm.R8_BLOCK);
+        olc.say(.b8_slots, (p.last - p.first) * 8);
+        if (olc.aktif) {
+            var nr: u64 = 0;
+            for (ix.pos8[p.first * 8 .. p.last * 8]) |ps| nr += @intFromBool(ps != std.math.maxInt(u32));
+            olc.say(.b8_rows, nr);
+        }
         for (p.first..p.last) |g| {
             const w = ix.r8.ptr + g * rb * sgemm.R8_BLOCK;
             var j: usize = 0;
@@ -427,6 +444,8 @@ pub const Batch = struct {
                 const c = s.best[th * MAXR + r];
                 for (c.pos) |ps| {
                     if (ps == std.math.maxInt(u32)) continue;
+                    olc.cikis(ix.rows.ptr + ps * ix.nb1, ix.nb1);
+                    olc.say(.red_rows, 1);
                     const v = q.dotQ80Q80(ix.k, @ptrCast(@alignCast(ix.rows.ptr + ps * ix.nb1)), xq + r * rb);
                     const t = ix.order[ps];
                     if (v > bv or (v == bv and t < bt)) {
@@ -480,6 +499,7 @@ pub const Search = struct {
         const dr = (ix.l + nth - 1) / nth;
         const c0 = @min(dr * ith, ix.l);
         const c1 = @min(c0 + dr, ix.l);
+        olc.cikis(ix.cq.ptr + c0 * ix.nb1, (c1 - c0) * ix.nb1);
         for (c0..c1) |c| s.scores[c] = q.dotQ80Q80(ix.k, @ptrCast(@alignCast(ix.cq.ptr + c * ix.nb1)), x);
     }
 
@@ -488,6 +508,7 @@ pub const Search = struct {
         const sel = topSel(s.scores, s.ord, s.nprobe);
         var n: usize = 0;
         for (sel) |c| {
+            if (canli.ac and olc.aktif) canli.ramOku(s.ix.start[c], s.ix.start[c + 1], s.ix.order.len);
             var a = s.ix.start[c];
             const e = s.ix.start[c + 1];
             while (a < e) {
@@ -498,11 +519,14 @@ pub const Search = struct {
             }
         }
         s.n_pieces = n;
+        olc.say(.srch_n, 1);
     }
 
     pub fn scan(s: *const Search, x: [*]const q.BlockQ80, piece: usize, b: *Best) void {
         const ix = s.ix;
         const p = s.pieces[piece];
+        olc.cikis(ix.rows.ptr + p.first * ix.nb1, (p.last - p.first) * ix.nb1);
+        olc.say(.srch_rows, p.last - p.first);
         for (p.first..p.last) |r| {
             const v = q.dotQ80Q80(ix.k, @ptrCast(@alignCast(ix.rows.ptr + r * ix.nb1)), x);
             const t = ix.order[r];
