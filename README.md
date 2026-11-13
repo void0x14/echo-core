@@ -1,4 +1,9 @@
 # echo-core
+**README'de ki hız oranları teknik olarak doğru, fakat bu kullanılabilir hız oranları demek değil.
+  Tıpkı robot süpürgeye inanılmaz rakamda çöp toplaması emredilmesi ve onunda açığı kullanarak kendi çöplerini çıkartıp tekrar toplaması ile 1:1 aynı mevzu yaşandı bızım burdada.
+  Fakat önümüzde ki çeyrekler de bu sorunuda çözüp, bizzat bu hızlara chat completions yaparken çıkacağız :)
+  Esenlikler dilerim efendim...
+  Projeye ilgi duyan, konuşmak isteyen vs olursa telegramda her daim aktifim oradan ulaşabilirsiniz...**
 
 ## 5 dakikada başla
 
